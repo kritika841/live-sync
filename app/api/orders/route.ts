@@ -17,6 +17,7 @@ export async function GET(request: Request) {
   const requestedTab = url.searchParams.get("tab") || "new";
   const tab = (["new", "ready", "shipped", "delivered", "rto", "all"].includes(requestedTab) ? requestedTab : "new") as OrderTab;
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+  const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
   const where = [sqlForTab(tab)];
   const values: unknown[] = [];
@@ -49,7 +50,7 @@ export async function GET(request: Request) {
       pickup_location AS pickupLocation, awb, courier, products_json AS productsJson,
       synced_at AS syncedAt
     FROM orders WHERE ${whereSql}
-    ORDER BY COALESCE(NULLIF(order_date, ''), created_at) DESC, id DESC
+    ORDER BY COALESCE(NULLIF(order_date, ''), created_at) ${sort}, id ${sort}
     LIMIT ? OFFSET ?
   `).bind(...values, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
 
@@ -58,7 +59,7 @@ export async function GET(request: Request) {
   for (const row of grouped.results) {
     const total = Number(row.total || 0);
     const bucket = statusTab(row.status);
-    counts[bucket] += total;
+    if (bucket !== "other") counts[bucket] += total;
     counts.all += total;
   }
   const stateRows = await runtime.DB.prepare("SELECT key, value FROM sync_state").all<{ key: string; value: string }>();

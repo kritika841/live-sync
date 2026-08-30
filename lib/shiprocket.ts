@@ -55,6 +55,29 @@ export async function resolveChannel(runtime: RuntimeEnv, token: string) {
 
 const stringValue = (value: unknown) => value == null ? "" : String(value);
 const numberValue = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
+const monthNumbers: Record<string, string> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+};
+
+export function normalizeShiprocketDate(value: unknown) {
+  const source = stringValue(value).trim();
+  if (!source) return "";
+  const named = source.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (named) {
+    const [, day, monthName, year, rawHour, minute, second = "00", meridiem] = named;
+    let hour = Number(rawHour) % 12;
+    if (meridiem.toUpperCase() === "PM") hour += 12;
+    const month = monthNumbers[monthName.toLowerCase()];
+    return `${year}-${month}-${day.padStart(2, "0")}T${String(hour).padStart(2, "0")}:${minute}:${second}+05:30`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(source)) {
+    const normalized = source.replace(" ", "T");
+    return /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+05:30`;
+  }
+  const parsed = new Date(source);
+  return Number.isNaN(parsed.getTime()) ? source : parsed.toISOString();
+}
 
 export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
   const syncedAt = new Date().toISOString();
@@ -87,7 +110,8 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
         stringValue(order.customer_email), stringValue(order.customer_phone),
         stringValue(order.customer_city || order.billing_city || order.shipping_city),
         stringValue(order.customer_state || order.billing_state || order.shipping_state),
-        stringValue(order.order_date || order.created_at), stringValue(order.created_at), stringValue(order.updated_at),
+        normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),
+        normalizeShiprocketDate(order.created_at), normalizeShiprocketDate(order.updated_at),
         stringValue(order.status || shipment.status || shipment.shipment_status),
         numberValue(order.status_code || shipment.status_code) || null,
         stringValue(order.payment_method), stringValue(order.payment_status), numberValue(order.total),

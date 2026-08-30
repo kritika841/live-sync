@@ -1,6 +1,7 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { statusTab } from "../lib/order-status";
 
 type TabKey = "new" | "ready" | "shipped" | "delivered" | "rto" | "all";
 type Order = {
@@ -39,14 +40,7 @@ function formatDate(value: string) {
 }
 
 const formatCurrency = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value || 0);
-const statusClass = (status: string) => {
-  const s = status.toLowerCase();
-  if (s.includes("rto") || s.includes("return")) return "rto";
-  if (s.includes("delivered")) return "delivered";
-  if (s.includes("ready") || s.includes("awb") || s.includes("manifest")) return "ready";
-  if (s.includes("ship") || s.includes("transit") || s.includes("pickup")) return "shipped";
-  return "new";
-};
+const statusClass = (status: string) => statusTab(status);
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [tab, setTab] = useState<TabKey>("new");
@@ -58,6 +52,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [pickup, setPickup] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [filterOpen, setFilterOpen] = useState(false);
   const [data, setData] = useState<OrdersResponse>(emptyData);
   const [loadedQuery, setLoadedQuery] = useState("");
@@ -65,7 +60,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [error, setError] = useState("");
 
   const query = useMemo(() => {
-    const params = new URLSearchParams({ tab, page: String(page) });
+    const params = new URLSearchParams({ tab, page: String(page), sort });
     if (deferredSearch) params.set("search", deferredSearch);
     if (payment) params.set("payment", payment);
     if (courier) params.set("courier", courier);
@@ -73,7 +68,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     return params.toString();
-  }, [tab, page, deferredSearch, payment, courier, pickup, from, to]);
+  }, [tab, page, sort, deferredSearch, payment, courier, pickup, from, to]);
 
   const loading = loadedQuery !== query;
 
@@ -165,9 +160,12 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
 
           <div className="toolbar">
             <label className="search"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} aria-label="Search orders" placeholder="Search order, customer, AWB or SKU" /></label>
-            <button className={`filter-button ${filterOpen ? "active" : ""}`} onClick={() => setFilterOpen((value) => !value)}>
-              Filters{appliedFilters > 0 && <b>{appliedFilters}</b>}<span>＋</span>
-            </button>
+            <div className="toolbar-actions">
+              <label className="sort-control"><span>Sort</span><select value={sort} onChange={(event) => { setSort(event.target.value as "newest" | "oldest"); setPage(1); }} aria-label="Sort orders by order date"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+              <button className={`filter-button ${filterOpen ? "active" : ""}`} onClick={() => setFilterOpen((value) => !value)}>
+                Filters{appliedFilters > 0 && <b>{appliedFilters}</b>}<span>＋</span>
+              </button>
+            </div>
           </div>
 
           {filterOpen && (

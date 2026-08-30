@@ -70,14 +70,24 @@ export async function POST(request: Request) {
     if (/^OUT FOR DELIVERY$/i.test(status)) {
       const outForDeliveryAt = normalizeShiprocketDate(payload.out_for_delivery_date || payload.out_for_delivery_at || payload.current_timestamp) || now;
       if (shiprocketOrderId) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE id = ?").bind(outForDeliveryAt, shiprocketOrderId).run();
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE id = ?").bind(outForDeliveryAt, outForDeliveryAt, shiprocketOrderId).run();
       } else if (shipmentId) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE shipment_id = ?").bind(outForDeliveryAt, shipmentId).run();
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE shipment_id = ?").bind(outForDeliveryAt, outForDeliveryAt, shipmentId).run();
       } else if (awb) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE awb = ?").bind(outForDeliveryAt, awb).run();
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE awb = ?").bind(outForDeliveryAt, outForDeliveryAt, awb).run();
       } else if (channelOrderId) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE channel_order_id = ?").bind(outForDeliveryAt, channelOrderId).run();
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE channel_order_id = ?").bind(outForDeliveryAt, outForDeliveryAt, channelOrderId).run();
       }
+    }
+    if (/UNDELIVERED|NDR/i.test(status)) {
+      const reason = textValue(payload.reason || payload.ndr_reason || payload.activity);
+      const attempts = intValue(payload.attempts || payload.ndr_attempts) || 0;
+      const raisedAt = normalizeShiprocketDate(payload.ndr_raised_at || payload.current_timestamp) || now;
+      const update = `UPDATE orders SET ndr_reason = COALESCE(NULLIF(?, ''), ndr_reason), ndr_attempts = CASE WHEN ? > 0 THEN ? ELSE ndr_attempts END, ndr_raised_at = ? WHERE `;
+      if (shiprocketOrderId) await runtime.DB.prepare(`${update}id = ?`).bind(reason, attempts, attempts, raisedAt, shiprocketOrderId).run();
+      else if (shipmentId) await runtime.DB.prepare(`${update}shipment_id = ?`).bind(reason, attempts, attempts, raisedAt, shipmentId).run();
+      else if (awb) await runtime.DB.prepare(`${update}awb = ?`).bind(reason, attempts, attempts, raisedAt, awb).run();
+      else if (channelOrderId) await runtime.DB.prepare(`${update}channel_order_id = ?`).bind(reason, attempts, attempts, raisedAt, channelOrderId).run();
     }
   }
 

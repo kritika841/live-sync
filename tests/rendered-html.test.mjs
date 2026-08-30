@@ -50,8 +50,16 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(dashboard, />Analytics</);
   assert.match(dashboard, />Today’s OFD</);
   assert.match(analytics, /Delivery % by courier/);
+  assert.match(analytics, /Delivered ÷ \(Delivered \+ RTO \+ Undelivered\) × 100/);
+  assert.match(analytics, /Delivered ÷ all shipped orders × 100/);
   assert.match(analytics, /NDR reasons/);
   assert.match(analytics, /Previously undelivered/);
   assert.match(api, /out_for_delivery_at/);
   assert.match(api, /deliveredRevenue/);
+  assert.match(api, /first_out_for_delivery_at/);
+  assert.match(api, /ndr_reason/);
+  assert.match(dashboard, /What changed during sync/);
+  const sync = await readFile(new URL("../lib/shiprocket.ts", import.meta.url), "utf8");
+  assert.match(sync, /\/ndr\/all/);
+  assert.match(sync, /discrepanciesTotal/);
 });

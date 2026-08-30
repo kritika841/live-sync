@@ -10,6 +10,7 @@ const cancelledSql = "UPPER(TRIM(status)) IN ('CANCELED', 'CANCELLED', 'ORDER CA
 const nonShippedSql = `UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED', 'PICKUP SCHEDULED', 'MANIFEST GENERATED', 'OUT FOR PICKUP', 'PICKUP EXCEPTION')`;
 const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(json_extract(raw_json, '$.rto_risk'), ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
 const terminalSql = `(${deliveredSql} OR ${rtoSql} OR ${ndrSql})`;
+const shippedSql = `(shipped_at != '' OR UPPER(TRIM(status)) IN ('SHIPPED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'IN TRANSIT-AT DESTINATION HUB', 'REACHED AT DESTINATION HUB', 'PICKED UP', 'OUT FOR DELIVERY', 'UNDELIVERED', 'NDR', 'NDR PENDING', 'DELIVERED', 'DELIVERED TO CUSTOMER') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%' OR ${rtoSql})`;
 
 async function isAllowed() {
   if (process.env.NODE_ENV !== "production") return true;
@@ -44,8 +45,11 @@ export async function GET(request: Request) {
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
         customer_city AS customerCity, customer_state AS customerState, status,
         payment_method AS paymentMethod, total, awb, courier,
+        shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
         out_for_delivery_at AS outForDeliveryAt, delivered_at AS deliveredAt,
-        EXISTS(
+        ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
+        shipping_cost AS shippingCost,
+        (first_out_for_delivery_at != '' AND first_out_for_delivery_at < out_for_delivery_at) OR ndr_attempts > 1 OR EXISTS(
           SELECT 1 FROM webhook_events events
           WHERE UPPER(TRIM(events.status)) LIKE 'UNDELIVERED%'
             AND events.received_at < orders.out_for_delivery_at
@@ -63,13 +67,14 @@ export async function GET(request: Request) {
     const delivered = orders.filter((order) => /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(String(order.status))).length;
     const undelivered = orders.filter((order) => /^(UNDELIVERED|NDR|NDR PENDING)/i.test(String(order.status))).length;
     const stillOut = orders.filter((order) => /^OUT FOR DELIVERY$/i.test(String(order.status))).length;
+    const rto = orders.filter((order) => /^RTO|RETURN TO ORIGIN/i.test(String(order.status))).length;
     const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
     return Response.json({
       date: today,
       metrics: {
         total: metric(total, total), delivered: metric(delivered, total), undelivered: metric(undelivered, total),
         stillOut: metric(stillOut, total), previousUndelivered: metric(previousUndelivered, total),
-        other: metric(Math.max(0, total - delivered - undelivered - stillOut), total),
+        rto: metric(rto, total), other: metric(Math.max(0, total - delivered - undelivered - stillOut - rto), total),
       },
       orders,
     });
@@ -92,13 +97,6 @@ export async function GET(request: Request) {
   if (risk === "high") filters.push(highRiskSql);
   if (risk === "low") filters.push(`NOT (${highRiskSql})`);
   const where = filters.length ? filters.join(" AND ") : "1 = 1";
-  const shippingCostSql = `CAST(COALESCE(
-    NULLIF(json_extract(raw_json, '$.shipping_charges'), ''),
-    NULLIF(json_extract(raw_json, '$.freight_charges'), ''),
-    NULLIF(json_extract(raw_json, '$.shipments.freight_charges'), ''),
-    NULLIF(json_extract(raw_json, '$.shipments[0].freight_charges'), ''), 0
-  ) AS REAL)`;
-
   const summary = await runtime.DB.prepare(`
     SELECT COUNT(*) AS total,
       SUM(CASE WHEN LOWER(payment_method) = 'prepaid' THEN 1 ELSE 0 END) AS prepaid,
@@ -109,15 +107,18 @@ export async function GET(request: Request) {
       SUM(CASE WHEN ${nonShippedSql} THEN 1 ELSE 0 END) AS nonShipped,
       SUM(CASE WHEN ${cancelledSql} THEN 1 ELSE 0 END) AS cancelled,
       SUM(CASE WHEN ${terminalSql} THEN 1 ELSE 0 END) AS terminal,
+      SUM(CASE WHEN ${shippedSql} THEN 1 ELSE 0 END) AS shipped,
+      SUM(CASE WHEN ${shippedSql} AND NOT (${deliveredSql}) AND NOT (${rtoSql}) THEN 1 ELSE 0 END) AS openShipped,
       SUM(CASE WHEN ${highRiskSql} THEN 1 ELSE 0 END) AS highRisk,
       SUM(CASE WHEN ${highRiskSql} THEN 0 ELSE 1 END) AS lowRisk,
       SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END) AS deliveredRevenue,
-      AVG(CASE WHEN ${shippingCostSql} > 0 THEN ${shippingCostSql} END) AS avgShippingCost,
+      AVG(CASE WHEN shipping_cost > 0 THEN shipping_cost END) AS avgShippingCost,
       AVG(CASE WHEN ${deliveredSql} THEN total END) AS avgDeliveredOrderValue
     FROM orders WHERE ${where}
   `).bind(...values).first<Record<string, unknown>>();
   const total = Number(summary?.total || 0);
   const terminal = Number(summary?.terminal || 0);
+  const shipped = Number(summary?.shipped || 0);
 
   const courierRows = await runtime.DB.prepare(`
     SELECT COALESCE(NULLIF(courier, ''), 'Not assigned') AS name, COUNT(*) AS total,
@@ -131,13 +132,7 @@ export async function GET(request: Request) {
       SUM(CASE WHEN ${terminalSql} THEN 1 ELSE 0 END) AS outcomes
     FROM orders WHERE ${where} GROUP BY name ORDER BY total DESC LIMIT 12
   `).bind(...values).all<{ name: string; total: number; delivered: number; outcomes: number }>();
-  const ndrReasonSql = `COALESCE(
-    NULLIF(json_extract(raw_json, '$.ndr_reason'), ''),
-    NULLIF(json_extract(raw_json, '$.ndr_reason_description'), ''),
-    NULLIF(json_extract(raw_json, '$.shipments.ndr_reason'), ''),
-    NULLIF(json_extract(raw_json, '$.shipments[0].ndr_reason'), ''),
-    'Reason not supplied'
-  )`;
+  const ndrReasonSql = `COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')`;
   const ndrReasons = await runtime.DB.prepare(`
     SELECT ${ndrReasonSql} AS reason, COUNT(*) AS count
     FROM orders WHERE ${where} AND ${ndrSql}
@@ -152,6 +147,10 @@ export async function GET(request: Request) {
     metrics: {
       total: metric(total, total), prepaid: metric(summary?.prepaid, total), cod: metric(summary?.cod, total),
       delivered: metric(summary?.delivered, total), deliveryRate: metric(summary?.delivered, terminal),
+      shipped: metric(summary?.shipped, total), shippedDeliveryRate: metric(summary?.delivered, shipped),
+      openShipped: metric(summary?.openShipped, shipped), closed: metric(terminal, total),
+      closedRto: metric(summary?.rto, terminal), closedNdr: metric(summary?.ndr, terminal),
+      shippedRto: metric(summary?.rto, shipped),
       rto: metric(summary?.rto, total), ndr: metric(summary?.ndr, total),
       nonShipped: metric(summary?.nonShipped, total), cancelled: metric(summary?.cancelled, total),
     },

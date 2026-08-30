@@ -2,7 +2,14 @@ import { ensureSchema, logActivity, setSyncState, type RuntimeEnv } from "./data
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
+type ShiprocketNdr = Record<string, unknown> & { id?: number; shipment_id?: number; awb_code?: string };
 type SyncMode = "full" | "incremental";
+type SyncChange = { orderId: number; channelOrderId: string; fields: string[]; statusBefore?: string; statusAfter?: string };
+export type SyncReport = {
+  mode: SyncMode; checked: number; newOrders: number; changedOrders: number; unchangedOrders: number;
+  discrepanciesTotal: number; ndrRecords: number; ndrEnriched: number;
+  fields: Record<string, number>; changes: SyncChange[]; completedAt?: string;
+};
 
 function required(value: string | undefined, name: string) {
   if (!value) throw new Error(`${name} is not configured`);
@@ -107,6 +114,11 @@ export function normalizeShiprocketDate(value: unknown) {
     const month = monthNumbers[monthName.toLowerCase()];
     return `${year}-${month}-${day.padStart(2, "0")}T${String(hour).padStart(2, "0")}:${minute}:${second}+05:30`;
   }
+  const named24Hour = source.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3})\s+(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/i);
+  if (named24Hour) {
+    const [, day, monthName, year, hour, minute, second = "00"] = named24Hour;
+    return `${year}-${monthNumbers[monthName.toLowerCase()]}-${day.padStart(2, "0")}T${hour.padStart(2, "0")}:${minute}:${second}+05:30`;
+  }
   const namedDate = source.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3})\s+(\d{4})$/i);
   if (namedDate) {
     const [, day, monthName, year] = namedDate;
@@ -125,29 +137,103 @@ export function normalizeShiprocketDate(value: unknown) {
   return Number.isNaN(parsed.getTime()) ? source : parsed.toISOString();
 }
 
+function shipmentFor(order: ShiprocketOrder) {
+  return Array.isArray(order.shipments)
+    ? order.shipments[0] || {}
+    : order.shipments && typeof order.shipments === "object" ? order.shipments : {};
+}
+
+function orderSnapshot(order: ShiprocketOrder) {
+  const shipment = shipmentFor(order);
+  const status = stringValue(order.status || shipment.status || shipment.shipment_status);
+  const deliveredAt = normalizeShiprocketDate(
+    order.delivered_date || shipment.delivered_date || (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
+  );
+  return {
+    id: numberValue(order.id), channelOrderId: stringValue(order.channel_order_id), channelId: numberValue(order.channel_id),
+    channelName: stringValue(order.channel_name), customerName: stringValue(order.customer_name),
+    customerEmail: stringValue(order.customer_email), customerPhone: stringValue(order.customer_phone),
+    customerCity: stringValue(order.customer_city || order.billing_city || order.shipping_city),
+    customerState: stringValue(order.customer_state || order.billing_state || order.shipping_state),
+    orderDate: normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),
+    createdAt: normalizeShiprocketDate(order.created_at), updatedAt: normalizeShiprocketDate(order.updated_at),
+    deliveredAt,
+    shippedAt: normalizeShiprocketDate(shipment.shipped_date || order.picked_up_date),
+    outForDeliveryAt: normalizeShiprocketDate(order.out_for_delivery_date || shipment.out_for_delivery_date || (/^OUT FOR DELIVERY$/i.test(status) ? order.updated_at || shipment.updated_at : "")),
+    firstOutForDeliveryAt: normalizeShiprocketDate(order.first_out_for_delivery_date),
+    status, statusCode: numberValue(order.status_code || shipment.status_code) || null,
+    paymentMethod: stringValue(order.payment_method), paymentStatus: stringValue(order.payment_status),
+    total: numberValue(order.total),
+    shippingCost: numberValue(shipment.shipping_charges || shipment.cost || order.shipping_charges || order.freight_charges),
+    pickupLocation: stringValue(order.pickup_location), awb: stringValue(shipment.awb),
+    courier: stringValue(shipment.courier || shipment.courier_name),
+    shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
+    productsJson: JSON.stringify(Array.isArray(order.products) ? order.products : []), rawJson: JSON.stringify(order),
+  };
+}
+
+function addField(report: SyncReport, field: string) {
+  report.fields[field] = (report.fields[field] || 0) + 1;
+  report.discrepanciesTotal += 1;
+}
+
+async function analyzeOrders(db: D1Database, orders: ShiprocketOrder[], report: SyncReport) {
+  const snapshots = orders.map(orderSnapshot).filter((order) => order.id);
+  if (!snapshots.length) return;
+  const existing = await db.prepare(`
+    SELECT id, channel_order_id AS channelOrderId, status, awb, courier,
+      payment_method AS paymentMethod, total, customer_state AS customerState,
+      order_date AS orderDate, delivered_at AS deliveredAt, shipped_at AS shippedAt,
+      out_for_delivery_at AS outForDeliveryAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
+      shipping_cost AS shippingCost
+    FROM orders WHERE id IN (${snapshots.map(() => "?").join(",")})
+  `).bind(...snapshots.map((order) => order.id)).all<Record<string, unknown>>();
+  const byId = new Map(existing.results.map((order) => [Number(order.id), order]));
+  for (const snapshot of snapshots) {
+    report.checked += 1;
+    const current = byId.get(snapshot.id);
+    if (!current) { report.newOrders += 1; continue; }
+    const changed: string[] = [];
+    const compare = (field: string, incoming: unknown, stored: unknown, optional = false) => {
+      if (optional && (incoming === "" || incoming === 0 || incoming == null)) return;
+      if (String(incoming ?? "") !== String(stored ?? "")) { changed.push(field); addField(report, field); }
+    };
+    compare("status", snapshot.status, current.status);
+    compare("AWB", snapshot.awb, current.awb);
+    compare("courier", snapshot.courier, current.courier);
+    compare("payment", snapshot.paymentMethod, current.paymentMethod);
+    compare("amount", snapshot.total, current.total);
+    compare("state", snapshot.customerState, current.customerState);
+    compare("order date", snapshot.orderDate, current.orderDate);
+    compare("shipped date", snapshot.shippedAt, current.shippedAt, true);
+    compare("OFD date", snapshot.outForDeliveryAt, current.outForDeliveryAt, true);
+    compare("first OFD date", snapshot.firstOutForDeliveryAt, current.firstOutForDeliveryAt, true);
+    compare("delivered date", snapshot.deliveredAt, current.deliveredAt, true);
+    compare("shipping cost", snapshot.shippingCost, current.shippingCost, true);
+    if (changed.length) {
+      report.changedOrders += 1;
+      if (report.changes.length < 100) report.changes.push({
+        orderId: snapshot.id, channelOrderId: snapshot.channelOrderId, fields: changed,
+        ...(changed.includes("status") ? { statusBefore: String(current.status || ""), statusAfter: snapshot.status } : {}),
+      });
+    } else report.unchangedOrders += 1;
+  }
+}
+
 export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
   const syncedAt = new Date().toISOString();
   for (let start = 0; start < orders.length; start += 25) {
     const statements = orders.slice(start, start + 25).map((order) => {
-      const shipment = Array.isArray(order.shipments)
-        ? order.shipments[0] || {}
-        : order.shipments && typeof order.shipments === "object" ? order.shipments : {};
-      const orderId = numberValue(order.id);
-      if (!orderId) throw new Error("Shiprocket returned an order without an id");
-      const status = stringValue(order.status || shipment.status || shipment.shipment_status);
-      const deliveredAt = normalizeShiprocketDate(
-        order.delivered_date || shipment.delivered_date || (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
-      );
-      const outForDeliveryAt = normalizeShiprocketDate(
-        order.out_for_delivery_date || shipment.out_for_delivery_date || (/^OUT FOR DELIVERY$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
-      );
+      const value = orderSnapshot(order);
+      if (!value.id) throw new Error("Shiprocket returned an order without an id");
       return db.prepare(`
         INSERT INTO orders (
           id, channel_order_id, channel_id, channel_name, customer_name, customer_email,
-          customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at, out_for_delivery_at,
-          status, status_code, payment_method, payment_status, total, pickup_location,
+          customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at,
+          shipped_at, out_for_delivery_at, first_out_for_delivery_at,
+          status, status_code, payment_method, payment_status, total, shipping_cost, pickup_location,
           awb, courier, shipment_id, products_json, raw_json, synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
           channel_name=excluded.channel_name, customer_name=excluded.customer_name,
@@ -155,31 +241,72 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
           customer_city=excluded.customer_city, customer_state=excluded.customer_state,
           order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
           delivered_at=COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
+          shipped_at=COALESCE(NULLIF(excluded.shipped_at, ''), orders.shipped_at),
           out_for_delivery_at=COALESCE(NULLIF(excluded.out_for_delivery_at, ''), orders.out_for_delivery_at),
+          first_out_for_delivery_at=COALESCE(NULLIF(excluded.first_out_for_delivery_at, ''), orders.first_out_for_delivery_at),
           status=excluded.status, status_code=excluded.status_code,
           payment_method=excluded.payment_method, payment_status=excluded.payment_status,
-          total=excluded.total, pickup_location=excluded.pickup_location, awb=excluded.awb,
+          total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
+          pickup_location=excluded.pickup_location, awb=excluded.awb,
           courier=excluded.courier, shipment_id=excluded.shipment_id,
           products_json=excluded.products_json, raw_json=excluded.raw_json, synced_at=excluded.synced_at
       `).bind(
-        orderId, stringValue(order.channel_order_id), numberValue(order.channel_id),
-        stringValue(order.channel_name), stringValue(order.customer_name),
-        stringValue(order.customer_email), stringValue(order.customer_phone),
-        stringValue(order.customer_city || order.billing_city || order.shipping_city),
-        stringValue(order.customer_state || order.billing_state || order.shipping_state),
-        normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),
-        normalizeShiprocketDate(order.created_at), normalizeShiprocketDate(order.updated_at), deliveredAt, outForDeliveryAt, status,
-        numberValue(order.status_code || shipment.status_code) || null,
-        stringValue(order.payment_method), stringValue(order.payment_status), numberValue(order.total),
-        stringValue(order.pickup_location), stringValue(shipment.awb),
-        stringValue(shipment.courier || shipment.courier_name),
-        numberValue(shipment.id || shipment.shipment_id) || null,
-        JSON.stringify(Array.isArray(order.products) ? order.products : []),
-        JSON.stringify(order), syncedAt,
+        value.id, value.channelOrderId, value.channelId, value.channelName, value.customerName,
+        value.customerEmail, value.customerPhone, value.customerCity, value.customerState,
+        value.orderDate, value.createdAt, value.updatedAt, value.deliveredAt, value.shippedAt,
+        value.outForDeliveryAt, value.firstOutForDeliveryAt, value.status, value.statusCode,
+        value.paymentMethod, value.paymentStatus, value.total, value.shippingCost, value.pickupLocation,
+        value.awb, value.courier, value.shipmentId, value.productsJson, value.rawJson, syncedAt,
       );
     });
     if (statements.length) await db.batch(statements);
   }
+}
+
+async function syncNdrDetails(db: D1Database, token: string, channelId: number, report: SyncReport) {
+  let page = 1, totalPages = 1;
+  do {
+    const result = await apiJson<{ data?: ShiprocketNdr[]; meta?: { pagination?: { total_pages?: number } } }>(
+      `${API_ROOT}/ndr/all?per_page=100&page=${page}`,
+      { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
+    );
+    const records = (result.data || []).filter((record) => !record.shipment_channel_id || Number(record.shipment_channel_id) === channelId);
+    report.ndrRecords += records.length;
+    const ids = records.map((record) => numberValue(record.id)).filter(Boolean);
+    const existing = ids.length ? await db.prepare(`
+      SELECT id, ndr_reason AS reason, ndr_attempts AS attempts, ndr_raised_at AS raisedAt
+      FROM orders WHERE id IN (${ids.map(() => "?").join(",")})
+    `).bind(...ids).all<{ id: number; reason: string; attempts: number; raisedAt: string }>() : { results: [] };
+    const existingById = new Map(existing.results.map((order) => [Number(order.id), order]));
+    for (let start = 0; start < records.length; start += 25) {
+      const statements = [];
+      for (const record of records.slice(start, start + 25)) {
+        const id = numberValue(record.id);
+        const current = existingById.get(id);
+        if (!current) continue;
+        const reason = stringValue(record.reason || record.ndr_reason || record.cancellation_reason);
+        const attempts = numberValue(record.attempts);
+        const raisedAt = normalizeShiprocketDate(record.ndr_raised_at);
+        const fields: string[] = [];
+        if (reason && reason !== current.reason) { fields.push("NDR reason"); addField(report, "NDR reason"); }
+        if (attempts && attempts !== Number(current.attempts || 0)) { fields.push("NDR attempts"); addField(report, "NDR attempts"); }
+        if (raisedAt && raisedAt !== current.raisedAt) { fields.push("NDR raised date"); addField(report, "NDR raised date"); }
+        if (fields.length) {
+          report.ndrEnriched += 1;
+          if (report.changes.length < 100) report.changes.push({ orderId: current.id, channelOrderId: stringValue(record.channel_order_id), fields });
+        }
+        statements.push(db.prepare(`
+          UPDATE orders SET ndr_reason = COALESCE(NULLIF(?, ''), ndr_reason),
+            ndr_attempts = CASE WHEN ? > 0 THEN ? ELSE ndr_attempts END,
+            ndr_raised_at = COALESCE(NULLIF(?, ''), ndr_raised_at), ndr_json = ?
+          WHERE id = ?
+        `).bind(reason, attempts, attempts, raisedAt, JSON.stringify(record), current.id));
+      }
+      if (statements.length) await db.batch(statements);
+    }
+    totalPages = Math.min(Number(result.meta?.pagination?.total_pages || 1), 25);
+    page += 1;
+  } while (page <= totalPages);
 }
 
 const dateOnly = (date: Date) => date.toISOString().slice(0, 10);
@@ -197,6 +324,7 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
     const token = await getShiprocketToken(runtime);
     const channel = await resolveChannel(runtime, token);
     let page = 1, totalPages = 1, synced = 0;
+    const report: SyncReport = { mode: effectiveMode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, fields: {}, changes: [] };
     do {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
       if (effectiveMode === "incremental") {
@@ -210,24 +338,28 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
         { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
       );
       const pageOrders = result.data || [];
+      await analyzeOrders(db, pageOrders, report);
       await upsertOrders(db, pageOrders);
       synced += pageOrders.length;
       totalPages = Math.min(Number(result.meta?.pagination?.total_pages || 1), 500);
       page += 1;
     } while (page <= totalPages);
+    await syncNdrDetails(db, token, channel.id, report);
     const completedAt = new Date().toISOString();
+    report.completedAt = completedAt;
     await setSyncState(db, "channel_id", String(channel.id));
     await setSyncState(db, "channel_name", channel.name);
     await setSyncState(db, "last_sync_at", completedAt);
     await setSyncState(db, "last_sync_mode", effectiveMode);
     await setSyncState(db, "last_sync_count", String(synced));
+    await setSyncState(db, "last_sync_report_json", JSON.stringify(report));
     await setSyncState(db, "sync_status", "healthy");
     await setSyncState(db, "last_sync_error", "");
     if (effectiveMode === "full") await setSyncState(db, "initial_sync_completed_at", completedAt);
-    await logActivity(db, source, "sync.completed", `Verified ${synced} Shiprocket orders`, {
-      synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode,
+    await logActivity(db, source, "sync.completed", `Verified ${synced} orders · ${report.discrepanciesTotal} field discrepancies repaired`, {
+      synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode, report,
     });
-    return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode: effectiveMode };
+    return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode: effectiveMode, report };
   } catch (error) {
     await setSyncState(db, "sync_status", "error");
     await setSyncState(db, "last_sync_error", error instanceof Error ? error.message : "Unknown sync error");

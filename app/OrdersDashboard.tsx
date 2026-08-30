@@ -139,6 +139,28 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    if (view !== "logs") return;
+    const interval = window.setInterval(() => {
+      fetch("/api/logs", { cache: "no-store" })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload: LogsResponse | null) => { if (payload) setLogsData(payload); })
+        .catch(() => { /* Keep the last successful live snapshot. */ });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [view]);
+
+  useEffect(() => {
+    if (view !== "orders") return;
+    const interval = window.setInterval(() => {
+      fetch(`/api/orders?${query}`, { cache: "no-store" })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload: OrdersResponse | null) => { if (payload) setData(payload); })
+        .catch(() => { /* Keep the last successful live snapshot. */ });
+    }, 10000);
+    return () => window.clearInterval(interval);
+  }, [query, view]);
+
   async function loadLogs() {
     setLogsLoading(true);
     try {
@@ -283,7 +305,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           {view === "orders" ? (
             <button className="sync-button" onClick={syncNow} disabled={syncing}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "Syncing…" : "Sync now"}</button>
           ) : (
-            <button className="sync-button" onClick={loadLogs} disabled={logsLoading}><span className={logsLoading ? "spin" : ""}>↻</span>{logsLoading ? "Refreshing…" : "Refresh logs"}</button>
+            <span className="live-refresh"><i />Updating live</span>
           )}
         </div>
 
@@ -380,7 +402,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">
             <div><p className="eyebrow">Live activity</p><h2>Sync & webhook logs</h2><p>Latest 200 changes received from Shiprocket and scheduled verification runs.</p></div>
-            <button onClick={loadLogs} disabled={logsLoading}><span className={logsLoading ? "spin" : ""}>↻</span>{logsLoading ? "Refreshing…" : "Refresh logs"}</button>
+            <span className="live-refresh"><i />Auto-updating</span>
           </header>
           <div className="log-health">
             <span><i className={logsData.sync.sync_status === "healthy" ? "healthy" : ""} />Sync {logsData.sync.sync_status || "waiting"}</span>

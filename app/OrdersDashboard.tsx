@@ -41,6 +41,12 @@ function formatDate(value: string) {
 
 const formatCurrency = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value || 0);
 const statusClass = (status: string) => statusTab(status);
+const indiaDateValue = (date: Date) => {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+};
+const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [tab, setTab] = useState<TabKey>("new");
@@ -123,6 +129,15 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     setPayment(""); setCourier(""); setPickup(""); setFrom(""); setTo(""); setPage(1);
   }
 
+  function applyRecentDays(days: number) {
+    const end = new Date();
+    const start = new Date(end);
+    start.setUTCDate(start.getUTCDate() - (days - 1));
+    setFrom(indiaDateValue(start));
+    setTo(indiaDateValue(end));
+    setPage(1);
+  }
+
   const appliedFilters = [payment, courier, pickup, from, to].filter(Boolean).length;
   const lastSync = data.sync.last_sync_at;
   const syncHealthy = data.sync.sync_status === "healthy";
@@ -173,9 +188,10 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
               <label>Payment<select value={payment} onChange={(event) => { setPayment(event.target.value); setPage(1); }}><option value="">All payments</option><option value="prepaid">Prepaid</option><option value="cod">COD</option></select></label>
               <label>Courier<select value={courier} onChange={(event) => { setCourier(event.target.value); setPage(1); }}><option value="">All couriers</option>{data.filterOptions.couriers.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
               <label>Pickup location<select value={pickup} onChange={(event) => { setPickup(event.target.value); setPage(1); }}><option value="">All locations</option>{data.filterOptions.pickups.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-              <label>From<input type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} /></label>
-              <label>To<input type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} /></label>
+              <label>From<input type="date" value={from} max={to || todayValue} onChange={(event) => { const value = event.target.value; setFrom(value); if (to && value > to) setTo(value); setPage(1); }} /></label>
+              <label>To<input type="date" value={to} min={from || undefined} max={todayValue} onChange={(event) => { const value = event.target.value; setTo(value); if (from && value < from) setFrom(value); setPage(1); }} /></label>
               <button className="clear-button" onClick={clearFilters} disabled={!appliedFilters}>Clear filters</button>
+              <div className="date-presets"><span>Quick date</span><button onClick={() => applyRecentDays(1)}>Today</button><button onClick={() => applyRecentDays(7)}>Last 7 days</button><button onClick={() => applyRecentDays(30)}>Last 30 days</button></div>
             </div>
           )}
 

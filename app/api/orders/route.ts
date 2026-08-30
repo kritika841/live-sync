@@ -25,8 +25,9 @@ export async function GET(request: Request) {
   const payment = url.searchParams.get("payment")?.trim();
   const courier = url.searchParams.get("courier")?.trim();
   const pickup = url.searchParams.get("pickup")?.trim();
-  const from = url.searchParams.get("from")?.trim();
-  const to = url.searchParams.get("to")?.trim();
+  let from = url.searchParams.get("from")?.trim();
+  let to = url.searchParams.get("to")?.trim();
+  if (from && to && from > to) [from, to] = [to, from];
 
   if (search) {
     where.push("(channel_order_id LIKE ? OR customer_name LIKE ? OR customer_email LIKE ? OR customer_phone LIKE ? OR awb LIKE ? OR products_json LIKE ?)");

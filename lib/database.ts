@@ -4,6 +4,8 @@ export type RuntimeEnv = {
   DB: D1Database;
   SHIPROCKET_EMAIL?: string;
   SHIPROCKET_PASSWORD?: string;
+  SHIPROCKET_BACKUP_EMAIL?: string;
+  SHIPROCKET_BACKUP_PASSWORD?: string;
   SHIPROCKET_CHANNEL_NAME?: string;
   SHIPROCKET_CHANNEL_ID?: string;
   SHIPROCKET_WEBHOOK_SECRET?: string;

@@ -24,39 +24,50 @@ async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
 
 export async function getShiprocketToken(runtime: RuntimeEnv) {
   const now = Date.now();
-  const cached = await runtime.DB.prepare("SELECT key, value FROM sync_state WHERE key IN ('shiprocket_token', 'shiprocket_token_expires_at', 'shiprocket_auth_retry_after')").all<{ key: string; value: string }>();
+  const cached = await runtime.DB.prepare("SELECT key, value FROM sync_state WHERE key IN ('shiprocket_token', 'shiprocket_token_expires_at', 'shiprocket_auth_retry_after', 'shiprocket_backup_attempted')").all<{ key: string; value: string }>();
   const authState = Object.fromEntries(cached.results.map((row) => [row.key, row.value]));
   const expiresAt = Date.parse(authState.shiprocket_token_expires_at || "");
   if (authState.shiprocket_token && Number.isFinite(expiresAt) && expiresAt > now + 60 * 60 * 1000) {
     return authState.shiprocket_token;
   }
   const retryAfter = Date.parse(authState.shiprocket_auth_retry_after || "");
-  if (Number.isFinite(retryAfter) && retryAfter > now) {
+  const backupConfigured = Boolean(runtime.SHIPROCKET_BACKUP_EMAIL && runtime.SHIPROCKET_BACKUP_PASSWORD);
+  if (Number.isFinite(retryAfter) && retryAfter > now && (!backupConfigured || authState.shiprocket_backup_attempted === "true")) {
     throw new Error(`Shiprocket temporarily blocked token generation. The dashboard will not retry before ${new Date(retryAfter).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "numeric", minute: "2-digit" })}.`);
   }
 
-  try {
-    const result = await apiJson<{ token: string }>(`${API_ROOT}/auth/login`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: required(runtime.SHIPROCKET_EMAIL, "SHIPROCKET_EMAIL"),
-        password: required(runtime.SHIPROCKET_PASSWORD, "SHIPROCKET_PASSWORD"),
-      }),
-    });
-    const token = required(result.token, "Shiprocket token");
-    await setSyncState(runtime.DB, "shiprocket_token", token);
-    await setSyncState(runtime.DB, "shiprocket_token_expires_at", new Date(now + 9 * 24 * 60 * 60 * 1000).toISOString());
-    await setSyncState(runtime.DB, "shiprocket_auth_retry_after", "");
-    return token;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Shiprocket authentication failed";
-    if (/blocked|too many failed login/i.test(message)) {
-      await setSyncState(runtime.DB, "shiprocket_auth_retry_after", new Date(now + 30 * 60 * 1000).toISOString());
-      throw new Error("Shiprocket temporarily blocked token generation after repeated login requests. No further login attempts will be made for 30 minutes.");
+  const credentials = [
+    { email: required(runtime.SHIPROCKET_EMAIL, "SHIPROCKET_EMAIL"), password: required(runtime.SHIPROCKET_PASSWORD, "SHIPROCKET_PASSWORD"), source: "primary" },
+    ...(runtime.SHIPROCKET_BACKUP_EMAIL && runtime.SHIPROCKET_BACKUP_PASSWORD
+      ? [{ email: runtime.SHIPROCKET_BACKUP_EMAIL, password: runtime.SHIPROCKET_BACKUP_PASSWORD, source: "backup" }]
+      : []),
+  ];
+  let lastError: unknown;
+  for (const credential of credentials) {
+    try {
+      const result = await apiJson<{ token: string }>(`${API_ROOT}/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: credential.email, password: credential.password }),
+      });
+      const token = required(result.token, "Shiprocket token");
+      await setSyncState(runtime.DB, "shiprocket_token", token);
+      await setSyncState(runtime.DB, "shiprocket_token_expires_at", new Date(now + 9 * 24 * 60 * 60 * 1000).toISOString());
+      await setSyncState(runtime.DB, "shiprocket_auth_retry_after", "");
+      await setSyncState(runtime.DB, "shiprocket_backup_attempted", "false");
+      await setSyncState(runtime.DB, "shiprocket_auth_source", credential.source);
+      return token;
+    } catch (error) {
+      lastError = error;
     }
-    throw error;
   }
+  const message = lastError instanceof Error ? lastError.message : "Shiprocket authentication failed";
+  if (/blocked|too many failed login/i.test(message)) {
+    await setSyncState(runtime.DB, "shiprocket_auth_retry_after", new Date(now + 30 * 60 * 1000).toISOString());
+    await setSyncState(runtime.DB, "shiprocket_backup_attempted", backupConfigured ? "true" : "false");
+    throw new Error("Shiprocket temporarily blocked token generation after repeated login requests. No further login attempts will be made for 30 minutes.");
+  }
+  throw lastError;
 }
 
 function expectedChannelNames(value: string) {

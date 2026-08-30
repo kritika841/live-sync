@@ -67,6 +67,18 @@ export async function POST(request: Request) {
         await runtime.DB.prepare("UPDATE orders SET delivered_at = ? WHERE channel_order_id = ?").bind(deliveredAt, channelOrderId).run();
       }
     }
+    if (/^OUT FOR DELIVERY$/i.test(status)) {
+      const outForDeliveryAt = normalizeShiprocketDate(payload.out_for_delivery_date || payload.out_for_delivery_at || payload.current_timestamp) || now;
+      if (shiprocketOrderId) {
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE id = ?").bind(outForDeliveryAt, shiprocketOrderId).run();
+      } else if (shipmentId) {
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE shipment_id = ?").bind(outForDeliveryAt, shipmentId).run();
+      } else if (awb) {
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE awb = ?").bind(outForDeliveryAt, awb).run();
+      } else if (channelOrderId) {
+        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ? WHERE channel_order_id = ?").bind(outForDeliveryAt, channelOrderId).run();
+      }
+    }
   }
 
   if (shiprocketOrderId) {

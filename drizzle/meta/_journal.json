@@ -36,6 +36,20 @@
       "when": 1788094828239,
       "tag": "0004_backfill_delivery_dates",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788099534548,
+      "tag": "0005_icy_bill_hollister",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788099535548,
+      "tag": "0006_backfill_out_for_delivery_dates",
+      "breakpoints": true
     }
   ]
 }

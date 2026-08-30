@@ -127,20 +127,24 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
       const deliveredAt = normalizeShiprocketDate(
         order.delivered_date || shipment.delivered_date || (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
       );
+      const outForDeliveryAt = normalizeShiprocketDate(
+        order.out_for_delivery_date || shipment.out_for_delivery_date || (/^OUT FOR DELIVERY$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
+      );
       return db.prepare(`
         INSERT INTO orders (
           id, channel_order_id, channel_id, channel_name, customer_name, customer_email,
-          customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at,
+          customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at, out_for_delivery_at,
           status, status_code, payment_method, payment_status, total, pickup_location,
           awb, courier, shipment_id, products_json, raw_json, synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
           channel_name=excluded.channel_name, customer_name=excluded.customer_name,
           customer_email=excluded.customer_email, customer_phone=excluded.customer_phone,
           customer_city=excluded.customer_city, customer_state=excluded.customer_state,
           order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
-          delivered_at=excluded.delivered_at,
+          delivered_at=COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
+          out_for_delivery_at=COALESCE(NULLIF(excluded.out_for_delivery_at, ''), orders.out_for_delivery_at),
           status=excluded.status, status_code=excluded.status_code,
           payment_method=excluded.payment_method, payment_status=excluded.payment_status,
           total=excluded.total, pickup_location=excluded.pickup_location, awb=excluded.awb,
@@ -153,7 +157,7 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
         stringValue(order.customer_city || order.billing_city || order.shipping_city),
         stringValue(order.customer_state || order.billing_state || order.shipping_state),
         normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),
-        normalizeShiprocketDate(order.created_at), normalizeShiprocketDate(order.updated_at), deliveredAt, status,
+        normalizeShiprocketDate(order.created_at), normalizeShiprocketDate(order.updated_at), deliveredAt, outForDeliveryAt, status,
         numberValue(order.status_code || shipment.status_code) || null,
         stringValue(order.payment_method), stringValue(order.payment_status), numberValue(order.total),
         stringValue(order.pickup_location), stringValue(shipment.awb),

@@ -34,7 +34,23 @@ test("includes live sync, persistence, webhook, and daily reconciliation surface
     access(new URL("../app/api/webhooks/shiprocket/route.ts", import.meta.url)),
     access(new URL("../app/api/webhooks/tracking/route.ts", import.meta.url)),
     access(new URL("../app/api/logs/route.ts", import.meta.url)),
+    access(new URL("../app/api/analytics/route.ts", import.meta.url)),
     access(new URL("../drizzle/0000_violet_boom_boom.sql", import.meta.url)),
   ]);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
+});
+
+test("includes live analytics and today's out-for-delivery tracking", async () => {
+  const [dashboard, analytics, api] = await Promise.all([
+    readFile(new URL("../app/OrdersDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/AnalyticsPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/analytics/route.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, />Analytics</);
+  assert.match(dashboard, />Today’s OFD</);
+  assert.match(analytics, /Delivery % by courier/);
+  assert.match(analytics, /NDR reasons/);
+  assert.match(analytics, /Previously undelivered/);
+  assert.match(api, /out_for_delivery_at/);
+  assert.match(api, /deliveredRevenue/);
 });

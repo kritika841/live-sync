@@ -2,6 +2,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { statusTab } from "../lib/order-status";
+import AnalyticsPanel from "./AnalyticsPanel";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high";
@@ -58,7 +59,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
-  const [view, setView] = useState<"orders" | "logs">("orders");
+  const [view, setView] = useState<"orders" | "analytics" | "today_ofd" | "logs">("orders");
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
@@ -281,6 +282,12 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrders.has(id));
   const someVisibleSelected = visibleIds.some((id) => selectedOrders.has(id));
   const allResultsSelected = data.total > 0 && selectedOrders.size === data.total;
+  const viewCopy = {
+    orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
+    analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
+    today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
+    logs: { eyebrow: "Live activity", title: "Activity log", subcopy: "Webhook updates, manual syncs, and daily verification history" },
+  }[view];
 
   return (
     <main className="app-shell">
@@ -294,15 +301,17 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       <aside className="sidebar" aria-label="Dashboard sections">
         <p>Workspace</p>
         <button className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span>Orders</button>
+        <button className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>⌁</span>Analytics</button>
+        <button className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><span>↗</span>Today’s OFD</button>
         <button className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><span>↻</span>Activity log</button>
       </aside>
 
       <section className="workspace">
         <div className="page-heading">
           <div>
-            <p className="eyebrow">{view === "orders" ? "Order management" : "Live activity"}</p>
-            <h1>{view === "orders" ? "Orders" : "Activity log"}</h1>
-            <p className="subcopy">{view === "orders" ? (lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync") : "Webhook updates, manual syncs, and daily verification history"}</p>
+            <p className="eyebrow">{viewCopy.eyebrow}</p>
+            <h1>{viewCopy.title}</h1>
+            <p className="subcopy">{viewCopy.subcopy}</p>
           </div>
           {view === "orders" ? (
             <button className="sync-button" onClick={syncNow} disabled={syncing}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "Syncing…" : "Sync now"}</button>
@@ -407,6 +416,9 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
             <footer className="pagination"><p>Showing {(page - 1) * data.perPage + 1}–{Math.min(page * data.perPage, data.total)} of {data.total} orders</p><div><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>Previous</button><span>Page {page} of {data.totalPages}</span><button disabled={page >= data.totalPages} onClick={() => setPage((value) => value + 1)}>Next</button></div></footer>
           )}
         </section>
+
+        <AnalyticsPanel mode="overview" active={view === "analytics"} />
+        <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} />
 
         <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">

@@ -4,7 +4,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { statusTab } from "../lib/order-status";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
-type RiskKey = "low" | "high";
+type RiskKey = "all" | "low" | "high";
 type Order = {
   id: number; channelOrderId: string; channelName: string; customerName: string;
   customerEmail: string; customerPhone: string; customerCity: string; customerState: string;
@@ -30,7 +30,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 
 const emptyData: OrdersResponse = {
   orders: [], counts: { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 },
-  riskCounts: { low: 0, high: 0 },
+  riskCounts: { all: 0, low: 0, high: 0 },
   total: 0, page: 1, perPage: 50, totalPages: 1, sync: {},
   filterOptions: { couriers: [], pickups: [] },
 };
@@ -54,7 +54,7 @@ const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [tab, setTab] = useState<TabKey>("new");
-  const [risk, setRisk] = useState<RiskKey>("low");
+  const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
@@ -226,6 +226,9 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           </nav>
 
           <nav className="risk-tabs" aria-label="RTO risk">
+            <button className={risk === "all" ? "active" : ""} onClick={() => { setRisk("all"); setPage(1); }}>
+              All <span>{data.riskCounts.all}</span>
+            </button>
             <button className={risk === "low" ? "active" : ""} onClick={() => { setRisk("low"); setPage(1); }}>
               <i />Low risk <span>{data.riskCounts.low}</span>
             </button>

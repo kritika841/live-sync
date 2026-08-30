@@ -16,7 +16,8 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const requestedTab = url.searchParams.get("tab") || "new";
   const tab = (["new", "ready", "shipped", "out_for_delivery", "undelivered", "delivered", "rto", "all"].includes(requestedTab) ? requestedTab : "new") as OrderTab;
-  const risk = url.searchParams.get("risk") === "high" ? "high" : "low";
+  const requestedRisk = url.searchParams.get("risk");
+  const risk = requestedRisk === "high" || requestedRisk === "low" ? requestedRisk : "all";
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
@@ -42,7 +43,7 @@ export async function GET(request: Request) {
   if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
 
   const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(json_extract(raw_json, '$.rto_risk'), ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
-  const riskSql = risk === "high" ? highRiskSql : `NOT (${highRiskSql})`;
+  const riskSql = risk === "high" ? highRiskSql : risk === "low" ? `NOT (${highRiskSql})` : "1 = 1";
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
   const where = [sqlForTab(tab), riskSql, ...filters];
   const whereSql = where.join(" AND ");
@@ -90,7 +91,11 @@ export async function GET(request: Request) {
   return Response.json({
     orders: rows.results.map((row) => ({ ...row, products: JSON.parse(String(row.productsJson || "[]")), productsJson: undefined })),
     counts,
-    riskCounts: { low: Number(riskCountRow?.low || 0), high: Number(riskCountRow?.high || 0) },
+    riskCounts: {
+      all: Number(riskCountRow?.low || 0) + Number(riskCountRow?.high || 0),
+      low: Number(riskCountRow?.low || 0),
+      high: Number(riskCountRow?.high || 0),
+    },
     total: Number(countRow?.total || 0),
     page,
     perPage,

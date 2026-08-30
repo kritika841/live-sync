@@ -16,6 +16,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const requestedTab = url.searchParams.get("tab") || "new";
   const tab = (["new", "ready", "shipped", "out_for_delivery", "undelivered", "delivered", "rto", "all"].includes(requestedTab) ? requestedTab : "new") as OrderTab;
+  const risk = url.searchParams.get("risk") === "high" ? "high" : "low";
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
@@ -40,8 +41,10 @@ export async function GET(request: Request) {
   if (from) { filters.push("SUBSTR(order_date, 1, 10) >= ?"); filterValues.push(from); }
   if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
 
+  const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(json_extract(raw_json, '$.rto_risk'), ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
+  const riskSql = risk === "high" ? highRiskSql : `NOT (${highRiskSql})`;
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
-  const where = [sqlForTab(tab), ...filters];
+  const where = [sqlForTab(tab), riskSql, ...filters];
   const whereSql = where.join(" AND ");
   const countRow = await runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${whereSql}`).bind(...filterValues).first<{ total: number }>();
   const rows = await runtime.DB.prepare(`
@@ -59,7 +62,7 @@ export async function GET(request: Request) {
 
   const grouped = await runtime.DB.prepare(`
     SELECT status, COUNT(*) AS total FROM orders
-    WHERE ${filterSql}
+    WHERE ${riskSql} AND ${filterSql}
     GROUP BY status
   `).bind(...filterValues).all<{ status: string; total: number }>();
   const counts = { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 };
@@ -69,6 +72,13 @@ export async function GET(request: Request) {
     if (bucket !== "other") counts[bucket] += total;
     counts.all += total;
   }
+  const riskCountRow = await runtime.DB.prepare(`
+    SELECT
+      SUM(CASE WHEN ${highRiskSql} THEN 0 ELSE 1 END) AS low,
+      SUM(CASE WHEN ${highRiskSql} THEN 1 ELSE 0 END) AS high
+    FROM orders
+    WHERE ${sqlForTab(tab)} AND ${filterSql}
+  `).bind(...filterValues).first<{ low: number; high: number }>();
   const stateRows = await runtime.DB.prepare(`
     SELECT key, value FROM sync_state
     WHERE key NOT IN ('shiprocket_token', 'shiprocket_token_expires_at', 'shiprocket_auth_retry_after')
@@ -80,6 +90,7 @@ export async function GET(request: Request) {
   return Response.json({
     orders: rows.results.map((row) => ({ ...row, products: JSON.parse(String(row.productsJson || "[]")), productsJson: undefined })),
     counts,
+    riskCounts: { low: Number(riskCountRow?.low || 0), high: Number(riskCountRow?.high || 0) },
     total: Number(countRow?.total || 0),
     page,
     perPage,

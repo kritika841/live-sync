@@ -4,6 +4,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { statusTab } from "../lib/order-status";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
+type RiskKey = "low" | "high";
 type Order = {
   id: number; channelOrderId: string; channelName: string; customerName: string;
   customerEmail: string; customerPhone: string; customerCity: string; customerState: string;
@@ -14,6 +15,7 @@ type Order = {
 type OrdersResponse = {
   orders: Order[];
   counts: Record<TabKey, number>;
+  riskCounts: Record<RiskKey, number>;
   total: number; page: number; perPage: number; totalPages: number;
   sync: Record<string, string>;
   filterOptions: { couriers: string[]; pickups: string[] };
@@ -28,6 +30,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 
 const emptyData: OrdersResponse = {
   orders: [], counts: { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 },
+  riskCounts: { low: 0, high: 0 },
   total: 0, page: 1, perPage: 50, totalPages: 1, sync: {},
   filterOptions: { couriers: [], pickups: [] },
 };
@@ -51,6 +54,7 @@ const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [tab, setTab] = useState<TabKey>("new");
+  const [risk, setRisk] = useState<RiskKey>("low");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
@@ -67,7 +71,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [error, setError] = useState("");
 
   const query = useMemo(() => {
-    const params = new URLSearchParams({ tab, page: String(page), sort });
+    const params = new URLSearchParams({ tab, risk, page: String(page), sort });
     if (deferredSearch) params.set("search", deferredSearch);
     if (payment) params.set("payment", payment);
     if (courier) params.set("courier", courier);
@@ -75,7 +79,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     return params.toString();
-  }, [tab, page, sort, deferredSearch, payment, courier, pickup, from, to]);
+  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, from, to]);
 
   const loading = loadedQuery !== query;
 
@@ -172,6 +176,15 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
                 {item.label}<span>{data.counts[item.key]}</span>
               </button>
             ))}
+          </nav>
+
+          <nav className="risk-tabs" aria-label="RTO risk">
+            <button className={risk === "low" ? "active" : ""} onClick={() => { setRisk("low"); setPage(1); }}>
+              <i />Low risk <span>{data.riskCounts.low}</span>
+            </button>
+            <button className={risk === "high" ? "active high" : "high"} onClick={() => { setRisk("high"); setPage(1); }}>
+              <i />High risk <span>{data.riskCounts.high}</span>
+            </button>
           </nav>
 
           <div className="toolbar">

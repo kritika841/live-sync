@@ -15,7 +15,7 @@ export async function GET(request: Request) {
   await ensureSchema(runtime.DB);
   const url = new URL(request.url);
   const requestedTab = url.searchParams.get("tab") || "new";
-  const tab = (["new", "ready", "shipped", "delivered", "rto", "all"].includes(requestedTab) ? requestedTab : "new") as OrderTab;
+  const tab = (["new", "ready", "shipped", "out_for_delivery", "undelivered", "delivered", "rto", "all"].includes(requestedTab) ? requestedTab : "new") as OrderTab;
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
@@ -62,7 +62,7 @@ export async function GET(request: Request) {
     WHERE ${filterSql}
     GROUP BY status
   `).bind(...filterValues).all<{ status: string; total: number }>();
-  const counts = { new: 0, ready: 0, shipped: 0, delivered: 0, rto: 0, all: 0 };
+  const counts = { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 };
   for (const row of grouped.results) {
     const total = Number(row.total || 0);
     const bucket = statusTab(row.status);

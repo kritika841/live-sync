@@ -73,6 +73,7 @@ td small { display:block; max-width:200px; margin-top:4px; color:#59645e; font-s
 .status i { flex:none; width:5px; height:5px; border-radius:50%; background:currentColor; }
 .status.new { color:#84aaff; background:#17243c; } .status.ready { color:#e8bd72; background:#352919; }
 .status.shipped { color:#b59cff; background:#251f3c; } .status.delivered { color:#72daa8; background:#143226; }
+.status.out_for_delivery { color:#64d4ff; background:#132d38; } .status.undelivered { color:#ffb36b; background:#382716; }
 .status.rto { color:#ff8984; background:#381d1c; }
 .status.other { color:#9ca6a1; background:#202522; }
 .loading-state,.empty-state { min-height:355px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:40px; color:#68736d; }

@@ -3,7 +3,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { statusTab } from "../lib/order-status";
 
-type TabKey = "new" | "ready" | "shipped" | "delivered" | "rto" | "all";
+type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type Order = {
   id: number; channelOrderId: string; channelName: string; customerName: string;
   customerEmail: string; customerPhone: string; customerCity: string; customerState: string;
@@ -21,12 +21,13 @@ type OrdersResponse = {
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "new", label: "New" }, { key: "ready", label: "Ready to ship" },
-  { key: "shipped", label: "Shipped" }, { key: "delivered", label: "Delivered" },
+  { key: "shipped", label: "Shipped" }, { key: "out_for_delivery", label: "Out for delivery" },
+  { key: "undelivered", label: "Undelivered" }, { key: "delivered", label: "Delivered" },
   { key: "rto", label: "RTO" }, { key: "all", label: "All" },
 ];
 
 const emptyData: OrdersResponse = {
-  orders: [], counts: { new: 0, ready: 0, shipped: 0, delivered: 0, rto: 0, all: 0 },
+  orders: [], counts: { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 },
   total: 0, page: 1, perPage: 50, totalPages: 1, sync: {},
   filterOptions: { couriers: [], pickups: [] },
 };

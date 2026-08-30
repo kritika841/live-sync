@@ -132,6 +132,8 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
   const db = runtime.DB;
   if (!db) throw new Error("Database binding is unavailable");
   await ensureSchema(db);
+  const initialSync = await db.prepare("SELECT value FROM sync_state WHERE key = 'initial_sync_completed_at'").first<{ value: string }>();
+  const effectiveMode: SyncMode = mode === "incremental" && !initialSync?.value ? "full" : mode;
   await setSyncState(db, "sync_status", "running");
   await setSyncState(db, "last_sync_started_at", new Date().toISOString());
   try {
@@ -140,7 +142,7 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
     let page = 1, totalPages = 1, synced = 0;
     do {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
-      if (mode === "incremental") {
+      if (effectiveMode === "incremental") {
         const from = new Date();
         from.setUTCDate(from.getUTCDate() - 2);
         params.set("updated_from", dateOnly(from));
@@ -160,12 +162,12 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
     await setSyncState(db, "channel_id", String(channel.id));
     await setSyncState(db, "channel_name", channel.name);
     await setSyncState(db, "last_sync_at", completedAt);
-    await setSyncState(db, "last_sync_mode", mode);
+    await setSyncState(db, "last_sync_mode", effectiveMode);
     await setSyncState(db, "last_sync_count", String(synced));
     await setSyncState(db, "sync_status", "healthy");
     await setSyncState(db, "last_sync_error", "");
-    if (mode === "full") await setSyncState(db, "initial_sync_completed_at", completedAt);
-    return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode };
+    if (effectiveMode === "full") await setSyncState(db, "initial_sync_completed_at", completedAt);
+    return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode: effectiveMode };
   } catch (error) {
     await setSyncState(db, "sync_status", "error");
     await setSyncState(db, "last_sync_error", error instanceof Error ? error.message : "Unknown sync error");

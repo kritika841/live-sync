@@ -8,7 +8,7 @@ type RiskKey = "all" | "low" | "high";
 type Order = {
   id: number; channelOrderId: string; channelName: string; customerName: string;
   customerEmail: string; customerPhone: string; customerCity: string; customerState: string;
-  orderDate: string; status: string; paymentMethod: string; paymentStatus: string;
+  orderDate: string; deliveredAt: string; status: string; paymentMethod: string; paymentStatus: string;
   total: number; pickupLocation: string; awb: string; courier: string;
   products: Array<{ name?: string; sku?: string; quantity?: number }>; syncedAt: string;
 };
@@ -69,6 +69,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [pickup, setPickup] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [deliveredDate, setDeliveredDate] = useState("");
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [filterOpen, setFilterOpen] = useState(false);
   const [data, setData] = useState<OrdersResponse>(emptyData);
@@ -89,8 +90,9 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     if (pickup) params.set("pickup", pickup);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
+    if (tab === "delivered" && deliveredDate) params.set("delivered_date", deliveredDate);
     return params.toString();
-  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, from, to]);
+  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, from, to, deliveredDate]);
 
   const loading = loadedQuery !== query;
 
@@ -191,7 +193,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   }
 
   function clearFilters() {
-    setPayment(""); setCourier(""); setPickup(""); setFrom(""); setTo(""); setPage(1);
+    setPayment(""); setCourier(""); setPickup(""); setFrom(""); setTo(""); setDeliveredDate(""); setPage(1);
   }
 
   function applyRecentDays(days: number) {
@@ -272,7 +274,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     }
   }
 
-  const appliedFilters = [payment, courier, pickup, from, to].filter(Boolean).length;
+  const appliedFilters = [payment, courier, pickup, from, to, tab === "delivered" ? deliveredDate : ""].filter(Boolean).length;
   const lastSync = data.sync.last_sync_at;
   const syncHealthy = data.sync.sync_status === "healthy";
   const visibleIds = data.orders.map((order) => order.id);
@@ -332,6 +334,13 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
             </button>
           </nav>
 
+          {tab === "delivered" && (
+            <div className="delivery-date-filter">
+              <label><span>Delivered date</span><input type="date" value={deliveredDate} max={todayValue} onChange={(event) => { setDeliveredDate(event.target.value); setPage(1); }} /></label>
+              {deliveredDate && <button onClick={() => { setDeliveredDate(""); setPage(1); }}>Clear date</button>}
+            </div>
+          )}
+
           <div className="toolbar">
             <label className="search"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} aria-label="Search orders" placeholder="Search order, customer, AWB or SKU" /></label>
             <div className="toolbar-actions">
@@ -378,7 +387,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
                       <td data-label="Order"><div className="order-cell"><input type="checkbox" checked={selectedOrders.has(order.id)} onChange={() => toggleOrder(order)} aria-label={`Select order ${order.channelOrderId || order.id}`} /><span><strong>#{order.channelOrderId || order.id}</strong><small>{order.channelName || "Shopify_5"}</small></span></div></td>
                       <td data-label="Customer"><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || order.customerPhone || "—"}</small></td>
                       <td data-label="Products"><strong>{firstProduct?.name || "—"}</strong><small>{firstProduct?.sku ? `SKU ${firstProduct.sku}` : ""}{order.products.length > 1 ? ` · +${order.products.length - 1} more` : ""}</small></td>
-                      <td data-label="Order date">{formatDate(order.orderDate)}</td>
+                      <td data-label="Order date">{formatDate(order.orderDate)}{order.deliveredAt && <small>Delivered {formatDate(order.deliveredAt)}</small>}</td>
                       <td data-label="Payment"><span className={`payment ${order.paymentMethod.toLowerCase()}`}>{order.paymentMethod || "—"}</span></td>
                       <td data-label="Amount"><strong>{formatCurrency(order.total)}</strong></td>
                       <td data-label="Status"><span className={`status ${statusClass(order.status)}`}><i />{order.status || "New"}</span></td>

@@ -1,7 +1,7 @@
 import { ensureSchema, logActivity, setSyncState, type RuntimeEnv } from "./database";
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
-type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>>; products?: Array<Record<string, unknown>> };
+type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
 type SyncMode = "full" | "incremental";
 
 function required(value: string | undefined, name: string) {
@@ -96,6 +96,16 @@ export function normalizeShiprocketDate(value: unknown) {
     const month = monthNumbers[monthName.toLowerCase()];
     return `${year}-${month}-${day.padStart(2, "0")}T${String(hour).padStart(2, "0")}:${minute}:${second}+05:30`;
   }
+  const namedDate = source.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3})\s+(\d{4})$/i);
+  if (namedDate) {
+    const [, day, monthName, year] = namedDate;
+    return `${year}-${monthNumbers[monthName.toLowerCase()]}-${day.padStart(2, "0")}T00:00:00+05:30`;
+  }
+  const dayFirst = source.match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (dayFirst) {
+    const [, day, month, year, hour = "00", minute = "00", second = "00"] = dayFirst;
+    return `${year}-${month}-${day}T${hour}:${minute}:${second}+05:30`;
+  }
   if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(source)) {
     const normalized = source.replace(" ", "T");
     return /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+05:30`;
@@ -108,22 +118,29 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
   const syncedAt = new Date().toISOString();
   for (let start = 0; start < orders.length; start += 25) {
     const statements = orders.slice(start, start + 25).map((order) => {
-      const shipment = Array.isArray(order.shipments) ? order.shipments[0] || {} : {};
+      const shipment = Array.isArray(order.shipments)
+        ? order.shipments[0] || {}
+        : order.shipments && typeof order.shipments === "object" ? order.shipments : {};
       const orderId = numberValue(order.id);
       if (!orderId) throw new Error("Shiprocket returned an order without an id");
+      const status = stringValue(order.status || shipment.status || shipment.shipment_status);
+      const deliveredAt = normalizeShiprocketDate(
+        order.delivered_date || shipment.delivered_date || (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
+      );
       return db.prepare(`
         INSERT INTO orders (
           id, channel_order_id, channel_id, channel_name, customer_name, customer_email,
-          customer_phone, customer_city, customer_state, order_date, created_at, updated_at,
+          customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at,
           status, status_code, payment_method, payment_status, total, pickup_location,
           awb, courier, shipment_id, products_json, raw_json, synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
           channel_name=excluded.channel_name, customer_name=excluded.customer_name,
           customer_email=excluded.customer_email, customer_phone=excluded.customer_phone,
           customer_city=excluded.customer_city, customer_state=excluded.customer_state,
           order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
+          delivered_at=excluded.delivered_at,
           status=excluded.status, status_code=excluded.status_code,
           payment_method=excluded.payment_method, payment_status=excluded.payment_status,
           total=excluded.total, pickup_location=excluded.pickup_location, awb=excluded.awb,
@@ -136,8 +153,7 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
         stringValue(order.customer_city || order.billing_city || order.shipping_city),
         stringValue(order.customer_state || order.billing_state || order.shipping_state),
         normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),
-        normalizeShiprocketDate(order.created_at), normalizeShiprocketDate(order.updated_at),
-        stringValue(order.status || shipment.status || shipment.shipment_status),
+        normalizeShiprocketDate(order.created_at), normalizeShiprocketDate(order.updated_at), deliveredAt, status,
         numberValue(order.status_code || shipment.status_code) || null,
         stringValue(order.payment_method), stringValue(order.payment_status), numberValue(order.total),
         stringValue(order.pickup_location), stringValue(shipment.awb),

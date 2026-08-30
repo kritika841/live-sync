@@ -13,6 +13,7 @@ export const orders = sqliteTable("orders", {
   orderDate: text("order_date").notNull().default(""),
   createdAt: text("created_at").notNull().default(""),
   updatedAt: text("updated_at").notNull().default(""),
+  deliveredAt: text("delivered_at").notNull().default(""),
   status: text("status").notNull().default(""),
   statusCode: integer("status_code"),
   paymentMethod: text("payment_method").notNull().default(""),
@@ -28,6 +29,7 @@ export const orders = sqliteTable("orders", {
 }, (table) => [
   index("idx_orders_channel_status").on(table.channelId, table.status),
   index("idx_orders_order_date").on(table.orderDate),
+  index("idx_orders_delivered_at").on(table.deliveredAt),
   index("idx_orders_channel_order_id").on(table.channelOrderId),
   index("idx_orders_awb").on(table.awb),
 ]);

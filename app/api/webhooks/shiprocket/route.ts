@@ -1,5 +1,5 @@
 import { ensureSchema, getRuntimeEnv, logActivity } from "../../../../lib/database";
-import { fetchSpecificOrder } from "../../../../lib/shiprocket";
+import { fetchSpecificOrder, normalizeShiprocketDate } from "../../../../lib/shiprocket";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +54,18 @@ export async function POST(request: Request) {
       await runtime.DB.prepare("UPDATE orders SET status = ?, synced_at = ? WHERE awb = ?").bind(status, now, awb).run();
     } else if (channelOrderId) {
       await runtime.DB.prepare("UPDATE orders SET status = ?, synced_at = ? WHERE channel_order_id = ?").bind(status, now, channelOrderId).run();
+    }
+    if (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status)) {
+      const deliveredAt = normalizeShiprocketDate(payload.delivered_date || payload.delivered_at || payload.current_timestamp) || now;
+      if (shiprocketOrderId) {
+        await runtime.DB.prepare("UPDATE orders SET delivered_at = ? WHERE id = ?").bind(deliveredAt, shiprocketOrderId).run();
+      } else if (shipmentId) {
+        await runtime.DB.prepare("UPDATE orders SET delivered_at = ? WHERE shipment_id = ?").bind(deliveredAt, shipmentId).run();
+      } else if (awb) {
+        await runtime.DB.prepare("UPDATE orders SET delivered_at = ? WHERE awb = ?").bind(deliveredAt, awb).run();
+      } else if (channelOrderId) {
+        await runtime.DB.prepare("UPDATE orders SET delivered_at = ? WHERE channel_order_id = ?").bind(deliveredAt, channelOrderId).run();
+      }
     }
   }
 

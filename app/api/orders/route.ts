@@ -27,6 +27,7 @@ export async function GET(request: Request) {
   const payment = url.searchParams.get("payment")?.trim();
   const courier = url.searchParams.get("courier")?.trim();
   const pickup = url.searchParams.get("pickup")?.trim();
+  const deliveredDate = url.searchParams.get("delivered_date")?.trim();
   let from = url.searchParams.get("from")?.trim();
   let to = url.searchParams.get("to")?.trim();
   if (from && to && from > to) [from, to] = [to, from];
@@ -41,6 +42,7 @@ export async function GET(request: Request) {
   if (pickup) { filters.push("LOWER(pickup_location) LIKE LOWER(?)"); filterValues.push(`%${pickup}%`); }
   if (from) { filters.push("SUBSTR(order_date, 1, 10) >= ?"); filterValues.push(from); }
   if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
+  if (deliveredDate && tab === "delivered") { filters.push("SUBSTR(delivered_at, 1, 10) = ?"); filterValues.push(deliveredDate); }
 
   const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(json_extract(raw_json, '$.rto_risk'), ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
   const riskSql = risk === "high" ? highRiskSql : risk === "low" ? `NOT (${highRiskSql})` : "1 = 1";
@@ -60,7 +62,8 @@ export async function GET(request: Request) {
     SELECT id, channel_order_id AS channelOrderId, channel_name AS channelName,
       customer_name AS customerName, customer_email AS customerEmail,
       customer_phone AS customerPhone, customer_city AS customerCity,
-      customer_state AS customerState, COALESCE(NULLIF(order_date, ''), created_at) AS orderDate, status,
+      customer_state AS customerState, COALESCE(NULLIF(order_date, ''), created_at) AS orderDate,
+      delivered_at AS deliveredAt, status,
       payment_method AS paymentMethod, payment_status AS paymentStatus, total,
       pickup_location AS pickupLocation, awb, courier, products_json AS productsJson,
       synced_at AS syncedAt

@@ -69,6 +69,8 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [loadedQuery, setLoadedQuery] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ tab, risk, page: String(page), sort });
@@ -91,6 +93,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       if (!response.ok) throw new Error(payload.error || "Could not load orders");
       setData(payload);
       setLoadedQuery(query);
+      setSelectedIds(new Set());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load orders");
     }
@@ -107,6 +110,8 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       .then((payload) => {
         setData(payload);
         setLoadedQuery(query);
+        setSelectedIds(new Set());
+        setCopyState("idle");
         setError("");
       })
       .catch((loadError: Error) => {
@@ -143,9 +148,51 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     setPage(1);
   }
 
+  function applyYesterday() {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const value = indiaDateValue(yesterday);
+    setFrom(value);
+    setTo(value);
+    setPage(1);
+  }
+
+  function toggleOrder(orderId: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(orderId)) next.delete(orderId); else next.add(orderId);
+      return next;
+    });
+    setCopyState("idle");
+  }
+
+  function toggleAllVisible() {
+    const visibleIds = data.orders.map((order) => order.id);
+    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+    setSelectedIds(allSelected ? new Set() : new Set(visibleIds));
+    setCopyState("idle");
+  }
+
+  async function copySelectedOrderIds() {
+    const value = data.orders
+      .filter((order) => selectedIds.has(order.id))
+      .map((order) => String(order.channelOrderId || order.id).replace(/^#+/, "").replace(/\s+/g, ""))
+      .join(",");
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 1800);
+    } catch {
+      setError("Could not copy order IDs. Please allow clipboard access and try again.");
+    }
+  }
+
   const appliedFilters = [payment, courier, pickup, from, to].filter(Boolean).length;
   const lastSync = data.sync.last_sync_at;
   const syncHealthy = data.sync.sync_status === "healthy";
+  const visibleIds = data.orders.map((order) => order.id);
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+  const someVisibleSelected = visibleIds.some((id) => selectedIds.has(id));
 
   return (
     <main className="app-shell">
@@ -205,19 +252,27 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
               <label>From<input type="date" value={from} max={to || todayValue} onChange={(event) => { const value = event.target.value; setFrom(value); if (to && value > to) setTo(value); setPage(1); }} /></label>
               <label>To<input type="date" value={to} min={from || undefined} max={todayValue} onChange={(event) => { const value = event.target.value; setTo(value); if (from && value < from) setFrom(value); setPage(1); }} /></label>
               <button className="clear-button" onClick={clearFilters} disabled={!appliedFilters}>Clear filters</button>
-              <div className="date-presets"><span>Quick date</span><button onClick={() => applyRecentDays(1)}>Today</button><button onClick={() => applyRecentDays(7)}>Last 7 days</button><button onClick={() => applyRecentDays(30)}>Last 30 days</button></div>
+              <div className="date-presets"><span>Quick date</span><button onClick={() => applyRecentDays(1)}>Today</button><button onClick={applyYesterday}>Yesterday</button><button onClick={() => applyRecentDays(7)}>Last 7 days</button><button onClick={() => applyRecentDays(30)}>Last 30 days</button></div>
+            </div>
+          )}
+
+          {selectedIds.size > 0 && (
+            <div className="selection-bar">
+              <strong>{selectedIds.size} selected</strong>
+              <button onClick={copySelectedOrderIds}>{copyState === "copied" ? "Copied!" : "Copy order IDs"}</button>
+              <button className="selection-clear" onClick={() => setSelectedIds(new Set())}>Clear</button>
             </div>
           )}
 
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Order</th><th>Customer</th><th>Products</th><th>Order date</th><th>Payment</th><th>Amount</th><th>Status</th><th>AWB / Courier</th></tr></thead>
+              <thead><tr><th><label className="select-all"><input type="checkbox" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={toggleAllVisible} aria-label="Select all orders on this page" /><span>Order</span></label></th><th>Customer</th><th>Products</th><th>Order date</th><th>Payment</th><th>Amount</th><th>Status</th><th>AWB / Courier</th></tr></thead>
               <tbody>
                 {!loading && data.orders.map((order) => {
                   const firstProduct = order.products[0];
                   return (
-                    <tr key={order.id}>
-                      <td data-label="Order"><strong>#{order.channelOrderId || order.id}</strong><small>{order.channelName || "Shopify_5"}</small></td>
+                    <tr key={order.id} className={selectedIds.has(order.id) ? "selected" : ""}>
+                      <td data-label="Order"><div className="order-cell"><input type="checkbox" checked={selectedIds.has(order.id)} onChange={() => toggleOrder(order.id)} aria-label={`Select order ${order.channelOrderId || order.id}`} /><span><strong>#{order.channelOrderId || order.id}</strong><small>{order.channelName || "Shopify_5"}</small></span></div></td>
                       <td data-label="Customer"><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || order.customerPhone || "—"}</small></td>
                       <td data-label="Products"><strong>{firstProduct?.name || "—"}</strong><small>{firstProduct?.sku ? `SKU ${firstProduct.sku}` : ""}{order.products.length > 1 ? ` · +${order.products.length - 1} more` : ""}</small></td>
                       <td data-label="Order date">{formatDate(order.orderDate)}</td>

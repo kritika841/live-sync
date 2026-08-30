@@ -20,6 +20,11 @@ type OrdersResponse = {
   sync: Record<string, string>;
   filterOptions: { couriers: string[]; pickups: string[] };
 };
+type ActivityLog = {
+  id: number; source: string; eventType: string; level: string;
+  message: string; details: Record<string, unknown>; createdAt: string;
+};
+type LogsResponse = { logs: ActivityLog[]; sync: Record<string, string> };
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "new", label: "New" }, { key: "ready", label: "Ready to ship" },
@@ -72,6 +77,8 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [selectedOrders, setSelectedOrders] = useState<Map<number, string>>(new Map());
   const [selectingAll, setSelectingAll] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [logsData, setLogsData] = useState<LogsResponse>({ logs: [], sync: {} });
+  const [logsLoading, setLogsLoading] = useState(true);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ tab, risk, page: String(page), sort });
@@ -121,6 +128,30 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     return () => controller.abort();
   }, [query]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/logs", { signal: controller.signal, cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Could not load activity logs")))
+      .then((payload: LogsResponse) => setLogsData(payload))
+      .catch((logsError: Error) => { if (logsError.name !== "AbortError") setError(logsError.message); })
+      .finally(() => setLogsLoading(false));
+    return () => controller.abort();
+  }, []);
+
+  async function loadLogs() {
+    setLogsLoading(true);
+    try {
+      const response = await fetch("/api/logs", { cache: "no-store" });
+      const payload = await response.json() as LogsResponse & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Could not load activity logs");
+      setLogsData(payload);
+    } catch (logsError) {
+      setError(logsError instanceof Error ? logsError.message : "Could not load activity logs");
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+
   async function syncNow() {
     setSyncing(true);
     setError("");
@@ -128,7 +159,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       const response = await fetch("/api/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "incremental" }) });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error || "Sync failed");
-      await loadOrders();
+      await Promise.all([loadOrders(), loadLogs()]);
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : "Sync failed");
     } finally {
@@ -334,6 +365,29 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           {!loading && data.total > 0 && (
             <footer className="pagination"><p>Showing {(page - 1) * data.perPage + 1}–{Math.min(page * data.perPage, data.total)} of {data.total} orders</p><div><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>Previous</button><span>Page {page} of {data.totalPages}</span><button disabled={page >= data.totalPages} onClick={() => setPage((value) => value + 1)}>Next</button></div></footer>
           )}
+        </section>
+
+        <section className="logs-card">
+          <header className="logs-heading">
+            <div><p className="eyebrow">Live activity</p><h2>Sync & webhook logs</h2><p>Latest 200 changes received from Shiprocket and scheduled verification runs.</p></div>
+            <button onClick={loadLogs} disabled={logsLoading}><span className={logsLoading ? "spin" : ""}>↻</span>{logsLoading ? "Refreshing…" : "Refresh logs"}</button>
+          </header>
+          <div className="log-health">
+            <span><i className={logsData.sync.sync_status === "healthy" ? "healthy" : ""} />Sync {logsData.sync.sync_status || "waiting"}</span>
+            <span>Last API check: {logsData.sync.last_sync_at ? formatDate(logsData.sync.last_sync_at) : "Not yet"}</span>
+            <span>Orders checked: {logsData.sync.last_sync_count || "0"}</span>
+          </div>
+          <div className="logs-list">
+            {logsData.logs.map((log) => (
+              <article key={log.id} className={`log-row ${log.level}`}>
+                <time>{formatDate(log.createdAt)}</time>
+                <span className="log-source">{log.source}</span>
+                <div><strong>{log.message}</strong><small>{log.eventType.replaceAll(".", " · ")}</small></div>
+              </article>
+            ))}
+            {!logsLoading && logsData.logs.length === 0 && <div className="logs-empty">No activity recorded yet. New syncs and webhook updates will appear here.</div>}
+            {logsLoading && logsData.logs.length === 0 && <div className="logs-empty">Loading activity…</div>}
+          </div>
         </section>
       </section>
     </main>

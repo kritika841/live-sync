@@ -32,6 +32,7 @@ test("includes live sync, persistence, webhook, and daily reconciliation surface
     access(new URL("../app/api/orders/route.ts", import.meta.url)),
     access(new URL("../app/api/sync/route.ts", import.meta.url)),
     access(new URL("../app/api/webhooks/shiprocket/route.ts", import.meta.url)),
+    access(new URL("../app/api/logs/route.ts", import.meta.url)),
     access(new URL("../drizzle/0000_violet_boom_boom.sql", import.meta.url)),
   ]);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));

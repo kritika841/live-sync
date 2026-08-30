@@ -21,7 +21,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({})) as { mode?: string };
   const mode = body.mode === "full" ? "full" : "incremental";
   try {
-    const result = await syncShiprocketOrders(runtime, mode);
+    const result = await syncShiprocketOrders(runtime, mode, "manual sync");
     return Response.json(result);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Sync failed" }, { status: 502 });

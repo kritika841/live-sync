@@ -15,6 +15,13 @@
       "when": 1788087592837,
       "tag": "0001_ambitious_dexter_bennett",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788093471819,
+      "tag": "0002_exotic_iron_fist",
+      "breakpoints": true
     }
   ]
 }

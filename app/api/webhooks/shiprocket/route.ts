@@ -1,4 +1,4 @@
-import { ensureSchema, getRuntimeEnv } from "../../../../lib/database";
+import { ensureSchema, getRuntimeEnv, logActivity } from "../../../../lib/database";
 import { fetchSpecificOrder } from "../../../../lib/shiprocket";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +37,13 @@ export async function POST(request: Request) {
     INSERT INTO webhook_events (shiprocket_order_id, channel_order_id, shipment_id, awb, status, payload_json, received_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).bind(shiprocketOrderId, channelOrderId || null, shipmentId, awb || null, status || null, JSON.stringify(payload), now).run();
+
+  const orderReference = channelOrderId || (shiprocketOrderId ? String(shiprocketOrderId) : awb) || "Unknown order";
+  await logActivity(runtime.DB, "Shiprocket webhook", "order.updated", status
+    ? `Order ${orderReference} changed to ${status}`
+    : `Webhook received for order ${orderReference}`, {
+    shiprocketOrderId, channelOrderId, shipmentId, awb, status,
+  });
 
   if (status) {
     if (shiprocketOrderId) {

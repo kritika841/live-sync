@@ -50,3 +50,15 @@ export const webhookEvents = sqliteTable("webhook_events", {
 }, (table) => [
   index("idx_webhook_events_received_at").on(table.receivedAt),
 ]);
+
+export const activityLogs = sqliteTable("activity_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  source: text("source").notNull(),
+  eventType: text("event_type").notNull(),
+  level: text("level").notNull().default("info"),
+  message: text("message").notNull(),
+  detailsJson: text("details_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("idx_activity_logs_created_at").on(table.createdAt),
+]);

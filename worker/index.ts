@@ -50,7 +50,7 @@ const worker = {
     return handler.fetch(request, env, ctx);
   },
   async scheduled(_controller: unknown, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(syncShiprocketOrders(env as unknown as RuntimeEnv, "incremental"));
+    ctx.waitUntil(syncShiprocketOrders(env as unknown as RuntimeEnv, "incremental", "daily verification"));
   },
 };
 

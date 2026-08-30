@@ -1,4 +1,4 @@
-import { ensureSchema, setSyncState, type RuntimeEnv } from "./database";
+import { ensureSchema, logActivity, setSyncState, type RuntimeEnv } from "./database";
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>>; products?: Array<Record<string, unknown>> };
@@ -153,12 +153,13 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
 
 const dateOnly = (date: Date) => date.toISOString().slice(0, 10);
 
-export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode = "incremental") {
+export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode = "incremental", source = "manual") {
   const db = runtime.DB;
   if (!db) throw new Error("Database binding is unavailable");
   await ensureSchema(db);
   const initialSync = await db.prepare("SELECT value FROM sync_state WHERE key = 'initial_sync_completed_at'").first<{ value: string }>();
   const effectiveMode: SyncMode = mode === "incremental" && !initialSync?.value ? "full" : mode;
+  await logActivity(db, source, "sync.started", `${effectiveMode === "full" ? "Full" : "Incremental"} Shiprocket sync started`, { mode: effectiveMode });
   await setSyncState(db, "sync_status", "running");
   await setSyncState(db, "last_sync_started_at", new Date().toISOString());
   try {
@@ -192,10 +193,16 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
     await setSyncState(db, "sync_status", "healthy");
     await setSyncState(db, "last_sync_error", "");
     if (effectiveMode === "full") await setSyncState(db, "initial_sync_completed_at", completedAt);
+    await logActivity(db, source, "sync.completed", `Verified ${synced} Shiprocket orders`, {
+      synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode,
+    });
     return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode: effectiveMode };
   } catch (error) {
     await setSyncState(db, "sync_status", "error");
     await setSyncState(db, "last_sync_error", error instanceof Error ? error.message : "Unknown sync error");
+    await logActivity(db, source, "sync.failed", "Shiprocket sync failed", {
+      mode: effectiveMode, error: error instanceof Error ? error.message : "Unknown sync error",
+    }, "error");
     throw error;
   }
 }

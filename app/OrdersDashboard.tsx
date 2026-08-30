@@ -58,6 +58,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
+  const [view, setView] = useState<"orders" | "logs">("orders");
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
@@ -265,21 +266,30 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         <div className="user-label"><span className="lock-dot">◆</span>{userLabel}</div>
       </header>
 
+      <div className="app-body">
+      <aside className="sidebar" aria-label="Dashboard sections">
+        <p>Workspace</p>
+        <button className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span>Orders</button>
+        <button className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><span>↻</span>Activity log</button>
+      </aside>
+
       <section className="workspace">
         <div className="page-heading">
           <div>
-            <p className="eyebrow">Order management</p>
-            <h1>Orders</h1>
-            <p className="subcopy">{lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync"}</p>
+            <p className="eyebrow">{view === "orders" ? "Order management" : "Live activity"}</p>
+            <h1>{view === "orders" ? "Orders" : "Activity log"}</h1>
+            <p className="subcopy">{view === "orders" ? (lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync") : "Webhook updates, manual syncs, and daily verification history"}</p>
           </div>
-          <button className="sync-button" onClick={syncNow} disabled={syncing}>
-            <span className={syncing ? "spin" : ""}>↻</span>{syncing ? "Syncing…" : "Sync now"}
-          </button>
+          {view === "orders" ? (
+            <button className="sync-button" onClick={syncNow} disabled={syncing}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "Syncing…" : "Sync now"}</button>
+          ) : (
+            <button className="sync-button" onClick={loadLogs} disabled={logsLoading}><span className={logsLoading ? "spin" : ""}>↻</span>{logsLoading ? "Refreshing…" : "Refresh logs"}</button>
+          )}
         </div>
 
         {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => loadOrders()}>Try again</button></div>}
 
-        <section className="orders-card">
+        <section className={`orders-card ${view !== "orders" ? "view-hidden" : ""}`}>
           <nav className="tabs" aria-label="Order status">
             {tabs.map((item) => (
               <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => { setTab(item.key); setPage(1); }}>
@@ -367,7 +377,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           )}
         </section>
 
-        <section className="logs-card">
+        <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">
             <div><p className="eyebrow">Live activity</p><h2>Sync & webhook logs</h2><p>Latest 200 changes received from Shiprocket and scheduled verification runs.</p></div>
             <button onClick={loadLogs} disabled={logsLoading}><span className={logsLoading ? "spin" : ""}>↻</span>{logsLoading ? "Refreshing…" : "Refresh logs"}</button>
@@ -390,6 +400,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           </div>
         </section>
       </section>
+      </div>
     </main>
   );
 }

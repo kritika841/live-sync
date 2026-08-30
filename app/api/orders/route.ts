@@ -62,7 +62,10 @@ export async function GET(request: Request) {
     if (bucket !== "other") counts[bucket] += total;
     counts.all += total;
   }
-  const stateRows = await runtime.DB.prepare("SELECT key, value FROM sync_state").all<{ key: string; value: string }>();
+  const stateRows = await runtime.DB.prepare(`
+    SELECT key, value FROM sync_state
+    WHERE key NOT IN ('shiprocket_token', 'shiprocket_token_expires_at', 'shiprocket_auth_retry_after')
+  `).all<{ key: string; value: string }>();
   const sync = Object.fromEntries(stateRows.results.map((row) => [row.key, row.value]));
   const couriers = await runtime.DB.prepare("SELECT DISTINCT courier FROM orders WHERE courier != '' ORDER BY courier").all<{ courier: string }>();
   const pickups = await runtime.DB.prepare("SELECT DISTINCT pickup_location AS pickup FROM orders WHERE pickup_location != '' ORDER BY pickup_location").all<{ pickup: string }>();

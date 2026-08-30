@@ -27,7 +27,7 @@ button,input,select { font:inherit; } button { cursor:pointer; } button:disabled
 .sidebar button.active { border-color:#2d4337; background:#15241b; color:#d4e8dd; }
 .sidebar button.active span { color:var(--green); }
 .workspace { width:100%; max-width:1540px; margin:0 auto; padding:40px 42px 64px; }
-.view-hidden { display:none; }
+.view-hidden { display:none !important; }
 .page-heading { display:flex; justify-content:space-between; align-items:end; gap:24px; margin-bottom:26px; }
 .eyebrow { margin:0 0 9px; color:var(--green); text-transform:uppercase; letter-spacing:.15em; font-weight:800; font-size:10px; }
 h1 { margin:0; font-size:38px; line-height:1.05; letter-spacing:-.045em; }

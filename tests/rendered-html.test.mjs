@@ -14,6 +14,7 @@ test("ships the requested dark order dashboard without sample data", async () =>
   }
   assert.match(styles, /--bg:#080b0a/);
   assert.match(styles, /color-scheme:dark/);
+  assert.match(styles, /\.view-hidden \{ display:none !important; \}/);
   assert.doesNotMatch(dashboard, /previewOrders|Ananya Mehta|Rohan Kapoor|Ishita Shah|stats-row/);
   assert.doesNotMatch(page, /SkeletonPreview|codex-preview/);
 });

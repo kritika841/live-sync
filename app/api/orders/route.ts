@@ -19,8 +19,8 @@ export async function GET(request: Request) {
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
-  const where = [sqlForTab(tab)];
-  const values: unknown[] = [];
+  const filters: string[] = [];
+  const filterValues: unknown[] = [];
   const search = url.searchParams.get("search")?.trim();
   const payment = url.searchParams.get("payment")?.trim();
   const courier = url.searchParams.get("courier")?.trim();
@@ -30,18 +30,20 @@ export async function GET(request: Request) {
   if (from && to && from > to) [from, to] = [to, from];
 
   if (search) {
-    where.push("(channel_order_id LIKE ? OR customer_name LIKE ? OR customer_email LIKE ? OR customer_phone LIKE ? OR awb LIKE ? OR products_json LIKE ?)");
+    filters.push("(channel_order_id LIKE ? OR customer_name LIKE ? OR customer_email LIKE ? OR customer_phone LIKE ? OR awb LIKE ? OR products_json LIKE ?)");
     const term = `%${search}%`;
-    values.push(term, term, term, term, term, term);
+    filterValues.push(term, term, term, term, term, term);
   }
-  if (payment) { where.push("LOWER(payment_method) = LOWER(?)"); values.push(payment); }
-  if (courier) { where.push("LOWER(courier) LIKE LOWER(?)"); values.push(`%${courier}%`); }
-  if (pickup) { where.push("LOWER(pickup_location) LIKE LOWER(?)"); values.push(`%${pickup}%`); }
-  if (from) { where.push("SUBSTR(order_date, 1, 10) >= ?"); values.push(from); }
-  if (to) { where.push("SUBSTR(order_date, 1, 10) <= ?"); values.push(to); }
+  if (payment) { filters.push("LOWER(payment_method) = LOWER(?)"); filterValues.push(payment); }
+  if (courier) { filters.push("LOWER(courier) LIKE LOWER(?)"); filterValues.push(`%${courier}%`); }
+  if (pickup) { filters.push("LOWER(pickup_location) LIKE LOWER(?)"); filterValues.push(`%${pickup}%`); }
+  if (from) { filters.push("SUBSTR(order_date, 1, 10) >= ?"); filterValues.push(from); }
+  if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
 
+  const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
+  const where = [sqlForTab(tab), ...filters];
   const whereSql = where.join(" AND ");
-  const countRow = await runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${whereSql}`).bind(...values).first<{ total: number }>();
+  const countRow = await runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${whereSql}`).bind(...filterValues).first<{ total: number }>();
   const rows = await runtime.DB.prepare(`
     SELECT id, channel_order_id AS channelOrderId, channel_name AS channelName,
       customer_name AS customerName, customer_email AS customerEmail,
@@ -53,9 +55,13 @@ export async function GET(request: Request) {
     FROM orders WHERE ${whereSql}
     ORDER BY COALESCE(NULLIF(order_date, ''), created_at) ${sort}, id ${sort}
     LIMIT ? OFFSET ?
-  `).bind(...values, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
+  `).bind(...filterValues, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
 
-  const grouped = await runtime.DB.prepare("SELECT status, COUNT(*) AS total FROM orders GROUP BY status").all<{ status: string; total: number }>();
+  const grouped = await runtime.DB.prepare(`
+    SELECT status, COUNT(*) AS total FROM orders
+    WHERE ${filterSql}
+    GROUP BY status
+  `).bind(...filterValues).all<{ status: string; total: number }>();
   const counts = { new: 0, ready: 0, shipped: 0, delivered: 0, rto: 0, all: 0 };
   for (const row of grouped.results) {
     const total = Number(row.total || 0);

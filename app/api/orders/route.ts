@@ -48,6 +48,14 @@ export async function GET(request: Request) {
   const where = [sqlForTab(tab), riskSql, ...filters];
   const whereSql = where.join(" AND ");
   const countRow = await runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${whereSql}`).bind(...filterValues).first<{ total: number }>();
+  if (url.searchParams.get("selection") === "all") {
+    const allOrders = await runtime.DB.prepare(`
+      SELECT id, channel_order_id AS channelOrderId
+      FROM orders WHERE ${whereSql}
+      ORDER BY COALESCE(NULLIF(order_date, ''), created_at) ${sort}, id ${sort}
+    `).bind(...filterValues).all<{ id: number; channelOrderId: string }>();
+    return Response.json({ orders: allOrders.results, total: Number(countRow?.total || 0) });
+  }
   const rows = await runtime.DB.prepare(`
     SELECT id, channel_order_id AS channelOrderId, channel_name AS channelName,
       customer_name AS customerName, customer_email AS customerEmail,

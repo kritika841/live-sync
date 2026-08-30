@@ -69,7 +69,8 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [loadedQuery, setLoadedQuery] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedOrders, setSelectedOrders] = useState<Map<number, string>>(new Map());
+  const [selectingAll, setSelectingAll] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
 
   const query = useMemo(() => {
@@ -93,7 +94,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       if (!response.ok) throw new Error(payload.error || "Could not load orders");
       setData(payload);
       setLoadedQuery(query);
-      setSelectedIds(new Set());
+      setSelectedOrders(new Map());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load orders");
     }
@@ -110,7 +111,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       .then((payload) => {
         setData(payload);
         setLoadedQuery(query);
-        setSelectedIds(new Set());
+        setSelectedOrders(new Map());
         setCopyState("idle");
         setError("");
       })
@@ -156,26 +157,56 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     setPage(1);
   }
 
-  function toggleOrder(orderId: number) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(orderId)) next.delete(orderId); else next.add(orderId);
+  function toggleOrder(order: Order) {
+    setSelectedOrders((current) => {
+      const next = new Map(current);
+      if (next.has(order.id)) next.delete(order.id);
+      else next.set(order.id, String(order.channelOrderId || order.id));
       return next;
     });
     setCopyState("idle");
   }
 
   function toggleAllVisible() {
-    const visibleIds = data.orders.map((order) => order.id);
-    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
-    setSelectedIds(allSelected ? new Set() : new Set(visibleIds));
+    const allSelected = data.orders.length > 0 && data.orders.every((order) => selectedOrders.has(order.id));
+    setSelectedOrders((current) => {
+      const next = new Map(current);
+      for (const order of data.orders) {
+        if (allSelected) next.delete(order.id);
+        else next.set(order.id, String(order.channelOrderId || order.id));
+      }
+      return next;
+    });
     setCopyState("idle");
   }
 
+  async function toggleAllResults() {
+    if (data.total > 0 && selectedOrders.size === data.total) {
+      setSelectedOrders(new Map());
+      setCopyState("idle");
+      return;
+    }
+    setSelectingAll(true);
+    setError("");
+    try {
+      const params = new URLSearchParams(query);
+      params.delete("page");
+      params.set("selection", "all");
+      const response = await fetch(`/api/orders?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json() as { orders?: Array<{ id: number; channelOrderId: string }>; error?: string };
+      if (!response.ok) throw new Error(payload.error || "Could not select all orders");
+      setSelectedOrders(new Map((payload.orders || []).map((order) => [order.id, String(order.channelOrderId || order.id)])));
+      setCopyState("idle");
+    } catch (selectionError) {
+      setError(selectionError instanceof Error ? selectionError.message : "Could not select all orders");
+    } finally {
+      setSelectingAll(false);
+    }
+  }
+
   async function copySelectedOrderIds() {
-    const value = data.orders
-      .filter((order) => selectedIds.has(order.id))
-      .map((order) => String(order.channelOrderId || order.id).replace(/^#+/, "").replace(/\s+/g, ""))
+    const value = Array.from(selectedOrders.values())
+      .map((orderId) => orderId.replace(/^#+/, "").replace(/\s+/g, ""))
       .join(",");
     if (!value) return;
     try {
@@ -191,8 +222,9 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const lastSync = data.sync.last_sync_at;
   const syncHealthy = data.sync.sync_status === "healthy";
   const visibleIds = data.orders.map((order) => order.id);
-  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
-  const someVisibleSelected = visibleIds.some((id) => selectedIds.has(id));
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrders.has(id));
+  const someVisibleSelected = visibleIds.some((id) => selectedOrders.has(id));
+  const allResultsSelected = data.total > 0 && selectedOrders.size === data.total;
 
   return (
     <main className="app-shell">
@@ -259,23 +291,28 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
             </div>
           )}
 
-          {selectedIds.size > 0 && (
+          <div className="selection-controls">
+            <label><input type="checkbox" checked={allResultsSelected} ref={(element) => { if (element) element.indeterminate = selectedOrders.size > 0 && !allResultsSelected; }} onChange={toggleAllResults} disabled={selectingAll || loading || data.total === 0} /><span>{selectingAll ? "Selecting…" : `All pages (${data.total})`}</span></label>
+            <label><input type="checkbox" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={toggleAllVisible} disabled={loading || data.orders.length === 0} /><span>This page ({data.orders.length})</span></label>
+          </div>
+
+          {selectedOrders.size > 0 && (
             <div className="selection-bar">
-              <strong>{selectedIds.size} selected</strong>
+              <strong>{selectedOrders.size} selected</strong>
               <button onClick={copySelectedOrderIds}>{copyState === "copied" ? "Copied!" : "Copy order IDs"}</button>
-              <button className="selection-clear" onClick={() => setSelectedIds(new Set())}>Clear</button>
+              <button className="selection-clear" onClick={() => setSelectedOrders(new Map())}>Clear</button>
             </div>
           )}
 
           <div className="table-wrap">
             <table>
-              <thead><tr><th><label className="select-all"><input type="checkbox" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={toggleAllVisible} aria-label="Select all orders on this page" /><span>Order</span></label></th><th>Customer</th><th>Products</th><th>Order date</th><th>Payment</th><th>Amount</th><th>Status</th><th>AWB / Courier</th></tr></thead>
+              <thead><tr><th>Order</th><th>Customer</th><th>Products</th><th>Order date</th><th>Payment</th><th>Amount</th><th>Status</th><th>AWB / Courier</th></tr></thead>
               <tbody>
                 {!loading && data.orders.map((order) => {
                   const firstProduct = order.products[0];
                   return (
-                    <tr key={order.id} className={selectedIds.has(order.id) ? "selected" : ""}>
-                      <td data-label="Order"><div className="order-cell"><input type="checkbox" checked={selectedIds.has(order.id)} onChange={() => toggleOrder(order.id)} aria-label={`Select order ${order.channelOrderId || order.id}`} /><span><strong>#{order.channelOrderId || order.id}</strong><small>{order.channelName || "Shopify_5"}</small></span></div></td>
+                    <tr key={order.id} className={selectedOrders.has(order.id) ? "selected" : ""}>
+                      <td data-label="Order"><div className="order-cell"><input type="checkbox" checked={selectedOrders.has(order.id)} onChange={() => toggleOrder(order)} aria-label={`Select order ${order.channelOrderId || order.id}`} /><span><strong>#{order.channelOrderId || order.id}</strong><small>{order.channelName || "Shopify_5"}</small></span></div></td>
                       <td data-label="Customer"><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || order.customerPhone || "—"}</small></td>
                       <td data-label="Products"><strong>{firstProduct?.name || "—"}</strong><small>{firstProduct?.sku ? `SKU ${firstProduct.sku}` : ""}{order.products.length > 1 ? ` · +${order.products.length - 1} more` : ""}</small></td>
                       <td data-label="Order date">{formatDate(order.orderDate)}</td>

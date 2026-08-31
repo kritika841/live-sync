@@ -59,6 +59,16 @@ export async function ensureSchema(db: D1Database) {
         created_at TEXT NOT NULL
       )
     `),
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS sync_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, source TEXT NOT NULL,
+        checked INTEGER NOT NULL DEFAULT 0, new_orders INTEGER NOT NULL DEFAULT 0,
+        changed_orders INTEGER NOT NULL DEFAULT 0, unchanged_orders INTEGER NOT NULL DEFAULT 0,
+        discrepancies_total INTEGER NOT NULL DEFAULT 0, ndr_records INTEGER NOT NULL DEFAULT 0,
+        ndr_enriched INTEGER NOT NULL DEFAULT 0, fields_json TEXT NOT NULL DEFAULT '{}',
+        changes_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+      )
+    `),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_channel_status ON orders (channel_id, status)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_order_date ON orders (order_date DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_delivered_at ON orders (delivered_at DESC)"),
@@ -68,6 +78,7 @@ export async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_awb ON orders (awb)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_events (received_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs (created_at DESC)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_sync_reports_created_at ON sync_reports (created_at DESC)"),
     db.prepare("PRAGMA optimize"),
   ]);
 }

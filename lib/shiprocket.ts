@@ -353,6 +353,16 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
     await setSyncState(db, "last_sync_mode", effectiveMode);
     await setSyncState(db, "last_sync_count", String(synced));
     await setSyncState(db, "last_sync_report_json", JSON.stringify(report));
+    await db.prepare(`
+      INSERT INTO sync_reports (
+        mode, source, checked, new_orders, changed_orders, unchanged_orders,
+        discrepancies_total, ndr_records, ndr_enriched, fields_json, changes_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      report.mode, source, report.checked, report.newOrders, report.changedOrders,
+      report.unchangedOrders, report.discrepanciesTotal, report.ndrRecords,
+      report.ndrEnriched, JSON.stringify(report.fields), JSON.stringify(report.changes), completedAt,
+    ).run();
     await setSyncState(db, "sync_status", "healthy");
     await setSyncState(db, "last_sync_error", "");
     if (effectiveMode === "full") await setSyncState(db, "initial_sync_completed_at", completedAt);

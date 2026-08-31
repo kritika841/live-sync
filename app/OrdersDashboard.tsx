@@ -3,6 +3,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
+import ReportsPanel from "./ReportsPanel";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high";
@@ -26,13 +27,6 @@ type ActivityLog = {
   message: string; details: Record<string, unknown>; createdAt: string;
 };
 type LogsResponse = { logs: ActivityLog[]; sync: Record<string, string> };
-type SyncReport = {
-  mode: string; checked: number; newOrders: number; changedOrders: number; unchangedOrders: number;
-  discrepanciesTotal: number; ndrRecords: number; ndrEnriched: number; fields: Record<string, number>;
-  changes: Array<{ orderId: number; channelOrderId: string; fields: string[]; statusBefore?: string; statusAfter?: string }>;
-  completedAt?: string;
-};
-
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "new", label: "New" }, { key: "ready", label: "Ready to ship" },
   { key: "shipped", label: "Shipped" }, { key: "out_for_delivery", label: "Out for delivery" },
@@ -65,7 +59,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
-  const [view, setView] = useState<"orders" | "analytics" | "today_ofd" | "logs">("orders");
+  const [view, setView] = useState<"orders" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
@@ -88,7 +82,6 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [logsData, setLogsData] = useState<LogsResponse>({ logs: [], sync: {} });
   const [logsLoading, setLogsLoading] = useState(true);
-  const [syncReport, setSyncReport] = useState<SyncReport | null>(null);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ tab, risk, page: String(page), sort });
@@ -190,10 +183,10 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     setError("");
     try {
       const response = await fetch("/api/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "full" }) });
-      const payload = await response.json() as { error?: string; report?: SyncReport };
+      const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error || "Sync failed");
-      if (payload.report) setSyncReport(payload.report);
       await Promise.all([loadOrders(), loadLogs()]);
+      setView("reports");
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : "Sync failed");
     } finally {
@@ -290,13 +283,11 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrders.has(id));
   const someVisibleSelected = visibleIds.some((id) => selectedOrders.has(id));
   const allResultsSelected = data.total > 0 && selectedOrders.size === data.total;
-  let savedSyncReport: SyncReport | null = null;
-  try { savedSyncReport = data.sync.last_sync_report_json ? JSON.parse(data.sync.last_sync_report_json) as SyncReport : null; } catch { savedSyncReport = null; }
-  const visibleSyncReport = syncReport || savedSyncReport;
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
     analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
     today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
+    reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
     logs: { eyebrow: "Live activity", title: "Activity log", subcopy: "Webhook updates, manual syncs, and daily verification history" },
   }[view];
 
@@ -314,6 +305,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         <button className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span>Orders</button>
         <button className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>⌁</span>Analytics</button>
         <button className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><span>↗</span>Today’s OFD</button>
+        <button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><span>▤</span>Reports</button>
         <button className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><span>↻</span>Activity log</button>
       </aside>
 
@@ -332,17 +324,6 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         </div>
 
         {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => loadOrders()}>Try again</button></div>}
-
-        {view === "orders" && visibleSyncReport && (
-          <section className="sync-report-card">
-            <header><div><p className="eyebrow">Latest reconciliation</p><h2>What changed during sync</h2><p>{visibleSyncReport.mode === "full" ? "Complete Shiprocket reconciliation" : "Incremental verification"}{visibleSyncReport.completedAt ? ` · ${formatDate(visibleSyncReport.completedAt)}` : ""}</p></div><span>{visibleSyncReport.discrepanciesTotal} discrepancies repaired</span></header>
-            <div className="sync-report-metrics"><div><strong>{visibleSyncReport.checked}</strong><span>Orders checked</span></div><div><strong>{visibleSyncReport.newOrders}</strong><span>New orders</span></div><div><strong>{visibleSyncReport.changedOrders}</strong><span>Orders changed</span></div><div><strong>{visibleSyncReport.unchangedOrders}</strong><span>Unchanged</span></div><div><strong>{visibleSyncReport.ndrRecords}</strong><span>NDR records checked</span></div><div><strong>{visibleSyncReport.ndrEnriched}</strong><span>NDR details filled</span></div></div>
-            <div className="sync-report-detail">
-              <div><h3>Discrepancies by field</h3><div className="field-chips">{Object.entries(visibleSyncReport.fields).sort((a,b)=>b[1]-a[1]).map(([field,count])=><span key={field}>{field}<b>{count}</b></span>)}{Object.keys(visibleSyncReport.fields).length === 0 && <p>No field discrepancies found.</p>}</div></div>
-              <div><h3>Affected orders</h3><div className="change-list">{visibleSyncReport.changes.slice(0,30).map((change,index)=><article key={`${change.orderId}-${index}`}><strong>#{change.channelOrderId || change.orderId}</strong><span>{change.fields.join(", ")}</span>{change.statusBefore !== undefined && <small>{change.statusBefore || "Unknown"} → {change.statusAfter || "Unknown"}</small>}</article>)}{visibleSyncReport.changes.length === 0 && <p>No existing orders needed correction.</p>}</div></div>
-            </div>
-          </section>
-        )}
 
         <section className={`orders-card ${view !== "orders" ? "view-hidden" : ""}`}>
           <nav className="tabs" aria-label="Order status">
@@ -441,6 +422,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
 
         <AnalyticsPanel mode="overview" active={view === "analytics"} />
         <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} />
+        <ReportsPanel active={view === "reports"} />
 
         <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">

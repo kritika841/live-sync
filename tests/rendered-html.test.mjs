@@ -36,6 +36,7 @@ test("includes live sync, persistence, webhook, and daily reconciliation surface
     access(new URL("../app/api/webhooks/tracking/route.ts", import.meta.url)),
     access(new URL("../app/api/logs/route.ts", import.meta.url)),
     access(new URL("../app/api/analytics/route.ts", import.meta.url)),
+    access(new URL("../app/api/reports/route.ts", import.meta.url)),
     access(new URL("../drizzle/0000_violet_boom_boom.sql", import.meta.url)),
   ]);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
@@ -58,7 +59,17 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(api, /deliveredRevenue/);
   assert.match(api, /first_out_for_delivery_at/);
   assert.match(api, /ndr_reason/);
-  assert.match(dashboard, /What changed during sync/);
+  assert.match(dashboard, />Reports</);
+  const [reports, workbook] = await Promise.all([
+    readFile(new URL("../app/ReportsPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/excel-report.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(reports, /Reconciliation history/);
+  assert.match(reports, /Download Excel/);
+  assert.match(reports, /Sync discrepancy table/);
+  assert.match(workbook, /Discrepancies by Field/);
+  assert.match(workbook, /Affected Orders/);
+  assert.doesNotMatch(dashboard, /What changed during sync/);
   const sync = await readFile(new URL("../lib/shiprocket.ts", import.meta.url), "utf8");
   assert.match(sync, /\/ndr\/all/);
   assert.match(sync, /discrepanciesTotal/);

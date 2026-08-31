@@ -74,3 +74,21 @@ export const activityLogs = sqliteTable("activity_logs", {
 }, (table) => [
   index("idx_activity_logs_created_at").on(table.createdAt),
 ]);
+
+export const syncReports = sqliteTable("sync_reports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  mode: text("mode").notNull(),
+  source: text("source").notNull(),
+  checked: integer("checked").notNull().default(0),
+  newOrders: integer("new_orders").notNull().default(0),
+  changedOrders: integer("changed_orders").notNull().default(0),
+  unchangedOrders: integer("unchanged_orders").notNull().default(0),
+  discrepanciesTotal: integer("discrepancies_total").notNull().default(0),
+  ndrRecords: integer("ndr_records").notNull().default(0),
+  ndrEnriched: integer("ndr_enriched").notNull().default(0),
+  fieldsJson: text("fields_json").notNull().default("{}"),
+  changesJson: text("changes_json").notNull().default("[]"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("idx_sync_reports_created_at").on(table.createdAt),
+]);

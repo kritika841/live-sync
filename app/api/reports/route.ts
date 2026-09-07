@@ -1,4 +1,3 @@
-import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { buildSyncReportWorkbook, type StoredSyncReport } from "../../../lib/excel-report";
 
@@ -20,10 +19,6 @@ function normalizeReport(row: ReportRow): StoredSyncReport {
 }
 
 export async function GET(request: Request) {
-  if (process.env.NODE_ENV === "production" && !(await getChatGPTUser())) {
-    return Response.json({ error: "Sign in required" }, { status: 401 });
-  }
-
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const url = new URL(request.url);
@@ -44,7 +39,7 @@ export async function GET(request: Request) {
     if (url.searchParams.get("download") === "xlsx") {
       const workbook = buildSyncReportWorkbook(report);
       const date = report.createdAt.slice(0, 10) || "sync";
-      return new Response(workbook, {
+      return new Response(workbook as unknown as BodyInit, {
         headers: {
           "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           "content-disposition": `attachment; filename="satmi-sync-report-${date}-${report.id}.xlsx"`,

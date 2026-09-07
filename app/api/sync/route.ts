@@ -1,4 +1,3 @@
-import { getChatGPTUser } from "../../chatgpt-auth";
 import { getRuntimeEnv } from "../../../lib/database";
 import { syncShiprocketOrders } from "../../../lib/shiprocket";
 
@@ -15,8 +14,8 @@ export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   const provided = request.headers.get("x-api-key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
   const secretAccess = safeEqual(provided, runtime.SHIPROCKET_WEBHOOK_SECRET || "");
-  if (process.env.NODE_ENV === "production" && !secretAccess && !(await getChatGPTUser())) {
-    return Response.json({ error: "Sign in required" }, { status: 401 });
+  if (!secretAccess) {
+    return Response.json({ error: "A valid sync API key is required" }, { status: 401 });
   }
   const body = await request.json().catch(() => ({})) as { mode?: string };
   const mode = body.mode === "full" ? "full" : "incremental";

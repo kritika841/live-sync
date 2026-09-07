@@ -1,4 +1,4 @@
-import { ensureSchema, logActivity, setSyncState, type RuntimeEnv } from "./database";
+import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type RuntimeEnv } from "./database";
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
@@ -177,7 +177,7 @@ function addField(report: SyncReport, field: string) {
   report.discrepanciesTotal += 1;
 }
 
-async function analyzeOrders(db: D1Database, orders: ShiprocketOrder[], report: SyncReport) {
+async function analyzeOrders(db: PostgresDatabase, orders: ShiprocketOrder[], report: SyncReport) {
   const snapshots = orders.map(orderSnapshot).filter((order) => order.id);
   if (!snapshots.length) return;
   const existing = await db.prepare(`
@@ -220,7 +220,7 @@ async function analyzeOrders(db: D1Database, orders: ShiprocketOrder[], report: 
   }
 }
 
-export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
+export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder[]) {
   const syncedAt = new Date().toISOString();
   for (let start = 0; start < orders.length; start += 25) {
     const statements = orders.slice(start, start + 25).map((order) => {
@@ -263,7 +263,7 @@ export async function upsertOrders(db: D1Database, orders: ShiprocketOrder[]) {
   }
 }
 
-async function syncNdrDetails(db: D1Database, token: string, channelId: number, report: SyncReport) {
+async function syncNdrDetails(db: PostgresDatabase, token: string, channelId: number, report: SyncReport) {
   let page = 1, totalPages = 1;
   do {
     const result = await apiJson<{ data?: ShiprocketNdr[]; meta?: { pagination?: { total_pages?: number } } }>(

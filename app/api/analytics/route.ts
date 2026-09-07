@@ -1,4 +1,3 @@
-import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 
 export const dynamic = "force-dynamic";
@@ -8,14 +7,9 @@ const rtoSql = "(UPPER(TRIM(status)) LIKE 'RTO%' OR UPPER(TRIM(status)) LIKE '%R
 const ndrSql = "(UPPER(TRIM(status)) IN ('UNDELIVERED', 'NDR', 'NDR PENDING') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%')";
 const cancelledSql = "UPPER(TRIM(status)) IN ('CANCELED', 'CANCELLED', 'ORDER CANCELED', 'ORDER CANCELLED')";
 const nonShippedSql = `UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED', 'PICKUP SCHEDULED', 'MANIFEST GENERATED', 'OUT FOR PICKUP', 'PICKUP EXCEPTION')`;
-const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(json_extract(raw_json, '$.rto_risk'), ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
+const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
 const terminalSql = `(${deliveredSql} OR ${rtoSql} OR ${ndrSql})`;
 const shippedSql = `(shipped_at != '' OR UPPER(TRIM(status)) IN ('SHIPPED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'IN TRANSIT-AT DESTINATION HUB', 'REACHED AT DESTINATION HUB', 'PICKED UP', 'OUT FOR DELIVERY', 'UNDELIVERED', 'NDR', 'NDR PENDING', 'DELIVERED', 'DELIVERED TO CUSTOMER') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%' OR ${rtoSql})`;
-
-async function isAllowed() {
-  if (process.env.NODE_ENV !== "production") return true;
-  return Boolean(await getChatGPTUser());
-}
 
 function indiaToday() {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
@@ -33,7 +27,6 @@ function metric(count: unknown, total: number) {
 }
 
 export async function GET(request: Request) {
-  if (!(await isAllowed())) return Response.json({ error: "Sign in required" }, { status: 401 });
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const url = new URL(request.url);
@@ -62,7 +55,10 @@ export async function GET(request: Request) {
       WHERE SUBSTR(out_for_delivery_at, 1, 10) = ?
       ORDER BY out_for_delivery_at DESC, id DESC
     `).bind(today).all<Record<string, unknown>>();
-    const orders = rows.results.map((row) => ({ ...row, previousUndelivered: Boolean(row.previousUndelivered) }));
+    const orders: Array<Record<string, unknown> & { previousUndelivered: boolean }> = rows.results.map((row) => ({
+      ...row,
+      previousUndelivered: Boolean(row.previousUndelivered),
+    }));
     const total = orders.length;
     const delivered = orders.filter((order) => /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(String(order.status))).length;
     const undelivered = orders.filter((order) => /^(UNDELIVERED|NDR|NDR PENDING)/i.test(String(order.status))).length;
@@ -166,8 +162,8 @@ export async function GET(request: Request) {
     byState: stateRows.results.map((row) => ({ ...row, rate: percent(Number(row.delivered || 0), Number(row.outcomes || 0)) })),
     ndrReasons: ndrReasons.results,
     filterOptions: {
-      couriers: ((options[0] as D1Result<{ value: string }>).results || []).map((row) => row.value),
-      states: ((options[1] as D1Result<{ value: string }>).results || []).map((row) => row.value),
+      couriers: options[0].results.map((row) => String(row.value)),
+      states: options[1].results.map((row) => String(row.value)),
     },
   });
 }

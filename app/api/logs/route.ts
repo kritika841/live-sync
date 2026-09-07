@@ -1,12 +1,8 @@
-import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  if (process.env.NODE_ENV === "production" && !(await getChatGPTUser())) {
-    return Response.json({ error: "Sign in required" }, { status: 401 });
-  }
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const rows = await runtime.DB.prepare(`

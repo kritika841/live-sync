@@ -1,4 +1,4 @@
-import { neon } from "@neondatabase/serverless";
+import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 
 type Row = Record<string, unknown>;
 
@@ -64,6 +64,10 @@ export class PreparedStatement {
     return this;
   }
 
+  toQuery() {
+    return { text: postgresPlaceholders(this.text), values: this.values };
+  }
+
   async all<T>(): Promise<QueryResult<T>> {
     return { results: (await this.query(this.text, this.values)) as T[] };
   }
@@ -79,9 +83,11 @@ export class PreparedStatement {
 
 export class PostgresDatabase {
   private readonly query: (text: string, values: unknown[]) => Promise<Row[]>;
+  private readonly sql: NeonQueryFunction<false, false>;
 
   constructor(connectionString: string) {
     const sql = neon(connectionString);
+    this.sql = sql;
     this.query = async (text, values) =>
       normalizeRows((await sql.query(postgresPlaceholders(text), values)) as Row[]);
   }
@@ -91,9 +97,12 @@ export class PostgresDatabase {
   }
 
   async batch(statements: PreparedStatement[]) {
-    const results = [];
-    for (const statement of statements) results.push(await statement.run());
-    return results;
+    if (!statements.length) return [];
+    const results = await this.sql.transaction(statements.map((statement) => {
+      const query = statement.toQuery();
+      return this.sql.query(query.text, query.values);
+    }));
+    return (results as Row[][]).map((rows) => ({ success: true, results: normalizeRows(rows) }));
   }
 }
 

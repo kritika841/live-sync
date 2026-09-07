@@ -222,8 +222,8 @@ async function analyzeOrders(db: PostgresDatabase, orders: ShiprocketOrder[], re
 
 export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder[]) {
   const syncedAt = new Date().toISOString();
-  for (let start = 0; start < orders.length; start += 25) {
-    const statements = orders.slice(start, start + 25).map((order) => {
+  for (let start = 0; start < orders.length; start += 100) {
+    const statements = orders.slice(start, start + 100).map((order) => {
       const value = orderSnapshot(order);
       if (!value.id) throw new Error("Shiprocket returned an order without an id");
       return db.prepare(`
@@ -264,49 +264,52 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
 }
 
 async function syncNdrDetails(db: PostgresDatabase, token: string, channelId: number, report: SyncReport) {
-  let page = 1, totalPages = 1;
-  do {
-    const result = await apiJson<{ data?: ShiprocketNdr[]; meta?: { pagination?: { total_pages?: number } } }>(
-      `${API_ROOT}/ndr/all?per_page=100&page=${page}`,
-      { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
-    );
-    const records = (result.data || []).filter((record) => !record.shipment_channel_id || Number(record.shipment_channel_id) === channelId);
-    report.ndrRecords += records.length;
-    const ids = records.map((record) => numberValue(record.id)).filter(Boolean);
-    const existing = ids.length ? await db.prepare(`
-      SELECT id, ndr_reason AS reason, ndr_attempts AS attempts, ndr_raised_at AS raisedAt
-      FROM orders WHERE id IN (${ids.map(() => "?").join(",")})
-    `).bind(...ids).all<{ id: number; reason: string; attempts: number; raisedAt: string }>() : { results: [] };
-    const existingById = new Map(existing.results.map((order) => [Number(order.id), order]));
-    for (let start = 0; start < records.length; start += 25) {
-      const statements = [];
-      for (const record of records.slice(start, start + 25)) {
-        const id = numberValue(record.id);
-        const current = existingById.get(id);
-        if (!current) continue;
-        const reason = stringValue(record.reason || record.ndr_reason || record.cancellation_reason);
-        const attempts = numberValue(record.attempts);
-        const raisedAt = normalizeShiprocketDate(record.ndr_raised_at);
-        const fields: string[] = [];
-        if (reason && reason !== current.reason) { fields.push("NDR reason"); addField(report, "NDR reason"); }
-        if (attempts && attempts !== Number(current.attempts || 0)) { fields.push("NDR attempts"); addField(report, "NDR attempts"); }
-        if (raisedAt && raisedAt !== current.raisedAt) { fields.push("NDR raised date"); addField(report, "NDR raised date"); }
-        if (fields.length) {
-          report.ndrEnriched += 1;
-          if (report.changes.length < 100) report.changes.push({ orderId: current.id, channelOrderId: stringValue(record.channel_order_id), fields });
-        }
-        statements.push(db.prepare(`
-          UPDATE orders SET ndr_reason = COALESCE(NULLIF(?, ''), ndr_reason),
-            ndr_attempts = CASE WHEN ? > 0 THEN ? ELSE ndr_attempts END,
-            ndr_raised_at = COALESCE(NULLIF(?, ''), ndr_raised_at), ndr_json = ?
-          WHERE id = ?
-        `).bind(reason, attempts, attempts, raisedAt, JSON.stringify(record), current.id));
+  const fetchPage = (page: number) => apiJson<{ data?: ShiprocketNdr[]; meta?: { pagination?: { total_pages?: number } } }>(
+    `${API_ROOT}/ndr/all?per_page=100&page=${page}`,
+    { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
+  );
+  const firstPage = await fetchPage(1);
+  const totalPages = Math.min(Number(firstPage.meta?.pagination?.total_pages || 1), 25);
+  const records = [...(firstPage.data || [])];
+  for (let start = 2; start <= totalPages; start += 4) {
+    const pageNumbers = Array.from({ length: Math.min(4, totalPages - start + 1) }, (_, index) => start + index);
+    const pages = await Promise.all(pageNumbers.map(fetchPage));
+    for (const page of pages) records.push(...(page.data || []));
+  }
+  const channelRecords = records.filter((record) => !record.shipment_channel_id || Number(record.shipment_channel_id) === channelId);
+  report.ndrRecords += channelRecords.length;
+  const ids = [...new Set(channelRecords.map((record) => numberValue(record.id)).filter(Boolean))];
+  const existing = ids.length ? await db.prepare(`
+    SELECT id, ndr_reason AS reason, ndr_attempts AS attempts, ndr_raised_at AS raisedAt
+    FROM orders WHERE id IN (${ids.map(() => "?").join(",")})
+  `).bind(...ids).all<{ id: number; reason: string; attempts: number; raisedAt: string }>() : { results: [] };
+  const existingById = new Map(existing.results.map((order) => [Number(order.id), order]));
+  for (let start = 0; start < channelRecords.length; start += 100) {
+    const statements = [];
+    for (const record of channelRecords.slice(start, start + 100)) {
+      const id = numberValue(record.id);
+      const current = existingById.get(id);
+      if (!current) continue;
+      const reason = stringValue(record.reason || record.ndr_reason || record.cancellation_reason);
+      const attempts = numberValue(record.attempts);
+      const raisedAt = normalizeShiprocketDate(record.ndr_raised_at);
+      const fields: string[] = [];
+      if (reason && reason !== current.reason) { fields.push("NDR reason"); addField(report, "NDR reason"); }
+      if (attempts && attempts !== Number(current.attempts || 0)) { fields.push("NDR attempts"); addField(report, "NDR attempts"); }
+      if (raisedAt && raisedAt !== current.raisedAt) { fields.push("NDR raised date"); addField(report, "NDR raised date"); }
+      if (fields.length) {
+        report.ndrEnriched += 1;
+        if (report.changes.length < 100) report.changes.push({ orderId: current.id, channelOrderId: stringValue(record.channel_order_id), fields });
       }
-      if (statements.length) await db.batch(statements);
+      statements.push(db.prepare(`
+        UPDATE orders SET ndr_reason = COALESCE(NULLIF(?, ''), ndr_reason),
+          ndr_attempts = CASE WHEN ? > 0 THEN ? ELSE ndr_attempts END,
+          ndr_raised_at = COALESCE(NULLIF(?, ''), ndr_raised_at), ndr_json = ?
+        WHERE id = ?
+      `).bind(reason, attempts, attempts, raisedAt, JSON.stringify(record), current.id));
     }
-    totalPages = Math.min(Number(result.meta?.pagination?.total_pages || 1), 25);
-    page += 1;
-  } while (page <= totalPages);
+    if (statements.length) await db.batch(statements);
+  }
 }
 
 const dateOnly = (date: Date) => date.toISOString().slice(0, 10);

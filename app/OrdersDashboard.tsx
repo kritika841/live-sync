@@ -182,7 +182,11 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     setSyncing(true);
     setError("");
     try {
-      const response = await fetch("/api/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "full" }) });
+      const response = await fetch("/api/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
+        body: JSON.stringify({ mode: "incremental" }),
+      });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error || "Sync failed");
       await Promise.all([loadOrders(), loadLogs()]);

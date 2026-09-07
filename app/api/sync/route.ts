@@ -2,6 +2,7 @@ import { getRuntimeEnv } from "../../../lib/database";
 import { syncShiprocketOrders } from "../../../lib/shiprocket";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 function safeEqual(left: string, right: string) {
   if (!left || !right || left.length !== right.length) return false;
@@ -10,11 +11,20 @@ function safeEqual(left: string, right: string) {
   return difference === 0;
 }
 
+function isSameOriginDashboardRequest(request: Request) {
+  const origin = request.headers.get("origin");
+  const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
+  const protocol = request.headers.get("x-forwarded-proto") || (process.env.NODE_ENV === "production" ? "https" : "http");
+  return request.headers.get("x-requested-with") === "satmi-orders-dashboard"
+    && request.headers.get("sec-fetch-site") === "same-origin"
+    && Boolean(origin && host && origin === `${protocol}://${host}`);
+}
+
 export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   const provided = request.headers.get("x-api-key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
   const secretAccess = safeEqual(provided, runtime.SHIPROCKET_WEBHOOK_SECRET || "");
-  if (!secretAccess) {
+  if (!secretAccess && !isSameOriginDashboardRequest(request)) {
     return Response.json({ error: "A valid sync API key is required" }, { status: 401 });
   }
   const body = await request.json().catch(() => ({})) as { mode?: string };

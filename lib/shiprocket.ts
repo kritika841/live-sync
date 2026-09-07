@@ -1,4 +1,5 @@
 import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type RuntimeEnv } from "./database";
+import { routeConfirmationOrders } from "./confirmation";
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
@@ -260,6 +261,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
       );
     });
     if (statements.length) await db.batch(statements);
+    await routeConfirmationOrders(db, orders.slice(start, start + 100).map((order) => numberValue(order.id)));
   }
 }
 

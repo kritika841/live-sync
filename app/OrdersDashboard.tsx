@@ -3,16 +3,18 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
+import ConfirmationPanel from "./ConfirmationPanel";
 import ReportsPanel from "./ReportsPanel";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
-type RiskKey = "all" | "low" | "high";
+type RiskKey = "all" | "low" | "high" | "approved";
 type Order = {
   id: number; channelOrderId: string; channelName: string; customerName: string;
   customerEmail: string; customerPhone: string; customerCity: string; customerState: string;
   orderDate: string; deliveredAt: string; status: string; paymentMethod: string; paymentStatus: string;
   total: number; pickupLocation: string; awb: string; courier: string;
   products: Array<{ name?: string; sku?: string; quantity?: number }>; syncedAt: string;
+  confirmationStatus?: string; confirmationUpdatedAt?: string; confirmedAt?: string; rejectedAt?: string;
 };
 type OrdersResponse = {
   orders: Order[];
@@ -36,7 +38,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 
 const emptyData: OrdersResponse = {
   orders: [], counts: { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 },
-  riskCounts: { all: 0, low: 0, high: 0 },
+  riskCounts: { all: 0, low: 0, high: 0, approved: 0 },
   total: 0, page: 1, perPage: 50, totalPages: 1, sync: {},
   filterOptions: { couriers: [], pickups: [] },
 };
@@ -59,7 +61,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
-  const [view, setView] = useState<"orders" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
+  const [view, setView] = useState<"orders" | "confirmation" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
@@ -84,6 +86,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const [logsLoading, setLogsLoading] = useState(true);
 
   const query = useMemo(() => {
+    if (risk === "approved") return new URLSearchParams({ risk, page: String(page) }).toString();
     const params = new URLSearchParams({ tab, risk, page: String(page), sort });
     if (deferredSearch) params.set("search", deferredSearch);
     if (payment) params.set("payment", payment);
@@ -289,6 +292,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const allResultsSelected = data.total > 0 && selectedOrders.size === data.total;
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
+    confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "Confirm high-risk orders and keep rejected orders ready for manual cancellation" },
     analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
     today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
     reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
@@ -307,6 +311,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       <aside className="sidebar" aria-label="Dashboard sections">
         <p>Workspace</p>
         <button className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span>Orders</button>
+        <button className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><span>✓</span>Confirmation</button>
         <button className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>⌁</span>Analytics</button>
         <button className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><span>↗</span>Today’s OFD</button>
         <button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><span>▤</span>Reports</button>
@@ -332,7 +337,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         <section className={`orders-card ${view !== "orders" ? "view-hidden" : ""}`}>
           <nav className="tabs" aria-label="Order status">
             {tabs.map((item) => (
-              <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => { setTab(item.key); setPage(1); }}>
+              <button key={item.key} className={tab === item.key && risk !== "approved" ? "active" : ""} onClick={() => { setTab(item.key); if (risk === "approved") setRisk("all"); setPage(1); }}>
                 {item.label}<span>{data.counts[item.key]}</span>
               </button>
             ))}
@@ -348,16 +353,21 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
             <button className={risk === "high" ? "active high" : "high"} onClick={() => { setRisk("high"); setPage(1); }}>
               <i />High risk <span>{data.riskCounts.high}</span>
             </button>
+            <button className={risk === "approved" ? "active approved" : "approved"} onClick={() => { setRisk("approved"); setTab("all"); setFilterOpen(false); setPage(1); }}>
+              <i />Approved <span>{data.riskCounts.approved}</span>
+            </button>
           </nav>
 
-          {tab === "delivered" && (
+          {risk === "approved" && <div className="approved-scope-note"><span>✓</span>All customer-confirmed orders are shown here. Order status, risk, search and date filters do not apply.</div>}
+
+          {risk !== "approved" && tab === "delivered" && (
             <div className="delivery-date-filter">
               <label><span>Delivered date</span><input type="date" value={deliveredDate} max={todayValue} onChange={(event) => { setDeliveredDate(event.target.value); setPage(1); }} /></label>
               {deliveredDate && <button onClick={() => { setDeliveredDate(""); setPage(1); }}>Clear date</button>}
             </div>
           )}
 
-          <div className="toolbar">
+          {risk !== "approved" && <div className="toolbar">
             <label className="search"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} aria-label="Search orders" placeholder="Search order, customer, AWB or SKU" /></label>
             <div className="toolbar-actions">
               <label className="sort-control"><span>Sort</span><select value={sort} onChange={(event) => { setSort(event.target.value as "newest" | "oldest"); setPage(1); }} aria-label="Sort orders by order date"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
@@ -365,9 +375,9 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
                 Filters{appliedFilters > 0 && <b>{appliedFilters}</b>}<span>＋</span>
               </button>
             </div>
-          </div>
+          </div>}
 
-          {filterOpen && (
+          {risk !== "approved" && filterOpen && (
             <div className="filter-panel">
               <label>Payment<select value={payment} onChange={(event) => { setPayment(event.target.value); setPage(1); }}><option value="">All payments</option><option value="prepaid">Prepaid</option><option value="cod">COD</option></select></label>
               <label>Courier<select value={courier} onChange={(event) => { setCourier(event.target.value); setPage(1); }}><option value="">All couriers</option>{data.filterOptions.couriers.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
@@ -403,7 +413,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
                       <td data-label="Order"><div className="order-cell"><input type="checkbox" checked={selectedOrders.has(order.id)} onChange={() => toggleOrder(order)} aria-label={`Select order ${order.channelOrderId || order.id}`} /><span><strong>#{order.channelOrderId || order.id}</strong><small>{order.channelName || "Shopify_5"}</small></span></div></td>
                       <td data-label="Customer"><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || order.customerPhone || "—"}</small></td>
                       <td data-label="Products"><strong>{firstProduct?.name || "—"}</strong><small>{firstProduct?.sku ? `SKU ${firstProduct.sku}` : ""}{order.products.length > 1 ? ` · +${order.products.length - 1} more` : ""}</small></td>
-                      <td data-label="Order date">{formatDate(order.orderDate)}{order.deliveredAt && <small>Delivered {formatDate(order.deliveredAt)}</small>}</td>
+                      <td data-label="Order date">{formatDate(order.orderDate)}{risk === "approved" && order.confirmedAt ? <small>Confirmed {formatDate(order.confirmedAt)}</small> : order.deliveredAt && <small>Delivered {formatDate(order.deliveredAt)}</small>}</td>
                       <td data-label="Payment"><span className={`payment ${order.paymentMethod.toLowerCase()}`}>{order.paymentMethod || "—"}</span></td>
                       <td data-label="Amount"><strong>{formatCurrency(order.total)}</strong></td>
                       <td data-label="Status"><span className={`status ${statusClass(order.status)}`}><i />{order.status || "New"}</span></td>
@@ -423,6 +433,8 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
             <footer className="pagination"><p>Showing {(page - 1) * data.perPage + 1}–{Math.min(page * data.perPage, data.total)} of {data.total} orders</p><div><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>Previous</button><span>Page {page} of {data.totalPages}</span><button disabled={page >= data.totalPages} onClick={() => setPage((value) => value + 1)}>Next</button></div></footer>
           )}
         </section>
+
+        <ConfirmationPanel active={view === "confirmation"} />
 
         <AnalyticsPanel mode="overview" active={view === "analytics"} />
         <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} />

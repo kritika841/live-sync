@@ -37,7 +37,7 @@ export async function GET(request: Request) {
   if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
   if (deliveredDate && tab === "delivered") { filters.push("SUBSTR(delivered_at, 1, 10) = ?"); filterValues.push(deliveredDate); }
 
-  const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(json_extract(raw_json, '$.rto_risk'), ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
+  const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
   const riskSql = risk === "high" ? highRiskSql : risk === "low" ? `NOT (${highRiskSql})` : "1 = 1";
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
   const where = [sqlForTab(tab), riskSql, ...filters];

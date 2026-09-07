@@ -67,6 +67,7 @@ export type RuntimeEnv = {
 };
 
 let database: PostgresDatabase | undefined;
+let schemaReady: Promise<void> | undefined;
 
 export function getRuntimeEnv(): RuntimeEnv {
   const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
@@ -85,6 +86,14 @@ export function getRuntimeEnv(): RuntimeEnv {
 }
 
 export async function ensureSchema(db: PostgresDatabase) {
+  schemaReady ??= createSchema(db).catch((error) => {
+    schemaReady = undefined;
+    throw error;
+  });
+  return schemaReady;
+}
+
+async function createSchema(db: PostgresDatabase) {
   await db.batch([
     db.prepare(`
       CREATE TABLE IF NOT EXISTS orders (

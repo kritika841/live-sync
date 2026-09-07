@@ -2,6 +2,48 @@ import { neon } from "@neondatabase/serverless";
 
 type Row = Record<string, unknown>;
 
+const resultKeyAliases: Record<string, string> = {
+  channelorderid: "channelOrderId",
+  channelname: "channelName",
+  customername: "customerName",
+  customeremail: "customerEmail",
+  customerphone: "customerPhone",
+  customercity: "customerCity",
+  customerstate: "customerState",
+  orderdate: "orderDate",
+  createdat: "createdAt",
+  updatedat: "updatedAt",
+  deliveredat: "deliveredAt",
+  shippedat: "shippedAt",
+  outfordeliveryat: "outForDeliveryAt",
+  firstoutfordeliveryat: "firstOutForDeliveryAt",
+  paymentmethod: "paymentMethod",
+  paymentstatus: "paymentStatus",
+  shippingcost: "shippingCost",
+  pickuplocation: "pickupLocation",
+  shipmentid: "shipmentId",
+  productsjson: "productsJson",
+  rawjson: "rawJson",
+  syncedat: "syncedAt",
+  eventtype: "eventType",
+  detailsjson: "detailsJson",
+  fieldsjson: "fieldsJson",
+  changesjson: "changesJson",
+  neworders: "newOrders",
+  changedorders: "changedOrders",
+  unchangedorders: "unchangedOrders",
+  discrepanciestotal: "discrepanciesTotal",
+  ndrrecords: "ndrRecords",
+  ndrenriched: "ndrEnriched",
+  ndrattempts: "ndrAttempts",
+  ndrraisedat: "ndrRaisedAt",
+  previousundelivered: "previousUndelivered",
+};
+
+function normalizeRows(rows: Row[]) {
+  return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [resultKeyAliases[key] || key, value])));
+}
+
 export type QueryResult<T> = { results: T[] };
 
 function postgresPlaceholders(query: string) {
@@ -41,7 +83,7 @@ export class PostgresDatabase {
   constructor(connectionString: string) {
     const sql = neon(connectionString);
     this.query = async (text, values) =>
-      (await sql.query(postgresPlaceholders(text), values)) as Row[];
+      normalizeRows((await sql.query(postgresPlaceholders(text), values)) as Row[]);
   }
 
   prepare(text: string) {

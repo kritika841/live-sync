@@ -326,9 +326,8 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
   try {
     const token = await getShiprocketToken(runtime);
     const channel = await resolveChannel(runtime, token);
-    let page = 1, totalPages = 1, synced = 0;
     const report: SyncReport = { mode: effectiveMode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, fields: {}, changes: [] };
-    do {
+    const fetchPage = (page: number) => {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
       if (effectiveMode === "incremental") {
         const from = new Date();
@@ -336,17 +335,25 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
         params.set("updated_from", dateOnly(from));
         params.set("updated_to", dateOnly(new Date()));
       }
-      const result = await apiJson<{ data?: ShiprocketOrder[]; meta?: { pagination?: { total_pages?: number } } }>(
+      return apiJson<{ data?: ShiprocketOrder[]; meta?: { pagination?: { total_pages?: number } } }>(
         `${API_ROOT}/orders?${params.toString()}`,
         { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
       );
-      const pageOrders = result.data || [];
-      await analyzeOrders(db, pageOrders, report);
-      await upsertOrders(db, pageOrders);
-      synced += pageOrders.length;
-      totalPages = Math.min(Number(result.meta?.pagination?.total_pages || 1), 500);
-      page += 1;
-    } while (page <= totalPages);
+    };
+    const firstPage = await fetchPage(1);
+    const totalPages = Math.min(Number(firstPage.meta?.pagination?.total_pages || 1), 500);
+    const orders = [...(firstPage.data || [])];
+    for (let start = 2; start <= totalPages; start += 4) {
+      const pageNumbers = Array.from({ length: Math.min(4, totalPages - start + 1) }, (_, index) => start + index);
+      const pages = await Promise.all(pageNumbers.map(fetchPage));
+      for (const page of pages) orders.push(...(page.data || []));
+    }
+    for (let start = 0; start < orders.length; start += 100) {
+      const batch = orders.slice(start, start + 100);
+      await analyzeOrders(db, batch, report);
+      await upsertOrders(db, batch);
+    }
+    const synced = orders.length;
     await syncNdrDetails(db, token, channel.id, report);
     const completedAt = new Date().toISOString();
     report.completedAt = completedAt;

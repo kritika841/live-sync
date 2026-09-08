@@ -286,14 +286,13 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
 
   const appliedFilters = [payment, courier, pickup, from, to, tab === "delivered" ? deliveredDate : ""].filter(Boolean).length;
   const lastSync = data.sync.last_sync_at;
-  const syncHealthy = data.sync.sync_status === "healthy";
   const visibleIds = data.orders.map((order) => order.id);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrders.has(id));
   const someVisibleSelected = visibleIds.some((id) => selectedOrders.has(id));
   const allResultsSelected = data.total > 0 && selectedOrders.size === data.total;
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
-    confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "Confirm high-risk orders and keep rejected orders ready for manual cancellation" },
+    confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "" },
     campaigns: { eyebrow: "Customer verification", title: "Campaigns", subcopy: "Create, prioritize, and automatically assign confirmation campaigns" },
     analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
     today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
@@ -305,7 +304,6 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">S</span><span>Satmi</span></div>
-        <div className="channel-pill"><span className={`live-dot ${syncHealthy ? "online" : ""}`} /> Satmi · Shopify_5</div>
         <div className="user-label"><span className="lock-dot">◆</span>{userLabel}</div>
       </header>
 
@@ -326,7 +324,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           <div>
             <p className="eyebrow">{viewCopy.eyebrow}</p>
             <h1>{viewCopy.title}</h1>
-            <p className="subcopy">{viewCopy.subcopy}</p>
+            {viewCopy.subcopy && <p className="subcopy">{viewCopy.subcopy}</p>}
           </div>
           {view === "orders" ? (
             <button className="sync-button" onClick={syncNow} disabled={syncing}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "Syncing…" : "Sync now"}</button>
@@ -356,12 +354,10 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
             <button className={risk === "high" ? "active high" : "high"} onClick={() => { setRisk("high"); setPage(1); }}>
               <i />High risk <span>{data.riskCounts.high}</span>
             </button>
-            <button className={risk === "approved" ? "active approved" : "approved"} onClick={() => { setRisk("approved"); setTab("all"); setFilterOpen(false); setPage(1); }}>
+            {tab === "new" && <button className={risk === "approved" ? "active approved" : "approved"} onClick={() => { setRisk("approved"); setFilterOpen(false); setPage(1); }}>
               <i />Approved <span>{data.riskCounts.approved}</span>
-            </button>
+            </button>}
           </nav>
-
-          {risk === "approved" && <div className="approved-scope-note"><span>✓</span>All customer-confirmed orders are shown here. Order status, risk, search and date filters do not apply.</div>}
 
           {risk !== "approved" && tab === "delivered" && (
             <div className="delivery-date-filter">

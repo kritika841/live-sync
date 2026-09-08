@@ -146,6 +146,7 @@ function shipmentFor(order: ShiprocketOrder) {
 
 function orderSnapshot(order: ShiprocketOrder) {
   const shipment = shipmentFor(order);
+  const others = order.others && typeof order.others === "object" ? order.others as Record<string, unknown> : {};
   const status = stringValue(order.status || shipment.status || shipment.shipment_status);
   const deliveredAt = normalizeShiprocketDate(
     order.delivered_date || shipment.delivered_date || (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status) ? order.updated_at || shipment.updated_at : ""),
@@ -153,7 +154,7 @@ function orderSnapshot(order: ShiprocketOrder) {
   return {
     id: numberValue(order.id), channelOrderId: stringValue(order.channel_order_id), channelId: numberValue(order.channel_id),
     channelName: stringValue(order.channel_name), customerName: stringValue(order.customer_name),
-    customerEmail: stringValue(order.customer_email), customerPhone: stringValue(order.customer_phone),
+    customerEmail: stringValue(order.customer_email), customerPhone: stringValue(order.customer_phone_unmasked || others.billing_phone_number || order.customer_phone || others.billing_phone),
     customerCity: stringValue(order.customer_city || order.billing_city || order.shipping_city),
     customerState: stringValue(order.customer_state || order.billing_state || order.shipping_state),
     orderDate: normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),

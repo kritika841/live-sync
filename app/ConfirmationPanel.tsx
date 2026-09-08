@@ -53,6 +53,7 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
   const [autoAssign, setAutoAssign] = useState(false);
   const [candidateSearch, setCandidateSearch] = useState("");
   const [selectedCandidates, setSelectedCandidates] = useState<Set<number>>(new Set());
+  const [draggedCampaignId, setDraggedCampaignId] = useState("");
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -123,6 +124,19 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
     await post({ action: "reorder_campaigns", campaignIds: next.map((campaign) => campaign.id) });
   }
 
+  async function dropCampaign(targetCampaignId: string) {
+    if (!draggedCampaignId || draggedCampaignId === targetCampaignId) return setDraggedCampaignId("");
+    const next = [...data.campaigns];
+    const from = next.findIndex((campaign) => campaign.id === draggedCampaignId);
+    const to = next.findIndex((campaign) => campaign.id === targetCampaignId);
+    if (from < 0 || to < 0) return setDraggedCampaignId("");
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setData((current) => ({ ...current, campaigns: next }));
+    setDraggedCampaignId("");
+    await post({ action: "reorder_campaigns", campaignIds: next.map((campaign) => campaign.id) });
+  }
+
   const candidates = (() => {
     const query = candidateSearch.trim().toLowerCase();
     return data.candidates.filter((order) => {
@@ -179,9 +193,9 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
 
       {!loading && section === "campaigns" && <div className="campaign-layout"><article className="confirmation-card">
         <header className="confirmation-header"><div><p className="eyebrow">CAMPAIGN PRIORITY</p><h2>Confirmation campaigns</h2><p>Higher campaigns are worked first. High RTO remains permanently automatic.</p></div><button className="campaign-create" onClick={() => setCreateOpen((value) => !value)}>{createOpen ? "Close" : "+ New campaign"}</button></header>
-        <div className="campaign-list">{data.campaigns.map((campaign, index) => <div className={`campaign-row ${campaign.isActive ? "" : "inactive"}`} key={campaign.id}>
-          <div className="campaign-rank">{index + 1}</div><div><strong>{campaign.name}{campaign.id === "cmp_default_high_rto" && <em>Permanent</em>}</strong><p>{campaign.description || "No description"}</p><small>{Number(campaign.orderCount)} assigned · {campaign.autoAssign ? "Automatic" : "Manual"}{campaign.criteria.tags?.length ? ` · Tags: ${campaign.criteria.tags.join(", ")}` : ""}{campaign.criteria.dateFrom || campaign.criteria.dateTo ? ` · Dates: ${campaign.criteria.dateFrom || "Any"} to ${campaign.criteria.dateTo || "Any"}` : ""}</small></div>
-          <div className="campaign-row-actions"><button disabled={index === 0 || busy} onClick={() => void moveCampaign(index, -1)}>↑</button><button disabled={index === data.campaigns.length - 1 || busy} onClick={() => void moveCampaign(index, 1)}>↓</button>{campaign.id !== "cmp_default_high_rto" && campaign.isActive && <button className="danger" disabled={busy} onClick={() => void post({ action: "deactivate_campaign", campaignId: campaign.id })}>Deactivate</button>}</div>
+        <div className="campaign-list">{data.campaigns.map((campaign, index) => <div className={`campaign-row ${campaign.isActive ? "" : "inactive"} ${draggedCampaignId === campaign.id ? "dragging" : ""}`} key={campaign.id} onDragOver={(event) => event.preventDefault()} onDrop={() => void dropCampaign(campaign.id)}>
+          <div className="campaign-drag-handle" role="button" tabIndex={0} draggable={!busy} aria-label={`Move ${campaign.name}. Priority ${index + 1}`} title="Drag to change priority" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggedCampaignId(campaign.id); }} onDragEnd={() => setDraggedCampaignId("")} onKeyDown={(event) => { if (event.key === "ArrowUp") void moveCampaign(index, -1); if (event.key === "ArrowDown") void moveCampaign(index, 1); }}>{Array.from({ length: 6 }, (_, dot) => <span key={dot}/>)}</div><div><strong>{campaign.name}{campaign.id === "cmp_default_high_rto" && <em>Permanent</em>}</strong><p>{campaign.description || "No description"}</p><small>Priority {index + 1} · {Number(campaign.orderCount)} assigned · {campaign.autoAssign ? "Automatic" : "Manual"}{campaign.criteria.tags?.length ? ` · Tags: ${campaign.criteria.tags.join(", ")}` : ""}{campaign.criteria.dateFrom || campaign.criteria.dateTo ? ` · Dates: ${campaign.criteria.dateFrom || "Any"} to ${campaign.criteria.dateTo || "Any"}` : ""}</small></div>
+          <div className="campaign-row-actions">{campaign.id !== "cmp_default_high_rto" && campaign.isActive && <button className="danger" disabled={busy} onClick={() => void post({ action: "deactivate_campaign", campaignId: campaign.id })}>Deactivate</button>}</div>
         </div>)}</div>
       </article>
 

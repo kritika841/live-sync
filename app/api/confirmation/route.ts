@@ -1,4 +1,4 @@
-import { ACTIONABLE_STATUS_SQL, routeConfirmationOrders } from "../../../lib/confirmation";
+import { ACTIONABLE_STATUS_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 
 export const dynamic = "force-dynamic";
@@ -17,24 +17,38 @@ const orderColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_nam
   COALESCE(o.raw_json::jsonb->>'customer_address', '') AS customerAddress,
   COALESCE(o.raw_json::jsonb->>'customer_pincode', '') AS customerPincode,
   o.order_date AS orderDate, o.status, o.payment_method AS paymentMethod, o.total,
-  o.products_json AS productsJson, o.confirmation_status AS confirmationStatus,
+  o.products_json AS productsJson, o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus,
   o.confirmation_updated_at AS confirmationUpdatedAt, o.confirmed_at AS confirmedAt, o.rejected_at AS rejectedAt,
   c.id AS campaignId, c.name AS campaignName, c.position AS campaignPosition, ca.position AS orderPosition`;
 
+const candidateColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_name AS customerName,
+  o.customer_phone AS customerPhone, o.order_date AS orderDate, o.payment_method AS paymentMethod,
+  o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus, c.id AS campaignId, c.name AS campaignName`;
+
 function serializeOrder(row: Record<string, unknown>, attempts: Record<string, unknown>[] = []) {
+  let raw: Record<string, unknown> = {};
+  try { raw = JSON.parse(String(row.rawJson || "{}")); } catch { /* Keep malformed legacy payloads usable. */ }
   return {
     ...row,
     products: JSON.parse(String(row.productsJson || "[]")),
     productsJson: undefined,
+    rawJson: undefined,
+    tags: extractOrderTags(raw),
     attempts,
   };
+}
+
+function serializeCandidate(row: Record<string, unknown>) {
+  let raw: Record<string, unknown> = {};
+  try { raw = JSON.parse(String(row.rawJson || "{}")); } catch { /* Keep malformed legacy payloads usable. */ }
+  return { ...row, rawJson: undefined, products: [], attempts: [], tags: extractOrderTags(raw) };
 }
 
 export async function GET() {
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const now = new Date().toISOString();
-  const [queue, rejected, campaigns, candidates] = await Promise.all([
+  const [queue, rejected, campaigns, candidates, availableTagRows] = await Promise.all([
     runtime.DB.prepare(`SELECT ${orderColumns}
       FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id JOIN campaigns c ON c.id=ca.campaign_id
       WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
@@ -48,10 +62,17 @@ export async function GET() {
       c.is_active AS isActive, c.auto_assign AS autoAssign, COUNT(ca.order_id) AS orderCount
       FROM campaigns c LEFT JOIN campaign_assignments ca ON ca.campaign_id=c.id
       GROUP BY c.id ORDER BY c.position, c.created_at`).all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT ${orderColumns}
+    runtime.DB.prepare(`SELECT ${candidateColumns}
       FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
       WHERE ${ACTIONABLE_STATUS_SQL} AND o.confirmation_status NOT IN ('confirmed','rejected')
-      ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC LIMIT 300`).all<Record<string, unknown>>(),
+      ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC`).all<Record<string, unknown>>(),
+    runtime.DB.prepare(`SELECT MIN(BTRIM(tag)) AS tag FROM (
+      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'order_tag')='array' THEN raw_json::jsonb->'order_tag' ELSE '[]'::jsonb END) AS tag FROM orders
+      UNION ALL
+      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'sr_tags')='array' THEN raw_json::jsonb->'sr_tags' ELSE '[]'::jsonb END) AS tag FROM orders
+      UNION ALL
+      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'tags')='array' THEN raw_json::jsonb->'tags' ELSE '[]'::jsonb END) AS tag FROM orders
+    ) available WHERE BTRIM(tag)<>'' GROUP BY LOWER(BTRIM(tag)) ORDER BY LOWER(MIN(BTRIM(tag)))`).all<{ tag: string }>(),
   ]);
   const visibleIds = [...queue.results, ...rejected.results].map((row) => Number(row.id));
   const attemptRows = visibleIds.length ? await runtime.DB.prepare(`SELECT id, order_id AS orderId, attempt_number AS attemptNumber,
@@ -68,7 +89,8 @@ export async function GET() {
     queue: queue.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
     rejected: rejected.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
     campaigns: campaigns.results.map((row) => ({ ...row, criteria: JSON.parse(String(row.criteriaJson || "{}")), criteriaJson: undefined })),
-    candidates: candidates.results.map((row) => serializeOrder(row)),
+    candidates: candidates.results.map((row) => serializeCandidate(row)),
+    availableTags: availableTagRows.results.map((row) => row.tag),
     counts: { queue: queue.results.length, rejected: rejected.results.length, approved: Number(approvedCount?.total || 0) },
   });
 }
@@ -85,7 +107,13 @@ export async function POST(request: Request) {
     if (action === "create_campaign") {
       const name = String(body.name || "").trim();
       const description = String(body.description || "").trim();
-      const criteria = body.criteria && typeof body.criteria === "object" ? body.criteria : {};
+      const inputCriteria = body.criteria && typeof body.criteria === "object" ? body.criteria as Record<string, unknown> : {};
+      const tags = Array.isArray(inputCriteria.tags) ? [...new Set(inputCriteria.tags.map(String).map((tag) => tag.trim()).filter(Boolean))].slice(0, 50) : [];
+      let dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(inputCriteria.dateFrom || "")) ? String(inputCriteria.dateFrom) : "";
+      let dateTo = /^\d{4}-\d{2}-\d{2}$/.test(String(inputCriteria.dateTo || "")) ? String(inputCriteria.dateTo) : "";
+      if (dateFrom && dateTo && dateFrom > dateTo) [dateFrom, dateTo] = [dateTo, dateFrom];
+      const paymentMethod = ["cod", "prepaid"].includes(String(inputCriteria.paymentMethod || "").toLowerCase()) ? String(inputCriteria.paymentMethod).toLowerCase() : "all";
+      const criteria = { tags, dateFrom, dateTo, paymentMethod };
       const orderIds = Array.isArray(body.orderIds) ? [...new Set(body.orderIds.map(Number).filter(Boolean))].slice(0, 500) : [];
       const autoAssign = Boolean(body.autoAssign);
       if (!name) throw new Error("Campaign name is required");

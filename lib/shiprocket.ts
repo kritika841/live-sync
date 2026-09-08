@@ -334,8 +334,12 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
       if (effectiveMode === "incremental") {
         const from = new Date();
         from.setUTCDate(from.getUTCDate() - 2);
+        const through = new Date();
+        through.setUTCDate(through.getUTCDate() + 1);
         params.set("updated_from", dateOnly(from));
-        params.set("updated_to", dateOnly(new Date()));
+        // Shiprocket treats a date-only upper bound as midnight at the start of that date.
+        // Using tomorrow keeps every order created or updated today inside the window.
+        params.set("updated_to", dateOnly(through));
       }
       return apiJson<{ data?: ShiprocketOrder[]; meta?: { pagination?: { total_pages?: number } } }>(
         `${API_ROOT}/orders?${params.toString()}`,

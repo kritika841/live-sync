@@ -1,26 +1,26 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 
 type Attempt = { attemptNumber: number; outcome: string; note: string; rejectionReason?: string; nextActionAt?: string; createdAt: string };
 type ConfirmationOrder = {
   id: number; channelOrderId: string; customerName: string; customerPhone: string; customerCity: string;
   customerState: string; customerAddress: string; customerPincode: string; orderDate: string; status: string;
   paymentMethod: string; total: number; products: Array<{ name?: string; quantity?: number; sku?: string }>;
-  confirmationStatus: string; campaignName?: string; rejectedAt?: string; attempts: Attempt[];
+  confirmationStatus: string; campaignName?: string; rejectedAt?: string; tags: string[]; attempts: Attempt[];
 };
 type Campaign = {
   id: string; name: string; description: string; position: number; isActive: boolean; autoAssign: boolean;
-  orderCount: number; criteria: { risk?: string; paymentMethod?: string };
+  orderCount: number; criteria: { risk?: string; paymentMethod?: string; tags?: string[]; dateFrom?: string; dateTo?: string };
 };
 type ConfirmationData = {
   queue: ConfirmationOrder[]; rejected: ConfirmationOrder[]; candidates: ConfirmationOrder[];
-  campaigns: Campaign[]; counts: { queue: number; rejected: number; approved: number };
+  campaigns: Campaign[]; availableTags: string[]; counts: { queue: number; rejected: number; approved: number };
 };
 type Mode = "queue" | "campaigns" | "rejected";
 type OrderAction = "confirm" | "callback" | "unreachable" | "reject";
 
-const emptyData: ConfirmationData = { queue: [], rejected: [], candidates: [], campaigns: [], counts: { queue: 0, rejected: 0, approved: 0 } };
+const emptyData: ConfirmationData = { queue: [], rejected: [], candidates: [], campaigns: [], availableTags: [], counts: { queue: 0, rejected: 0, approved: 0 } };
 
 function when(value?: string) {
   if (!value) return "—";
@@ -46,8 +46,10 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [campaignName, setCampaignName] = useState("");
   const [campaignDescription, setCampaignDescription] = useState("");
-  const [campaignRisk, setCampaignRisk] = useState("all");
   const [campaignPayment, setCampaignPayment] = useState("all");
+  const [campaignDateFrom, setCampaignDateFrom] = useState("");
+  const [campaignDateTo, setCampaignDateTo] = useState("");
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
   const [autoAssign, setAutoAssign] = useState(false);
   const [candidateSearch, setCandidateSearch] = useState("");
   const [selectedCandidates, setSelectedCandidates] = useState<Set<number>>(new Set());
@@ -108,8 +110,9 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
 
   async function createCampaign(event: FormEvent) {
     event.preventDefault();
-    const complete = await post({ action: "create_campaign", name: campaignName, description: campaignDescription, autoAssign, criteria: { risk: campaignRisk, paymentMethod: campaignPayment }, orderIds: [...selectedCandidates] });
-    if (complete) { setCreateOpen(false); setCampaignName(""); setCampaignDescription(""); setSelectedCandidates(new Set()); }
+    const matchingIds = new Set(candidates.map((order) => order.id));
+    const complete = await post({ action: "create_campaign", name: campaignName, description: campaignDescription, autoAssign, criteria: { paymentMethod: campaignPayment, tags: [...selectedTags], dateFrom: campaignDateFrom, dateTo: campaignDateTo }, orderIds: [...selectedCandidates].filter((id) => matchingIds.has(id)) });
+    if (complete) { setCreateOpen(false); setCampaignName(""); setCampaignDescription(""); setSelectedCandidates(new Set()); setSelectedTags(new Set()); setCampaignDateFrom(""); setCampaignDateTo(""); }
   }
 
   async function moveCampaign(index: number, direction: -1 | 1) {
@@ -120,14 +123,18 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
     await post({ action: "reorder_campaigns", campaignIds: next.map((campaign) => campaign.id) });
   }
 
-  const candidates = useMemo(() => {
+  const candidates = (() => {
     const query = candidateSearch.trim().toLowerCase();
     return data.candidates.filter((order) => {
-      if (campaignRisk !== "all" && campaignRisk !== "high") return false;
       if (campaignPayment !== "all" && order.paymentMethod?.toLowerCase() !== campaignPayment) return false;
+      const orderTags = order.tags.map((tag) => tag.toLowerCase());
+      if ([...selectedTags].some((tag) => !orderTags.includes(tag.toLowerCase()))) return false;
+      const orderDate = order.orderDate.slice(0, 10);
+      if (campaignDateFrom && orderDate < campaignDateFrom) return false;
+      if (campaignDateTo && orderDate > campaignDateTo) return false;
       return !query || [order.channelOrderId, order.customerName, order.customerPhone].some((value) => value?.toLowerCase().includes(query));
     });
-  }, [campaignPayment, campaignRisk, candidateSearch, data.candidates]);
+  })();
 
   return (
     <section className={`confirmation-view ${active ? "" : "view-hidden"}`}>
@@ -163,16 +170,17 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
       {!loading && mode === "campaigns" && <div className="campaign-layout"><article className="confirmation-card">
         <header className="confirmation-header"><div><p className="eyebrow">CAMPAIGN PRIORITY</p><h2>Confirmation campaigns</h2><p>Higher campaigns are worked first. High RTO remains permanently automatic.</p></div><button className="campaign-create" onClick={() => setCreateOpen((value) => !value)}>{createOpen ? "Close" : "+ New campaign"}</button></header>
         <div className="campaign-list">{data.campaigns.map((campaign, index) => <div className={`campaign-row ${campaign.isActive ? "" : "inactive"}`} key={campaign.id}>
-          <div className="campaign-rank">{index + 1}</div><div><strong>{campaign.name}{campaign.id === "cmp_default_high_rto" && <em>Permanent</em>}</strong><p>{campaign.description || "No description"}</p><small>{Number(campaign.orderCount)} assigned · {campaign.autoAssign ? "Automatic" : "Manual"}</small></div>
+          <div className="campaign-rank">{index + 1}</div><div><strong>{campaign.name}{campaign.id === "cmp_default_high_rto" && <em>Permanent</em>}</strong><p>{campaign.description || "No description"}</p><small>{Number(campaign.orderCount)} assigned · {campaign.autoAssign ? "Automatic" : "Manual"}{campaign.criteria.tags?.length ? ` · Tags: ${campaign.criteria.tags.join(", ")}` : ""}{campaign.criteria.dateFrom || campaign.criteria.dateTo ? ` · Dates: ${campaign.criteria.dateFrom || "Any"} to ${campaign.criteria.dateTo || "Any"}` : ""}</small></div>
           <div className="campaign-row-actions"><button disabled={index === 0 || busy} onClick={() => void moveCampaign(index, -1)}>↑</button><button disabled={index === data.campaigns.length - 1 || busy} onClick={() => void moveCampaign(index, 1)}>↓</button>{campaign.id !== "cmp_default_high_rto" && campaign.isActive && <button className="danger" disabled={busy} onClick={() => void post({ action: "deactivate_campaign", campaignId: campaign.id })}>Deactivate</button>}</div>
         </div>)}</div>
       </article>
 
       {createOpen && <form className="confirmation-card campaign-form" onSubmit={createCampaign}>
         <header className="confirmation-header"><div><p className="eyebrow">NEW CAMPAIGN</p><h2>Create and assign</h2></div><button className="campaign-create" disabled={busy} type="submit">{busy ? "Saving…" : "Create campaign"}</button></header>
-        <div className="campaign-fields"><label>Name<input required value={campaignName} onChange={(event) => setCampaignName(event.target.value)} placeholder="e.g. COD verification"/></label><label>Description<input value={campaignDescription} onChange={(event) => setCampaignDescription(event.target.value)} placeholder="Optional context"/></label><label>Risk<select value={campaignRisk} onChange={(event) => setCampaignRisk(event.target.value)}><option value="all">All risk levels</option><option value="high">High RTO only</option></select></label><label>Payment<select value={campaignPayment} onChange={(event) => setCampaignPayment(event.target.value)}><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select></label><label className="campaign-check"><input type="checkbox" checked={autoAssign} onChange={(event) => setAutoAssign(event.target.checked)}/>Auto-assign future matches</label></div>
-        <div className="candidate-heading"><strong>Select current orders</strong><input value={candidateSearch} onChange={(event) => setCandidateSearch(event.target.value)} placeholder="Search order, customer or phone"/><button type="button" onClick={() => setSelectedCandidates(new Set(candidates.map((order) => order.id)))}>Select visible</button></div>
-        <div className="candidate-list">{candidates.map((order) => <label key={order.id}><input aria-label={`Select order ${order.channelOrderId}`} type="checkbox" checked={selectedCandidates.has(order.id)} onChange={(event) => setSelectedCandidates((current) => { const next = new Set(current); if (event.target.checked) next.add(order.id); else next.delete(order.id); return next; })}/><span><strong>#{order.channelOrderId} · {order.customerName}</strong><small>{order.paymentMethod} · {order.campaignName || "Unassigned"}</small></span></label>)}</div>
+        <div className="campaign-fields"><label>Name<input required value={campaignName} onChange={(event) => setCampaignName(event.target.value)} placeholder="e.g. B2G1 verification"/></label><label>Description<input value={campaignDescription} onChange={(event) => setCampaignDescription(event.target.value)} placeholder="Optional context"/></label><label>From date<input type="date" value={campaignDateFrom} max={campaignDateTo || undefined} onChange={(event) => setCampaignDateFrom(event.target.value)}/></label><label>To date<input type="date" value={campaignDateTo} min={campaignDateFrom || undefined} onChange={(event) => setCampaignDateTo(event.target.value)}/></label><label>Payment<select value={campaignPayment} onChange={(event) => setCampaignPayment(event.target.value)}><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select></label><label className="campaign-check"><input type="checkbox" checked={autoAssign} onChange={(event) => setAutoAssign(event.target.checked)}/>Auto-assign future matches</label></div>
+        <fieldset className="campaign-tags"><legend>Shopify / Shiprocket tags <span>Orders must contain every selected tag</span></legend><div>{data.availableTags.map((tag) => <label className={selectedTags.has(tag) ? "selected" : ""} key={tag}><input type="checkbox" checked={selectedTags.has(tag)} onChange={(event) => setSelectedTags((current) => { const next = new Set(current); if (event.target.checked) next.add(tag); else next.delete(tag); return next; })}/>{tag}</label>)}</div>{!data.availableTags.length && <p>No order tags are available yet.</p>}</fieldset>
+        <div className="candidate-heading"><strong>Select current orders <span>{candidates.length} matching</span></strong><input value={candidateSearch} onChange={(event) => setCandidateSearch(event.target.value)} placeholder="Search order, customer or phone"/><button type="button" onClick={() => setSelectedCandidates(new Set(candidates.map((order) => order.id)))}>Select matching</button></div>
+        <div className="candidate-list">{candidates.map((order) => <label key={order.id}><input aria-label={`Select order ${order.channelOrderId}`} type="checkbox" checked={selectedCandidates.has(order.id)} onChange={(event) => setSelectedCandidates((current) => { const next = new Set(current); if (event.target.checked) next.add(order.id); else next.delete(order.id); return next; })}/><span><strong>#{order.channelOrderId} · {order.customerName}</strong><small>{order.paymentMethod} · {when(order.orderDate)} · {order.tags.join(", ") || "No tags"}</small></span></label>)}</div>
       </form>}</div>}
 
       {selectedOrder && <div className="confirmation-modal-backdrop" role="button" tabIndex={0} aria-label="Close confirmation dialog" onKeyDown={(event) => event.key === "Escape" && !busy && setSelectedOrder(null)} onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) setSelectedOrder(null); }}><form className="confirmation-modal" onSubmit={submitOrderAction}>

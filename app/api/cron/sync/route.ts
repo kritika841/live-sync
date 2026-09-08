@@ -2,7 +2,7 @@ import { getRuntimeEnv } from "../../../../lib/database";
 import { syncShiprocketOrders } from "../../../../lib/shiprocket";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 function safeEqual(left: string, right: string) {
   if (!left || !right || left.length !== right.length) return false;
@@ -17,7 +17,7 @@ export async function GET(request: Request) {
   if (!safeEqual(provided, secret)) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const result = await syncShiprocketOrders(getRuntimeEnv(), "incremental", "daily verification");
+    const result = await syncShiprocketOrders(getRuntimeEnv(), "incremental", "twice-daily verification");
     return Response.json(result);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Scheduled sync failed" }, { status: 502 });

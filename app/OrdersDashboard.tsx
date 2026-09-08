@@ -61,7 +61,8 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
+  const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
@@ -293,6 +294,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
     confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "Confirm high-risk orders and keep rejected orders ready for manual cancellation" },
+    campaigns: { eyebrow: "Customer verification", title: "Campaigns", subcopy: "Create, prioritize, and automatically assign confirmation campaigns" },
     analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
     today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
     reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
@@ -307,15 +309,16 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         <div className="user-label"><span className="lock-dot">◆</span>{userLabel}</div>
       </header>
 
-      <div className="app-body">
+      <div className={`app-body ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar" aria-label="Dashboard sections">
-        <p>Workspace</p>
-        <button className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span>Orders</button>
-        <button className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><span>✓</span>Confirmation</button>
-        <button className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>⌁</span>Analytics</button>
-        <button className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><span>↗</span>Today’s OFD</button>
-        <button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><span>▤</span>Reports</button>
-        <button className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><span>↻</span>Activity log</button>
+        <div className="sidebar-heading"><p>Workspace</p><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "Expand side menu" : "Collapse side menu"} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((value) => !value)}><span>{sidebarCollapsed ? "›" : "‹"}</span><strong>{sidebarCollapsed ? "Expand" : "Collapse"}</strong></button></div>
+        <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span><strong>Orders</strong></button>
+        <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><span>✓</span><strong>Confirmation</strong></button>
+        <button title="Campaigns" className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}><span>◎</span><strong>Campaigns</strong></button>
+        <button title="Analytics" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>⌁</span><strong>Analytics</strong></button>
+        <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><span>↗</span><strong>Today’s OFD</strong></button>
+        <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><span>▤</span><strong>Reports</strong></button>
+        <button title="Activity log" className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><span>↻</span><strong>Activity log</strong></button>
       </aside>
 
       <section className="workspace">
@@ -434,7 +437,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           )}
         </section>
 
-        <ConfirmationPanel active={view === "confirmation"} />
+        <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} />
 
         <AnalyticsPanel mode="overview" active={view === "analytics"} />
         <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} />

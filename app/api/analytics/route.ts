@@ -53,8 +53,9 @@ export async function GET(request: Request) {
         ) AS previousUndelivered
       FROM orders
       WHERE SUBSTR(out_for_delivery_at, 1, 10) = ?
-      ORDER BY out_for_delivery_at DESC, id DESC
-    `).bind(today).all<Record<string, unknown>>();
+        OR SUBSTR(first_out_for_delivery_at, 1, 10) = ?
+      ORDER BY GREATEST(NULLIF(out_for_delivery_at, ''), NULLIF(first_out_for_delivery_at, '')) DESC, id DESC
+    `).bind(today, today).all<Record<string, unknown>>();
     const orders: Array<Record<string, unknown> & { previousUndelivered: boolean }> = rows.results.map((row) => ({
       ...row,
       previousUndelivered: Boolean(row.previousUndelivered),

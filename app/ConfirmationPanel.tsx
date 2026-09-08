@@ -7,20 +7,20 @@ type ConfirmationOrder = {
   id: number; channelOrderId: string; customerName: string; customerPhone: string; customerCity: string;
   customerState: string; customerAddress: string; customerPincode: string; orderDate: string; status: string;
   paymentMethod: string; total: number; products: Array<{ name?: string; quantity?: number; sku?: string }>;
-  confirmationStatus: string; campaignName?: string; rejectedAt?: string; tags: string[]; attempts: Attempt[];
+  confirmationStatus: string; campaignName?: string; confirmedAt?: string; rejectedAt?: string; tags: string[]; attempts: Attempt[];
 };
 type Campaign = {
   id: string; name: string; description: string; position: number; isActive: boolean; autoAssign: boolean;
   orderCount: number; criteria: { risk?: string; paymentMethod?: string; tags?: string[]; dateFrom?: string; dateTo?: string };
 };
 type ConfirmationData = {
-  queue: ConfirmationOrder[]; rejected: ConfirmationOrder[]; candidates: ConfirmationOrder[];
-  campaigns: Campaign[]; availableTags: string[]; counts: { queue: number; rejected: number; approved: number };
+  queue: ConfirmationOrder[]; confirmed: ConfirmationOrder[]; rejected: ConfirmationOrder[]; candidates: ConfirmationOrder[];
+  campaigns: Campaign[]; availableTags: string[]; counts: { queue: number; confirmed: number; rejected: number; approved: number };
 };
-type Mode = "queue" | "campaigns" | "rejected";
+type Mode = "queue" | "confirmed" | "rejected";
 type OrderAction = "confirm" | "callback" | "unreachable" | "reject";
 
-const emptyData: ConfirmationData = { queue: [], rejected: [], candidates: [], campaigns: [], availableTags: [], counts: { queue: 0, rejected: 0, approved: 0 } };
+const emptyData: ConfirmationData = { queue: [], confirmed: [], rejected: [], candidates: [], campaigns: [], availableTags: [], counts: { queue: 0, confirmed: 0, rejected: 0, approved: 0 } };
 
 function when(value?: string) {
   if (!value) return "—";
@@ -32,7 +32,7 @@ function productSummary(products: ConfirmationOrder["products"]) {
   return products.length ? products.map((product) => `${product.name || product.sku || "Product"}${product.quantity ? ` ×${product.quantity}` : ""}`).join(", ") : "—";
 }
 
-export default function ConfirmationPanel({ active }: { active: boolean }) {
+export default function ConfirmationPanel({ active, section }: { active: boolean; section: "confirmation" | "campaigns" }) {
   const [mode, setMode] = useState<Mode>("queue");
   const [data, setData] = useState<ConfirmationData>(emptyData);
   const [loading, setLoading] = useState(true);
@@ -138,16 +138,16 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
 
   return (
     <section className={`confirmation-view ${active ? "" : "view-hidden"}`}>
-      <div className="confirmation-mode-tabs">
+      {section === "confirmation" && <div className="confirmation-mode-tabs">
         <button className={mode === "queue" ? "active" : ""} onClick={() => setMode("queue")}><strong>Queue <b>{data.counts.queue}</b></strong><span>Orders waiting for confirmation</span></button>
-        <button className={mode === "campaigns" ? "active" : ""} onClick={() => setMode("campaigns")}><strong>Campaigns <b>{data.campaigns.length}</b></strong><span>Automatic and manual assignment</span></button>
+        <button className={mode === "confirmed" ? "active" : ""} onClick={() => setMode("confirmed")}><strong>Confirmed <b>{data.counts.confirmed}</b></strong><span>Customer-approved orders</span></button>
         <button className={mode === "rejected" ? "active rejected" : ""} onClick={() => setMode("rejected")}><strong>Rejected <b>{data.counts.rejected}</b></strong><span>Orders to cancel manually</span></button>
-      </div>
+      </div>}
 
       {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}
       {loading ? <div className="confirmation-card confirmation-loading"><i className="loader"/><span>Loading confirmation workspace…</span></div> : null}
 
-      {!loading && mode === "queue" && <article className="confirmation-card">
+      {!loading && section === "confirmation" && mode === "queue" && <article className="confirmation-card">
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMATION QUEUE</p><h2>High-RTO customer calls</h2><p>Orders are automatically assigned. Scheduled callbacks return when they are due.</p></div><span>{data.counts.approved} approved</span></header>
         {data.queue.length ? <div className="confirmation-orders">{data.queue.map((order) => <div className="confirmation-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>{when(order.orderDate)} · {order.paymentMethod || "Payment unknown"} · ₹{Number(order.total || 0).toLocaleString("en-IN")}</small><p>{productSummary(order.products)}</p></div>
@@ -157,7 +157,17 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
         </div>)}</div> : <div className="confirmation-empty"><span>✓</span><h3>Queue is clear</h3><p>New high-RTO orders will appear here automatically.</p></div>}
       </article>}
 
-      {!loading && mode === "rejected" && <article className="confirmation-card rejected-card">
+      {!loading && section === "confirmation" && mode === "confirmed" && <article className="confirmation-card confirmed-card">
+        <header className="confirmation-header"><div><p className="eyebrow">CONFIRMED ORDERS</p><h2>Customer-approved orders</h2><p>Every order confirmed from the call queue is retained here.</p></div><span>{data.confirmed.length} approved</span></header>
+        {data.confirmed.length ? <div className="confirmation-orders">{data.confirmed.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order confirmed-order" key={order.id}>
+          <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Confirmed {when(order.confirmedAt)}</small><p>{productSummary(order.products)}</p></div>
+          <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
+          <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{latest?.note || "No confirmation note"}</small></div>
+          <div className="confirmed-badge">✓ Customer confirmed</div>
+        </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No confirmed orders yet</h3><p>Approved orders will appear here as soon as a call is completed.</p></div>}
+      </article>}
+
+      {!loading && section === "confirmation" && mode === "rejected" && <article className="confirmation-card rejected-card">
         <header className="confirmation-header"><div><p className="eyebrow">REJECTED ORDERS</p><h2>Manual cancellation list</h2><p>These records are stored only in this dashboard. Shiprocket is never cancelled automatically.</p></div><span>{data.rejected.length} to review</span></header>
         {data.rejected.length ? <div className="confirmation-orders">{data.rejected.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order rejected-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Rejected {when(order.rejectedAt)}</small><p>{productSummary(order.products)}</p></div>
@@ -167,7 +177,7 @@ export default function ConfirmationPanel({ active }: { active: boolean }) {
         </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No rejected orders</h3><p>Customer cancellations and rejected confirmations will be retained here.</p></div>}
       </article>}
 
-      {!loading && mode === "campaigns" && <div className="campaign-layout"><article className="confirmation-card">
+      {!loading && section === "campaigns" && <div className="campaign-layout"><article className="confirmation-card">
         <header className="confirmation-header"><div><p className="eyebrow">CAMPAIGN PRIORITY</p><h2>Confirmation campaigns</h2><p>Higher campaigns are worked first. High RTO remains permanently automatic.</p></div><button className="campaign-create" onClick={() => setCreateOpen((value) => !value)}>{createOpen ? "Close" : "+ New campaign"}</button></header>
         <div className="campaign-list">{data.campaigns.map((campaign, index) => <div className={`campaign-row ${campaign.isActive ? "" : "inactive"}`} key={campaign.id}>
           <div className="campaign-rank">{index + 1}</div><div><strong>{campaign.name}{campaign.id === "cmp_default_high_rto" && <em>Permanent</em>}</strong><p>{campaign.description || "No description"}</p><small>{Number(campaign.orderCount)} assigned · {campaign.autoAssign ? "Automatic" : "Manual"}{campaign.criteria.tags?.length ? ` · Tags: ${campaign.criteria.tags.join(", ")}` : ""}{campaign.criteria.dateFrom || campaign.criteria.dateTo ? ` · Dates: ${campaign.criteria.dateFrom || "Any"} to ${campaign.criteria.dateTo || "Any"}` : ""}</small></div>

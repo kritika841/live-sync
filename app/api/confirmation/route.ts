@@ -48,13 +48,16 @@ export async function GET() {
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const now = new Date().toISOString();
-  const [queue, rejected, campaigns, candidates, availableTagRows] = await Promise.all([
+  const [queue, confirmed, rejected, campaigns, candidates, availableTagRows] = await Promise.all([
     runtime.DB.prepare(`SELECT ${orderColumns}
       FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id JOIN campaigns c ON c.id=ca.campaign_id
       WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
         AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
           AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))
       ORDER BY c.position, ca.position, COALESCE(NULLIF(o.order_date,''),o.created_at), o.id`).bind(now).all<Record<string, unknown>>(),
+    runtime.DB.prepare(`SELECT ${orderColumns}
+      FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
+      WHERE o.confirmation_status='confirmed' ORDER BY o.confirmed_at DESC, o.id DESC`).all<Record<string, unknown>>(),
     runtime.DB.prepare(`SELECT ${orderColumns}
       FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
       WHERE o.confirmation_status='rejected' ORDER BY o.rejected_at DESC, o.id DESC`).all<Record<string, unknown>>(),
@@ -74,7 +77,7 @@ export async function GET() {
       SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'tags')='array' THEN raw_json::jsonb->'tags' ELSE '[]'::jsonb END) AS tag FROM orders
     ) available WHERE BTRIM(tag)<>'' GROUP BY LOWER(BTRIM(tag)) ORDER BY LOWER(MIN(BTRIM(tag)))`).all<{ tag: string }>(),
   ]);
-  const visibleIds = [...queue.results, ...rejected.results].map((row) => Number(row.id));
+  const visibleIds = [...queue.results, ...confirmed.results, ...rejected.results].map((row) => Number(row.id));
   const attemptRows = visibleIds.length ? await runtime.DB.prepare(`SELECT id, order_id AS orderId, attempt_number AS attemptNumber,
     outcome, note, call_picked AS callPicked, rejection_reason AS rejectionReason, callback_at AS callbackAt,
     next_action_at AS nextActionAt, created_at AS createdAt FROM confirmation_attempts
@@ -84,14 +87,14 @@ export async function GET() {
     const id = Number(attempt.orderId);
     attemptsByOrder.set(id, [...(attemptsByOrder.get(id) || []), attempt]);
   }
-  const approvedCount = await runtime.DB.prepare("SELECT COUNT(*) AS total FROM orders WHERE confirmation_status='confirmed'").first<{ total: number }>();
   return Response.json({
     queue: queue.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
+    confirmed: confirmed.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
     rejected: rejected.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
     campaigns: campaigns.results.map((row) => ({ ...row, criteria: JSON.parse(String(row.criteriaJson || "{}")), criteriaJson: undefined })),
     candidates: candidates.results.map((row) => serializeCandidate(row)),
     availableTags: availableTagRows.results.map((row) => row.tag),
-    counts: { queue: queue.results.length, rejected: rejected.results.length, approved: Number(approvedCount?.total || 0) },
+    counts: { queue: queue.results.length, confirmed: confirmed.results.length, rejected: rejected.results.length, approved: confirmed.results.length },
   });
 }
 

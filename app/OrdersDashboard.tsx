@@ -1,6 +1,7 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, Moon, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
@@ -293,37 +294,42 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
     confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "" },
-    campaigns: { eyebrow: "Customer verification", title: "Campaigns", subcopy: "Create, prioritize, and automatically assign confirmation campaigns" },
+    campaigns: { eyebrow: "Customer verification", title: "Campaigns", subcopy: "" },
     analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
     today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
     reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
     logs: { eyebrow: "Live activity", title: "Activity log", subcopy: "Webhook updates, manual syncs, and daily verification history" },
   }[view];
+  const initials = userLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "OP";
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><span className="brand-mark">S</span><span>Satmi</span></div>
-        <div className="user-label"><span className="lock-dot">◆</span>{userLabel}</div>
-      </header>
-
-      <div className={`app-body ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar" aria-label="Dashboard sections">
-        <div className="sidebar-heading"><p>Workspace</p><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "Expand side menu" : "Collapse side menu"} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((value) => !value)}><span>{sidebarCollapsed ? "›" : "‹"}</span><strong>{sidebarCollapsed ? "Expand" : "Collapse"}</strong></button></div>
-        <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><span>▦</span><strong>Orders</strong></button>
-        <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><span>✓</span><strong>Confirmation</strong></button>
-        <button title="Campaigns" className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}><span>◎</span><strong>Campaigns</strong></button>
-        <button title="Analytics" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><span>⌁</span><strong>Analytics</strong></button>
-        <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><span>↗</span><strong>Today’s OFD</strong></button>
-        <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><span>▤</span><strong>Reports</strong></button>
-        <button title="Activity log" className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><span>↻</span><strong>Activity log</strong></button>
+        <div className="sidebar-brand"><span className="brand-mark"><Boxes size={20}/></span><strong>Satmi</strong></div>
+        <div className="sidebar-heading"><p>Workspace</p><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "Expand side menu" : "Collapse side menu"} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronRight size={15}/> : <ChevronLeft size={15}/>}</button></div>
+        <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><ShoppingBag/><strong>Orders</strong></button>
+        <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><PhoneCall/><strong>Confirmation</strong></button>
+        <button title="Campaigns" className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}><Boxes/><strong>Campaigns</strong></button>
+        <button title="Analytics" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><LayoutDashboard/><strong>Analytics</strong></button>
+        <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><Truck/><strong>Today’s OFD</strong></button>
+        <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><PackageSearch/><strong>Reports</strong></button>
+        <button title="Activity log" className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><RotateCcw/><strong>Activity log</strong></button>
       </aside>
+
+      <div className="app-main">
+      <header className="topbar">
+        <div className="header-context"><div><p className="eyebrow">{viewCopy.eyebrow}</p><h1>{viewCopy.title}</h1></div><span className="role-badge">Operations</span></div>
+        <div className="header-tools">
+          <button className="theme-control" aria-label="Dark theme active"><Moon size={16}/><span>Dark</span></button>
+          <label className="header-search"><Search size={17}/><input value={search} onChange={(event) => { setSearch(event.target.value); setView("orders"); setPage(1); }} placeholder="Search orders, customers, AWB or SKU" aria-label="Search dashboard"/></label>
+          <button className="notification-button" aria-label="Notifications"><Bell size={18}/><i className="notification-dot"/></button>
+          <span className="avatar" aria-label="Operations user">{initials}</span>
+        </div>
+      </header>
 
       <section className="workspace">
         <div className="page-heading">
           <div>
-            <p className="eyebrow">{viewCopy.eyebrow}</p>
-            <h1>{viewCopy.title}</h1>
             {viewCopy.subcopy && <p className="subcopy">{viewCopy.subcopy}</p>}
           </div>
           {view === "orders" ? (
@@ -367,7 +373,6 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
           )}
 
           {risk !== "approved" && <div className="toolbar">
-            <label className="search"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} aria-label="Search orders" placeholder="Search order, customer, AWB or SKU" /></label>
             <div className="toolbar-actions">
               <label className="sort-control"><span>Sort</span><select value={sort} onChange={(event) => { setSort(event.target.value as "newest" | "oldest"); setPage(1); }} aria-label="Sort orders by order date"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
               <button className={`filter-button ${filterOpen ? "active" : ""}`} onClick={() => setFilterOpen((value) => !value)}>

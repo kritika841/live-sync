@@ -65,11 +65,11 @@ export async function GET(request: Request) {
               OR (events.shipment_id IS NOT NULL AND events.shipment_id = selected_orders.shipment_id)
               OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = selected_orders.awb)
               OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = selected_orders.channel_order_id))
-        ) OR CASE
-          WHEN ndr_attempts > 0 AND ndr_raised_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND selected_ofd_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
-            THEN ndr_raised_at::timestamptz < selected_ofd_at::timestamptz
-          ELSE FALSE
-        END AS previousUndelivered
+        ) OR (
+          ndr_attempts > 0
+          AND first_out_for_delivery_at != ''
+          AND SUBSTR(first_out_for_delivery_at, 1, 10) < TO_CHAR(selected_ofd_at::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')
+        ) AS previousUndelivered
       FROM selected_orders
       WHERE selected_ofd_at IS NOT NULL
       ORDER BY selected_ofd_at DESC, id DESC

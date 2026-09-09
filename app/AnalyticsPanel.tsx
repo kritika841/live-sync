@@ -111,7 +111,7 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
         <MetricCard label="Delivered" metric={metrics.delivered} hint="Of this date’s OFD orders" />
         <MetricCard label="Undelivered" metric={metrics.undelivered} hint="Of this date’s OFD orders" />
         <MetricCard label="Still out for delivery" metric={metrics.stillOut} hint="Of this date’s OFD orders" />
-        <MetricCard label="Previously undelivered" metric={metrics.previousUndelivered} hint="Repeat OFD after an earlier failed attempt" />
+        <MetricCard label="Previously undelivered" metric={metrics.previousUndelivered} hint={`${metrics.previousUndelivered?.count || 0} repeat-attempt orders already included in the ${metrics.total?.count || 0} OFD total`} />
         <MetricCard label="Moved to RTO" metric={metrics.rto} hint="Of this date’s OFD orders" />
       </div>
       <section className="analytics-card ofd-orders-card">

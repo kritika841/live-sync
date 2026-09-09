@@ -317,8 +317,8 @@ body { background:var(--bg); color:var(--ink); }
 .app-shell.sidebar-collapsed { padding-left:72px; }
 .app-main { min-width:0; }
 .sidebar { position:fixed; inset:0 auto 0 0; z-index:30; width:232px; min-height:100vh; padding:20px 14px; border-right:1px solid var(--line); background:#0D141D; transition:width .2s ease,padding .2s ease; }
-.sidebar-brand { height:48px; display:flex; align-items:center; gap:12px; margin:0 7px 20px; color:var(--ink); font-size:17px; font-weight:850; letter-spacing:-.03em; }
-.sidebar-brand .brand-mark { width:35px; height:35px; flex:none; border-radius:10px; color:#132112; background:var(--lime); box-shadow:0 0 26px #B7F34A22; }
+.sidebar-brand { height:74px; display:flex; align-items:center; margin:0 5px 14px; overflow:hidden; }
+.sidebar-brand-logo { width:112px; height:74px; flex:none; object-fit:contain; object-position:left center; }
 .sidebar-heading { position:relative; display:block; margin:0 0 8px; }
 .sidebar p { margin:0 12px 10px; color:#637184; }
 .sidebar button { min-height:42px; gap:12px; padding:10px 12px; border-radius:9px; color:#8492A4; }
@@ -338,7 +338,7 @@ body { background:var(--bg); color:var(--ink); }
 .header-context h1 { margin:0; color:var(--ink); font-size:23px; line-height:1.1; letter-spacing:-.035em; }
 .role-badge { padding:5px 8px; border:1px solid #3C4C61; border-radius:99px; background:#192433; color:#B5C1CF; font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
 .header-tools { min-width:0; display:flex; align-items:center; justify-content:flex-end; gap:10px; }
-.theme-control,.notification-button { height:40px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 11px; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--muted); font-size:10px; font-weight:750; }
+.notification-button { height:40px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 11px; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--muted); font-size:10px; font-weight:750; }
 .header-search { width:min(440px,36vw); height:44px; display:flex; align-items:center; gap:10px; padding:0 13px; border:1px solid var(--line); border-radius:10px; background:var(--input); color:var(--muted-2); transition:border-color .18s,box-shadow .18s; }
 .header-search:focus-within { border-color:#32BDA7; box-shadow:0 0 0 3px #2DD4BF18; }
 .header-search input { width:100%; border:0; outline:0; background:transparent; color:var(--ink); font-size:11px; }
@@ -359,8 +359,17 @@ body { background:var(--bg); color:var(--ink); }
 .table-wrap,table,th,.report-table th,.analytics-table th { background:var(--input); }
 tbody tr,.report-table tbody tr { background:var(--surface); }
 tbody tr:hover,.report-table tbody tr:hover,.report-table tbody tr.active { background:var(--surface-2); }
-.confirmation-mode-tabs button,.analytics-mode-tabs button { border-color:var(--line); background:var(--surface); color:var(--muted); }
-.confirmation-mode-tabs button.active,.analytics-mode-tabs button.active { border-color:#337967; background:#17372F; }
+.confirmation-mode-tabs { display:flex; gap:36px; padding:0 22px; border:1px solid var(--line); border-radius:14px; background:var(--surface); overflow-x:auto; }
+.confirmation-mode-tabs button { position:relative; flex:none; display:block; padding:19px 0 17px; border:0; border-radius:0; background:transparent; color:var(--muted); text-align:left; }
+.confirmation-mode-tabs button strong { color:inherit; font-size:11px; }
+.confirmation-mode-tabs button strong b { min-width:23px; display:inline-block; margin-left:7px; padding:2px 7px; border-radius:99px; background:#1D2835; color:#AAB6C5; text-align:center; }
+.confirmation-mode-tabs button.active { border:0; background:transparent; color:var(--ink); }
+.confirmation-mode-tabs button.active strong { color:var(--ink); }
+.confirmation-mode-tabs button.active strong b { background:#193F31; color:#9BE3BC; }
+.confirmation-mode-tabs button.active.rejected { border:0; background:transparent; }
+.confirmation-mode-tabs button.active::after { content:""; position:absolute; right:0; bottom:-1px; left:0; height:2px; background:#41CFB4; box-shadow:0 0 14px #2DD4BF66; }
+.analytics-mode-tabs button { border-color:var(--line); background:var(--surface); color:var(--muted); }
+.analytics-mode-tabs button.active { border-color:#337967; background:#17372F; }
 .confirmation-header h2,.reports-heading h2,.logs-heading h2 { color:var(--ink); }
 .confirmation-header p:not(.eyebrow),.reports-heading p:not(.eyebrow),.logs-heading p:not(.eyebrow) { color:var(--muted); }
 
@@ -449,7 +458,7 @@ tbody tr:hover,.report-table tbody tr:hover,.report-table tbody tr.active { back
 .workflow-status.cod { background:#3A2E19; color:#E8C572; }
 .workflow-status.prepaid,.workflow-status.ready { background:#17372F; color:#82DFC0; }
 .workflow-empty { min-height:120px; display:grid; place-items:center; color:var(--muted); font-size:10px; }
-.workflow-submit { position:sticky; bottom:0; z-index:4; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:15px 18px; }
+.workflow-submit { position:static; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:15px 18px; }
 .workflow-submit>div { display:flex; align-items:center; gap:9px; }
 .workflow-submit>div:first-child>svg { color:#42D9A0; }
 .workflow-submit span { display:grid; gap:3px; }
@@ -469,11 +478,11 @@ tbody tr:hover,.report-table tbody tr:hover,.report-table tbody tr.active { back
   .app-shell,.app-shell.sidebar-collapsed { padding-left:72px; }
   .sidebar,.sidebar-collapsed .sidebar { position:fixed; inset:0 auto 0 0; width:72px; min-height:100vh; display:block; padding:20px 9px; border-right:1px solid var(--line); border-bottom:0; overflow:visible; }
   .sidebar-brand { justify-content:center; margin-inline:0; }
-  .sidebar-brand>strong,.sidebar-heading p,.sidebar button strong,.sidebar-collapsed .sidebar button strong { display:none; }
+  .sidebar-brand-logo { width:54px; height:52px; object-position:center; }
+  .sidebar-heading p,.sidebar button strong,.sidebar-collapsed .sidebar button strong { display:none; }
   .sidebar button,.sidebar-collapsed .sidebar button { width:100%; justify-content:center; padding-inline:8px; }
   .sidebar .sidebar-toggle { display:none; }
   .topbar { height:88px; padding:0 20px; }
-  .theme-control span { display:none; }
   .header-search { width:min(330px,40vw); }
   .workspace { padding:22px 20px 48px; }
   .workflow-details-grid,.workflow-filter-grid { grid-template-columns:1fr; }

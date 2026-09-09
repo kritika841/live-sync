@@ -164,9 +164,9 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
   return (
     <section className={`confirmation-view ${active ? "" : "view-hidden"}`}>
       {section === "confirmation" && <div className="confirmation-mode-tabs">
-        <button className={mode === "queue" ? "active" : ""} onClick={() => setMode("queue")}><strong>Queue <b>{data.counts.queue}</b></strong><span>Orders waiting for confirmation</span></button>
-        <button className={mode === "confirmed" ? "active" : ""} onClick={() => setMode("confirmed")}><strong>Confirmed <b>{data.counts.confirmed}</b></strong><span>Customer-approved orders</span></button>
-        <button className={mode === "rejected" ? "active rejected" : ""} onClick={() => setMode("rejected")}><strong>Rejected <b>{data.counts.rejected}</b></strong><span>Orders to cancel manually</span></button>
+        <button className={mode === "queue" ? "active" : ""} onClick={() => setMode("queue")}><strong>Queue <b>{data.counts.queue}</b></strong></button>
+        <button className={mode === "confirmed" ? "active" : ""} onClick={() => setMode("confirmed")}><strong>Confirmed <b>{data.counts.confirmed}</b></strong></button>
+        <button className={mode === "rejected" ? "active rejected" : ""} onClick={() => setMode("rejected")}><strong>Rejected <b>{data.counts.rejected}</b></strong></button>
       </div>}
 
       {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}

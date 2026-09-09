@@ -1,7 +1,8 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
-import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, Moon, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck } from "lucide-react";
+import Image from "next/image";
+import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
@@ -305,7 +306,7 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
   return (
     <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar" aria-label="Dashboard sections">
-        <div className="sidebar-brand"><span className="brand-mark"><Boxes size={20}/></span><strong>Satmi</strong></div>
+        <div className="sidebar-brand"><Image className="sidebar-brand-logo" src="/satmi-logo.svg" alt="Satmi" width={112} height={74} priority/></div>
         <div className="sidebar-heading"><p>Workspace</p><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "Expand side menu" : "Collapse side menu"} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronRight size={15}/> : <ChevronLeft size={15}/>}</button></div>
         <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><ShoppingBag/><strong>Orders</strong></button>
         <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><PhoneCall/><strong>Confirmation</strong></button>
@@ -320,7 +321,6 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
       <header className="topbar">
         <div className="header-context"><div><p className="eyebrow">{viewCopy.eyebrow}</p><h1>{viewCopy.title}</h1></div><span className="role-badge">Operations</span></div>
         <div className="header-tools">
-          <button className="theme-control" aria-label="Dark theme active"><Moon size={16}/><span>Dark</span></button>
           <label className="header-search"><Search size={17}/><input value={search} onChange={(event) => { setSearch(event.target.value); setView("orders"); setPage(1); }} placeholder="Search orders, customers, AWB or SKU" aria-label="Search dashboard"/></label>
           <button className="notification-button" aria-label="Notifications"><Bell size={18}/><i className="notification-dot"/></button>
           <span className="avatar" aria-label="Operations user">{initials}</span>

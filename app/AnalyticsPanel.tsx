@@ -104,15 +104,15 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
       return true;
     });
     return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
-      <div className="analytics-filter ofd-filter"><label>OFD date<input type="date" value={ofdDate} max={today} onChange={(event) => setOfdDate(event.target.value)} /></label><p>Includes every order whose latest out-for-delivery attempt began on this date.</p></div>
+      <div className="analytics-filter ofd-filter"><label>OFD date<input type="date" value={ofdDate} max={today} onChange={(event) => setOfdDate(event.target.value)} /></label><p>Includes first attempts and repeat attempts after an earlier undelivered result. Every percentage is calculated against all unique orders that went OFD on this date.</p></div>
       {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
       <div className="metrics-grid ofd-metrics">
-        <MetricCard label="Went out for delivery" metric={metrics.total} hint="All attempts today" />
-        <MetricCard label="Delivered" metric={metrics.delivered} hint="Current outcome" />
-        <MetricCard label="Undelivered" metric={metrics.undelivered} hint="NDR / failed attempt" />
-        <MetricCard label="Still out for delivery" metric={metrics.stillOut} hint="Awaiting outcome" />
-        <MetricCard label="Previously undelivered" metric={metrics.previousUndelivered} hint="Repeat attempt seen in webhook history" />
-        <MetricCard label="Moved to RTO" metric={metrics.rto} hint="Return initiated after OFD" />
+        <MetricCard label="Went out for delivery" metric={metrics.total} hint="100% = all unique OFD orders for this date" />
+        <MetricCard label="Delivered" metric={metrics.delivered} hint="Of this date’s OFD orders" />
+        <MetricCard label="Undelivered" metric={metrics.undelivered} hint="Of this date’s OFD orders" />
+        <MetricCard label="Still out for delivery" metric={metrics.stillOut} hint="Of this date’s OFD orders" />
+        <MetricCard label="Previously undelivered" metric={metrics.previousUndelivered} hint="Repeat OFD after an earlier failed attempt" />
+        <MetricCard label="Moved to RTO" metric={metrics.rto} hint="Of this date’s OFD orders" />
       </div>
       <section className="analytics-card ofd-orders-card">
         <header><div><h2>OFD attempt register</h2><p>Latest attempt, first attempt, outcome, and NDR detail for {ofdDate}.</p></div><span className="record-count">{shownOrders.length} orders</span></header>

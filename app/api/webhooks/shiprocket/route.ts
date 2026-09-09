@@ -13,6 +13,17 @@ function safeEqual(left: string, right: string) {
 const intValue = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : null;
 const textValue = (value: unknown) => value == null ? "" : String(value);
 
+const ofdUpdate = `UPDATE orders SET
+  out_for_delivery_at = CASE
+    WHEN out_for_delivery_at = '' OR out_for_delivery_at !~ '^\\d{4}-\\d{2}-\\d{2}T' OR incoming.event_at::timestamptz > out_for_delivery_at::timestamptz THEN incoming.event_at
+    ELSE out_for_delivery_at
+  END,
+  first_out_for_delivery_at = CASE
+    WHEN first_out_for_delivery_at = '' OR first_out_for_delivery_at !~ '^\\d{4}-\\d{2}-\\d{2}T' OR incoming.event_at::timestamptz < first_out_for_delivery_at::timestamptz THEN incoming.event_at
+    ELSE first_out_for_delivery_at
+  END
+  FROM (SELECT ?::text AS event_at) incoming WHERE `;
+
 export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   const secret = runtime.SHIPROCKET_WEBHOOK_SECRET || "";
@@ -70,13 +81,13 @@ export async function POST(request: Request) {
     if (/^OUT FOR DELIVERY$/i.test(status)) {
       const outForDeliveryAt = normalizeShiprocketDate(payload.out_for_delivery_date || payload.out_for_delivery_at || payload.current_timestamp) || now;
       if (shiprocketOrderId) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE id = ?").bind(outForDeliveryAt, outForDeliveryAt, shiprocketOrderId).run();
+        await runtime.DB.prepare(`${ofdUpdate}id = ?`).bind(outForDeliveryAt, shiprocketOrderId).run();
       } else if (shipmentId) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE shipment_id = ?").bind(outForDeliveryAt, outForDeliveryAt, shipmentId).run();
+        await runtime.DB.prepare(`${ofdUpdate}shipment_id = ?`).bind(outForDeliveryAt, shipmentId).run();
       } else if (awb) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE awb = ?").bind(outForDeliveryAt, outForDeliveryAt, awb).run();
+        await runtime.DB.prepare(`${ofdUpdate}awb = ?`).bind(outForDeliveryAt, awb).run();
       } else if (channelOrderId) {
-        await runtime.DB.prepare("UPDATE orders SET out_for_delivery_at = ?, first_out_for_delivery_at = COALESCE(NULLIF(first_out_for_delivery_at, ''), ?) WHERE channel_order_id = ?").bind(outForDeliveryAt, outForDeliveryAt, channelOrderId).run();
+        await runtime.DB.prepare(`${ofdUpdate}channel_order_id = ?`).bind(outForDeliveryAt, channelOrderId).run();
       }
     }
     if (/UNDELIVERED|NDR/i.test(status)) {

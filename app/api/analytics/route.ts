@@ -35,27 +35,45 @@ export async function GET(request: Request) {
   if (mode === "today_ofd") {
     const today = url.searchParams.get("date") || indiaToday();
     const rows = await runtime.DB.prepare(`
+      WITH selected_orders AS (
+        SELECT orders.*,
+          COALESCE(
+            (SELECT MAX(events.received_at) FROM webhook_events events
+              WHERE UPPER(TRIM(events.status)) = 'OUT FOR DELIVERY'
+                AND TO_CHAR(events.received_at::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') = ?
+                AND ((events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
+                  OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
+                  OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
+                  OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id))),
+            CASE WHEN SUBSTR(out_for_delivery_at, 1, 10) = ? THEN out_for_delivery_at END,
+            CASE WHEN SUBSTR(first_out_for_delivery_at, 1, 10) = ? THEN first_out_for_delivery_at END
+          ) AS selected_ofd_at
+        FROM orders
+      )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
         customer_city AS customerCity, customer_state AS customerState, status,
         payment_method AS paymentMethod, total, awb, courier,
         shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
-        out_for_delivery_at AS outForDeliveryAt, delivered_at AS deliveredAt,
+        selected_ofd_at AS outForDeliveryAt, delivered_at AS deliveredAt,
         ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
         shipping_cost AS shippingCost,
-        (first_out_for_delivery_at != '' AND first_out_for_delivery_at < out_for_delivery_at) OR ndr_attempts > 1 OR EXISTS(
+        EXISTS(
           SELECT 1 FROM webhook_events events
           WHERE UPPER(TRIM(events.status)) LIKE 'UNDELIVERED%'
-            AND events.received_at < orders.out_for_delivery_at
-            AND ((events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
-              OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
-              OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
-              OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id))
-        ) AS previousUndelivered
-      FROM orders
-      WHERE SUBSTR(out_for_delivery_at, 1, 10) = ?
-        OR SUBSTR(first_out_for_delivery_at, 1, 10) = ?
-      ORDER BY GREATEST(NULLIF(out_for_delivery_at, ''), NULLIF(first_out_for_delivery_at, '')) DESC, id DESC
-    `).bind(today, today).all<Record<string, unknown>>();
+            AND events.received_at::timestamptz < selected_orders.selected_ofd_at::timestamptz
+            AND ((events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = selected_orders.id)
+              OR (events.shipment_id IS NOT NULL AND events.shipment_id = selected_orders.shipment_id)
+              OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = selected_orders.awb)
+              OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = selected_orders.channel_order_id))
+        ) OR CASE
+          WHEN ndr_attempts > 0 AND ndr_raised_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND selected_ofd_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+            THEN ndr_raised_at::timestamptz < selected_ofd_at::timestamptz
+          ELSE FALSE
+        END AS previousUndelivered
+      FROM selected_orders
+      WHERE selected_ofd_at IS NOT NULL
+      ORDER BY selected_ofd_at DESC, id DESC
+    `).bind(today, today, today).all<Record<string, unknown>>();
     const orders: Array<Record<string, unknown> & { previousUndelivered: boolean }> = rows.results.map((row) => ({
       ...row,
       previousUndelivered: Boolean(row.previousUndelivered),

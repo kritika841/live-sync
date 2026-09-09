@@ -125,7 +125,7 @@ export function normalizeShiprocketDate(value: unknown) {
     const [, day, monthName, year] = namedDate;
     return `${year}-${monthNumbers[monthName.toLowerCase()]}-${day.padStart(2, "0")}T00:00:00+05:30`;
   }
-  const dayFirst = source.match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  const dayFirst = source.match(/^(\d{2})[ -](\d{2})[ -](\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (dayFirst) {
     const [, day, month, year, hour = "00", minute = "00", second = "00"] = dayFirst;
     return `${year}-${month}-${day}T${hour}:${minute}:${second}+05:30`;
@@ -244,8 +244,20 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
           order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
           delivered_at=COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
           shipped_at=COALESCE(NULLIF(excluded.shipped_at, ''), orders.shipped_at),
-          out_for_delivery_at=COALESCE(NULLIF(excluded.out_for_delivery_at, ''), orders.out_for_delivery_at),
-          first_out_for_delivery_at=COALESCE(NULLIF(excluded.first_out_for_delivery_at, ''), orders.first_out_for_delivery_at),
+          out_for_delivery_at=CASE
+            WHEN excluded.out_for_delivery_at = '' THEN orders.out_for_delivery_at
+            WHEN orders.out_for_delivery_at = '' THEN excluded.out_for_delivery_at
+            WHEN excluded.out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND orders.out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+              THEN CASE WHEN excluded.out_for_delivery_at::timestamptz > orders.out_for_delivery_at::timestamptz THEN excluded.out_for_delivery_at ELSE orders.out_for_delivery_at END
+            ELSE GREATEST(excluded.out_for_delivery_at, orders.out_for_delivery_at)
+          END,
+          first_out_for_delivery_at=CASE
+            WHEN excluded.first_out_for_delivery_at = '' THEN orders.first_out_for_delivery_at
+            WHEN orders.first_out_for_delivery_at = '' THEN excluded.first_out_for_delivery_at
+            WHEN excluded.first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND orders.first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+              THEN CASE WHEN excluded.first_out_for_delivery_at::timestamptz < orders.first_out_for_delivery_at::timestamptz THEN excluded.first_out_for_delivery_at ELSE orders.first_out_for_delivery_at END
+            ELSE LEAST(excluded.first_out_for_delivery_at, orders.first_out_for_delivery_at)
+          END,
           status=excluded.status, status_code=excluded.status_code,
           payment_method=excluded.payment_method, payment_status=excluded.payment_status,
           total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,

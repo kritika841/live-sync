@@ -432,8 +432,15 @@ tbody tr:hover,.report-table tbody tr:hover,.report-table tbody tr.active { back
 .workflow-section .campaign-tags { margin-top:18px; padding:16px 0 0; border-top:1px solid #2A384A; border-bottom:0; }
 .campaign-tags legend { color:var(--muted); }
 .campaign-tags legend span { color:var(--muted-2); }
-.campaign-tags label { border-color:var(--line); background:var(--input); color:var(--muted); }
-.campaign-tags label.selected { border-color:#2FB89D; background:#17372F; color:#BDF6E3; }
+.workflow-section .campaign-tags .campaign-tag-options { max-height:158px; display:flex; flex-wrap:wrap; align-content:flex-start; gap:8px; margin-top:12px; overflow:auto; padding:2px 4px 2px 0; background:transparent; }
+.workflow-section .campaign-tags label { min-height:34px; display:inline-flex; flex-direction:row; align-items:center; gap:7px; padding:6px 10px 6px 7px; border:1px solid var(--line); border-radius:8px; background:var(--input); color:var(--muted); font-size:8px; font-weight:800; line-height:1.2; text-transform:none; letter-spacing:0; cursor:pointer; transition:border-color .16s,background .16s,color .16s; }
+.workflow-section .campaign-tags label:hover { border-color:#52657C; background:#121E2B; color:#C6D1DE; }
+.workflow-section .campaign-tags label.selected { border-color:#2FB89D; background:#17372F; color:#BDF6E3; box-shadow:0 0 0 2px #2DD4BF12; }
+.workflow-section .campaign-tags label input { position:absolute; width:1px; height:1px; padding:0; opacity:0; pointer-events:none; }
+.workflow-section .campaign-tags label strong { max-width:230px; overflow:hidden; color:inherit; font:inherit; text-overflow:ellipsis; white-space:nowrap; }
+.campaign-tag-check { width:18px; height:18px; display:grid; flex:none; place-items:center; border:1px solid #415269; border-radius:5px; background:#15202D; color:#071611; font-size:10px; }
+.campaign-tags label.selected .campaign-tag-check { border-color:#45D6BB; background:#42D3B7; }
+.campaign-tags-clear { margin-top:12px; padding:0; border:0; background:transparent; color:#75DCC7; font-size:8px; font-weight:800; }
 .workflow-orders { overflow:hidden; }
 .candidate-heading { min-height:68px; display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); }
 .candidate-heading>div { display:flex; align-items:center; gap:10px; margin-right:auto; }

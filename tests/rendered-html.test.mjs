@@ -43,10 +43,12 @@ test("includes live sync, persistence, webhook, and scheduled reconciliation sur
 });
 
 test("includes live analytics and today's out-for-delivery tracking", async () => {
-  const [dashboard, analytics, api] = await Promise.all([
+  const [dashboard, analytics, api, database, sync] = await Promise.all([
     readFile(new URL("../app/OrdersDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AnalyticsPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/analytics/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/database.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/shiprocket.ts", import.meta.url), "utf8"),
   ]);
   assert.match(dashboard, />Analytics</);
   assert.match(dashboard, />Today’s OFD</);
@@ -70,6 +72,13 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(api, /deliveredShippingCostCount/);
   assert.match(api, /Order date in Asia\/Kolkata/);
   assert.match(analytics, /real orders in this view/);
+  for (const alias of ["deliveredrevenue", "avgshippingcost", "avgdeliveredordervalue", "openpopulation", "latestknownstatus"]) {
+    assert.match(database, new RegExp(`${alias}:`));
+  }
+  assert.match(sync, /order\.sub_total/);
+  assert.match(sync, /courier\/track\/awbs/);
+  assert.match(sync, /shipment_track_activities/);
+  assert.match(sync, /tracking_backfill_before_id/);
   assert.match(api, /first_out_for_delivery_at/);
   assert.match(api, /ndr_reason/);
   assert.match(dashboard, />Reports</);
@@ -83,7 +92,6 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(workbook, /Discrepancies by Field/);
   assert.match(workbook, /Affected Orders/);
   assert.doesNotMatch(dashboard, /What changed during sync/);
-  const sync = await readFile(new URL("../lib/shiprocket.ts", import.meta.url), "utf8");
   assert.match(sync, /\/ndr\/all/);
   assert.match(sync, /discrepanciesTotal/);
 });

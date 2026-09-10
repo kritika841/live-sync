@@ -4,11 +4,13 @@ import { routeConfirmationOrders } from "./confirmation";
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
 type ShiprocketNdr = Record<string, unknown> & { id?: number; shipment_id?: number; awb_code?: string };
+type TrackingOrderRef = { id: number; channelOrderId: string; shipmentId: number | null; awb: string };
 type SyncMode = "full" | "incremental";
 type SyncChange = { orderId: number; channelOrderId: string; fields: string[]; statusBefore?: string; statusAfter?: string };
 export type SyncReport = {
   mode: SyncMode; checked: number; newOrders: number; changedOrders: number; unchangedOrders: number;
   discrepanciesTotal: number; ndrRecords: number; ndrEnriched: number;
+  trackingOrders: number; trackingEvents: number;
   fields: Record<string, number>; changes: SyncChange[]; completedAt?: string;
 };
 
@@ -99,6 +101,13 @@ export async function resolveChannel(runtime: RuntimeEnv, token: string) {
 
 const stringValue = (value: unknown) => value == null ? "" : String(value);
 const numberValue = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
+const firstPositiveNumber = (...values: unknown[]) => {
+  for (const value of values) {
+    const parsed = numberValue(value);
+    if (parsed > 0) return parsed;
+  }
+  return 0;
+};
 const monthNumbers: Record<string, string> = {
   jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
   jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
@@ -165,13 +174,126 @@ function orderSnapshot(order: ShiprocketOrder) {
     firstOutForDeliveryAt: normalizeShiprocketDate(order.first_out_for_delivery_date),
     status, statusCode: numberValue(order.status_code || shipment.status_code) || null,
     paymentMethod: stringValue(order.payment_method), paymentStatus: stringValue(order.payment_status),
-    total: numberValue(order.total),
+    total: firstPositiveNumber(order.total, order.sub_total, order.total_amount, order.order_total, order.amount),
     shippingCost: numberValue(shipment.shipping_charges || shipment.cost || order.shipping_charges || order.freight_charges),
     pickupLocation: stringValue(order.pickup_location), awb: stringValue(shipment.awb),
     courier: stringValue(shipment.courier || shipment.courier_name),
     shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
     productsJson: JSON.stringify(Array.isArray(order.products) ? order.products : []), rawJson: JSON.stringify(order),
   };
+}
+
+function canonicalTrackingStatus(activity: Record<string, unknown>) {
+  const code = numberValue(activity["sr-status"] || activity.sr_status || activity.status_code);
+  const description = `${stringValue(activity.activity)} ${stringValue(activity.status)} ${stringValue(activity.current_status)} ${stringValue(activity.shipment_status)}`.trim().toUpperCase();
+  if (code === 20 || /RTO[ -]DELIVERED|RETURN TO ORIGIN[ -]DELIVERED/.test(description)) return "RTO DELIVERED";
+  if (code === 19 || /RTO[ -]INITIATED|RETURN TO ORIGIN[ -]INITIATED/.test(description)) return "RTO INITIATED";
+  if (code === 17 || /OUT FOR DELIVERY/.test(description)) return "OUT FOR DELIVERY";
+  if (code === 36 || /UNDELIVERED|NDR|DELIVERY ATTEMPT(?:ED)?(?: FAILED)?/.test(description)) return "UNDELIVERED";
+  if (code === 7 || /(^|[^A-Z])DELIVERED([^A-Z]|$)/.test(description)) return "DELIVERED";
+  return "";
+}
+
+function trackingActivities(payload: Record<string, unknown>, awb: string) {
+  const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : payload;
+  const keyed = data[awb] && typeof data[awb] === "object" ? data[awb] as Record<string, unknown> : data;
+  const trackingData = keyed.tracking_data && typeof keyed.tracking_data === "object"
+    ? keyed.tracking_data as Record<string, unknown>
+    : keyed;
+  return Array.isArray(trackingData.shipment_track_activities)
+    ? trackingData.shipment_track_activities.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    : [];
+}
+
+async function syncTrackingHistories(db: PostgresDatabase, token: string, references: TrackingOrderRef[]) {
+  const unique = [...new Map(references.filter((item) => item.awb).map((item) => [item.awb, item])).values()];
+  let eventCount = 0;
+  for (let start = 0; start < unique.length; start += 50) {
+    const group = unique.slice(start, start + 50);
+    const response = await apiJson<Record<string, unknown>>(`${API_ROOT}/courier/track/awbs`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ awbs: group.map((item) => item.awb) }),
+    });
+    const statements = [];
+    for (const reference of group) {
+      const recognised = trackingActivities(response, reference.awb)
+        .map((activity) => ({ activity, status: canonicalTrackingStatus(activity), eventAt: normalizeShiprocketDate(activity.date || activity.updated_at) }))
+        .filter((item) => item.status && item.eventAt)
+        .sort((left, right) => left.eventAt.localeCompare(right.eventAt));
+      const ofdDates = [...new Set(recognised.filter((item) => item.status === "OUT FOR DELIVERY").map((item) => item.eventAt))];
+      const failedDates = new Set(recognised.filter((item) => item.status === "UNDELIVERED").map((item) => item.eventAt.slice(0, 10)));
+      for (const event of recognised) {
+        statements.push(db.prepare(`INSERT INTO webhook_events
+          (shiprocket_order_id, channel_order_id, shipment_id, awb, status, payload_json, event_at, received_at)
+          SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (
+            SELECT 1 FROM webhook_events WHERE awb = ? AND UPPER(TRIM(status)) = ?
+              AND COALESCE(NULLIF(event_at, ''), received_at) = ?
+          )`).bind(
+          reference.id, reference.channelOrderId || null, reference.shipmentId, reference.awb,
+          event.status, JSON.stringify(event.activity), event.eventAt, new Date().toISOString(),
+          reference.awb, event.status, event.eventAt,
+        ));
+        eventCount += 1;
+      }
+      if (ofdDates.length || failedDates.size) {
+        const firstOfd = ofdDates[0] || "";
+        const latestOfd = ofdDates[ofdDates.length - 1] || "";
+        statements.push(db.prepare(`UPDATE orders SET
+          first_out_for_delivery_at = CASE
+            WHEN ? = '' THEN first_out_for_delivery_at WHEN first_out_for_delivery_at = '' OR first_out_for_delivery_at !~ '^\\d{4}-\\d{2}-\\d{2}T' THEN ?
+            WHEN ?::timestamptz < first_out_for_delivery_at::timestamptz THEN ? ELSE first_out_for_delivery_at END,
+          out_for_delivery_at = CASE
+            WHEN ? = '' THEN out_for_delivery_at WHEN out_for_delivery_at = '' OR out_for_delivery_at !~ '^\\d{4}-\\d{2}-\\d{2}T' THEN ?
+            WHEN ?::timestamptz > out_for_delivery_at::timestamptz THEN ? ELSE out_for_delivery_at END,
+          ndr_attempts = GREATEST(ndr_attempts, ?)
+          WHERE id = ?`).bind(firstOfd, firstOfd, firstOfd, firstOfd, latestOfd, latestOfd, latestOfd, latestOfd, failedDates.size, reference.id));
+      }
+    }
+    if (statements.length) await db.batch(statements);
+  }
+  return { orders: unique.length, events: eventCount };
+}
+
+async function backfillTrackingHistories(db: PostgresDatabase, token: string) {
+  const state = await db.prepare("SELECT value FROM sync_state WHERE key='tracking_backfill_before_id'").first<{ value: string }>();
+  const cursor = Number(state?.value || 0);
+  const rows = await db.prepare(`SELECT id, channel_order_id AS channelOrderId, shipment_id AS shipmentId, awb
+    FROM orders WHERE awb != '' ${cursor > 0 ? "AND id < ?" : ""} ORDER BY id DESC LIMIT 200`)
+    .bind(...(cursor > 0 ? [cursor] : [])).all<TrackingOrderRef>();
+  const result = await syncTrackingHistories(db, token, rows.results);
+  const nextCursor = rows.results.length === 200 ? Math.min(...rows.results.map((row) => Number(row.id))) : 0;
+  await setSyncState(db, "tracking_backfill_before_id", String(nextCursor));
+  await setSyncState(db, "tracking_history_status", "healthy");
+  await setSyncState(db, "tracking_history_last_sync_at", new Date().toISOString());
+  return result;
+}
+
+export async function refreshTrackingHistoryForDate(runtime: RuntimeEnv, date: string) {
+  const cacheKey = `tracking_history_date_${date}`;
+  const cached = await runtime.DB.prepare("SELECT value FROM sync_state WHERE key=?").bind(cacheKey).first<{ value: string }>();
+  const cachedAt = Date.parse(cached?.value || "");
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const freshness = date === today ? 5 * 60 * 1000 : 6 * 60 * 60 * 1000;
+  if (Number.isFinite(cachedAt) && cachedAt > Date.now() - freshness) return { status: "healthy", cached: true };
+  const indiaDate = (column: string) => `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
+  const references = await runtime.DB.prepare(`SELECT id, channel_order_id AS channelOrderId, shipment_id AS shipmentId, awb
+    FROM orders WHERE awb != '' AND (
+      ${indiaDate("first_out_for_delivery_at")} = ? OR ${indiaDate("out_for_delivery_at")} = ? OR (
+        shipped_at != '' AND ${indiaDate("shipped_at")} <= ?
+        AND ${indiaDate("COALESCE(NULLIF(order_date, ''), created_at)")} >= TO_CHAR(?::date - INTERVAL '21 days', 'YYYY-MM-DD')
+        AND (delivered_at = '' OR ${indiaDate("delivered_at")} >= ?)
+      )
+    ) ORDER BY id DESC LIMIT 2000`).bind(date, date, date, date, date).all<TrackingOrderRef>();
+  if (references.results.length === 2000) throw new Error("More than 2,000 shipments match this date; tracking refresh was not marked complete");
+  if (!references.results.length) {
+    await setSyncState(runtime.DB, cacheKey, new Date().toISOString());
+    return { status: "healthy", cached: false, orders: 0, events: 0 };
+  }
+  const token = await getShiprocketToken(runtime);
+  const result = await syncTrackingHistories(runtime.DB, token, references.results);
+  await setSyncState(runtime.DB, cacheKey, new Date().toISOString());
+  return { status: "healthy", cached: false, ...result };
 }
 
 function addField(report: SyncReport, field: string) {
@@ -350,7 +472,7 @@ export async function syncShiprocketOrders(
   try {
     const token = await getShiprocketToken(runtime);
     const channel = await resolveChannel(runtime, token);
-    const report: SyncReport = { mode: effectiveMode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, fields: {}, changes: [] };
+    const report: SyncReport = { mode: effectiveMode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, trackingOrders: 0, trackingEvents: 0, fields: {}, changes: [] };
     const fetchPage = (page: number) => {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
       if (effectiveMode === "incremental") {
@@ -381,6 +503,11 @@ export async function syncShiprocketOrders(
       const batch = orders.slice(start, start + 100);
       await analyzeOrders(db, batch, report);
       await upsertOrders(db, batch);
+      const tracking = await syncTrackingHistories(db, token, batch.map(orderSnapshot).map((order) => ({
+        id: order.id, channelOrderId: order.channelOrderId, shipmentId: order.shipmentId, awb: order.awb,
+      })));
+      report.trackingOrders += tracking.orders;
+      report.trackingEvents += tracking.events;
     }
     const synced = orders.length;
     const hasMore = effectiveMode === "full" && endPage < totalPages;
@@ -394,6 +521,9 @@ export async function syncShiprocketOrders(
       return { synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode, report, hasMore, nextPage, totalPages };
     }
     await syncNdrDetails(db, token, channel.id, report);
+    const trackingBackfill = await backfillTrackingHistories(db, token);
+    report.trackingOrders += trackingBackfill.orders;
+    report.trackingEvents += trackingBackfill.events;
     const completedAt = new Date().toISOString();
     report.completedAt = completedAt;
     await setSyncState(db, "channel_id", String(channel.id));

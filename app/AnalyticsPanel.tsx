@@ -21,7 +21,7 @@ type OfdOrder = {
   ndrReason: string; ndrAttempts: number; ndrRaisedAt: string; shippingCost: number;
   attemptNumber: number; previousUndelivered: boolean;
 };
-type OfdData = { date: string; metrics: Record<string, Metric>; orders: OfdOrder[] };
+type OfdData = { date: string; metrics: Record<string, Metric>; trackingHistory: { status: string; error?: string }; orders: OfdOrder[] };
 
 const formatCurrency = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value || 0);
 const formatDateTime = (value: string) => value ? new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "—";
@@ -111,6 +111,7 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
     return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
       <div className="analytics-filter ofd-filter"><label>OFD date<input type="date" value={ofdDate} max={today} onChange={(event) => setOfdDate(event.target.value)} /></label></div>
       {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
+      {ofd?.trackingHistory.status === "error" && <div className="error-banner"><span>!</span><p>Shiprocket tracking history could not be refreshed: {ofd.trackingHistory.error}. Attempt counts shown below may be incomplete.</p></div>}
       <div className="metrics-grid ofd-metrics">
         <MetricCard label="Went out for delivery" metric={metrics.total} />
         <MetricCard label="Delivered" metric={metrics.delivered} />

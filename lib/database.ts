@@ -20,6 +20,14 @@ const resultKeyAliases: Record<string, string> = {
   paymentmethod: "paymentMethod",
   paymentstatus: "paymentStatus",
   shippingcost: "shippingCost",
+  deliveredrevenue: "deliveredRevenue",
+  avgshippingcost: "avgShippingCost",
+  deliveredshippingcostcount: "deliveredShippingCostCount",
+  avgdeliveredordervalue: "avgDeliveredOrderValue",
+  openpopulation: "openPopulation",
+  highrisk: "highRisk",
+  lowrisk: "lowRisk",
+  unknownrisk: "unknownRisk",
   pickuplocation: "pickupLocation",
   shipmentid: "shipmentId",
   productsjson: "productsJson",
@@ -39,6 +47,7 @@ const resultKeyAliases: Record<string, string> = {
   ndrraisedat: "ndrRaisedAt",
   previousundelivered: "previousUndelivered",
   attemptnumber: "attemptNumber",
+  latestknownstatus: "latestKnownStatus",
   eventat: "eventAt",
   confirmationstatus: "confirmationStatus",
   confirmationupdatedat: "confirmationUpdatedAt",
@@ -235,6 +244,16 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_campaigns_position ON campaigns (is_active, position)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_campaign_assignments_campaign ON campaign_assignments (campaign_id, position)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_attempts_order ON confirmation_attempts (order_id, attempt_number)"),
+    db.prepare(`UPDATE orders SET total = COALESCE(
+      NULLIF(CASE WHEN raw_json::jsonb->>'total' ~ '^[0-9]+(\\.[0-9]+)?$' THEN (raw_json::jsonb->>'total')::double precision ELSE 0 END, 0),
+      NULLIF(CASE WHEN raw_json::jsonb->>'sub_total' ~ '^[0-9]+(\\.[0-9]+)?$' THEN (raw_json::jsonb->>'sub_total')::double precision ELSE 0 END, 0),
+      NULLIF(CASE WHEN raw_json::jsonb->>'total_amount' ~ '^[0-9]+(\\.[0-9]+)?$' THEN (raw_json::jsonb->>'total_amount')::double precision ELSE 0 END, 0),
+      NULLIF(CASE WHEN raw_json::jsonb->>'order_total' ~ '^[0-9]+(\\.[0-9]+)?$' THEN (raw_json::jsonb->>'order_total')::double precision ELSE 0 END, 0),
+      NULLIF(CASE WHEN raw_json::jsonb->>'amount' ~ '^[0-9]+(\\.[0-9]+)?$' THEN (raw_json::jsonb->>'amount')::double precision ELSE 0 END, 0),
+      total
+    ) WHERE total <= 0 AND NOT EXISTS (SELECT 1 FROM sync_state WHERE key='order_total_backfill_v1')`),
+    db.prepare(`INSERT INTO sync_state (key, value, updated_at) VALUES ('order_total_backfill_v1', 'complete', ?)
+      ON CONFLICT(key) DO NOTHING`).bind(new Date().toISOString()),
     db.prepare(`INSERT INTO campaign_assignments (campaign_id, order_id, position, created_at)
       SELECT 'cmp_default_high_rto', id, ROW_NUMBER() OVER (ORDER BY COALESCE(NULLIF(order_date, ''), created_at), id), ?
       FROM orders

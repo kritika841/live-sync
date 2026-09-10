@@ -6,12 +6,13 @@ type Metric = { count: number; percent: number };
 type Breakdown = { name: string; total: number; delivered: number; outcomes: number; rate: number };
 type OverviewData = {
   metrics: Record<string, Metric>;
-  financials: { deliveredRevenue: number; avgShippingCost: number; avgDeliveredOrderValue: number };
+  financials: { deliveredRevenue: number; avgShippingCost: number; avgDeliveredOrderValue: number; deliveredCount: number; shippingCostCount: number };
   risk: { high: Metric; low: Metric; unknown: Metric };
   byCourier: Breakdown[];
   byState: Breakdown[];
   ndrReasons: Array<{ reason: string; count: number }>;
   filterOptions: { couriers: string[]; states: string[] };
+  dataQuality: { source: string; dateBasis: string; orderCount: number; lastSyncAt: string; syncStatus: string; lastSyncCount: number; lastSyncError: string };
 };
 type OfdOrder = {
   id: number; channelOrderId: string; customerName: string; customerCity: string; customerState: string;
@@ -22,7 +23,7 @@ type OfdOrder = {
 };
 type OfdData = { date: string; metrics: Record<string, Metric>; orders: OfdOrder[] };
 
-const formatCurrency = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value || 0);
+const formatCurrency = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value || 0);
 const formatDateTime = (value: string) => value ? new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "—";
 const indiaDateValue = (date: Date) => {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
@@ -141,8 +142,8 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
   const maxReason = Math.max(1, ...(overview?.ndrReasons || []).map((item) => Number(item.count)));
   return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
     <div className="analytics-filter">
-      <label>From<input type="date" value={from} max={to || today} onChange={(event) => setFrom(event.target.value)} /></label>
-      <label>To<input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} /></label>
+      <label>Order date from<input type="date" value={from} max={to || today} onChange={(event) => setFrom(event.target.value)} /></label>
+      <label>Order date to<input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} /></label>
       <label>Payment<select value={payment} onChange={(event) => setPayment(event.target.value)}><option value="">All payments</option><option value="prepaid">Prepaid</option><option value="cod">COD</option></select></label>
       <label>Courier<select value={courier} onChange={(event) => setCourier(event.target.value)}><option value="">All couriers</option>{overview?.filterOptions.couriers.map((item) => <option key={item}>{item}</option>)}</select></label>
       <label>State<select value={state} onChange={(event) => setState(event.target.value)}><option value="">All states</option>{overview?.filterOptions.states.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -150,6 +151,9 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
       <button onClick={() => { setFrom(monthAgo); setTo(today); setPayment(""); setCourier(""); setState(""); setRisk(""); }}>Reset</button>
     </div>
     {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
+    {overview && <div className={`analytics-data-quality ${overview.dataQuality.syncStatus === "healthy" ? "healthy" : "warning"}`}>
+      <i /><span><strong>{overview.dataQuality.orderCount} real orders in this view</strong> · {overview.dataQuality.source} · {overview.dataQuality.dateBasis} · {overview.dataQuality.lastSyncAt ? `Last sync ${formatDateTime(overview.dataQuality.lastSyncAt)}` : "No completed sync timestamp"}{overview.dataQuality.lastSyncError ? ` · Sync warning: ${overview.dataQuality.lastSyncError}` : ""}</span>
+    </div>}
     <nav className="analytics-mode-tabs" aria-label="Analytics calculation view">
       <button className={analyticsView === "closed" ? "active" : ""} onClick={() => setAnalyticsView("closed")}><strong>Closed outcomes</strong><span>Delivered ÷ (Delivered + RTO + Undelivered) × 100</span></button>
       <button className={analyticsView === "open" ? "active" : ""} onClick={() => setAnalyticsView("open")}><strong>Open delivery view</strong><span>Delivered ÷ (Delivered + In transit) × 100 · Undelivered attempts excluded</span></button>
@@ -173,7 +177,7 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
     </div>
     <div className="analytics-grid overview-grid">
       <section className="analytics-card outcome-card"><header><div><h2>{analyticsView === "closed" ? "Closed outcome mix" : "Open delivery mix"}</h2><p>{analyticsView === "closed" ? "Delivered, RTO, and attempted-undelivered orders" : "Delivered and currently in-transit orders only"}</p></div></header><div className="donut-layout"><div className="donut" style={{ background: `conic-gradient(#46d495 0 ${delivered}%, #ff706b ${delivered}% ${delivered + rto}%, #f0aa5c ${delivered + rto}% ${delivered + rto + ndr}%, #27302c ${delivered + rto + ndr}% 100%)` }}><span><strong>{analyticsView === "closed" ? metrics.closed?.count || 0 : metrics.openPopulation?.count || 0}</strong><small>{analyticsView === "closed" ? "closed" : "open population"}</small></span></div><div className="legend"><span><i className="delivered" />Delivered <b>{delivered}%</b></span>{analyticsView === "closed" && <span><i className="rto" />RTO <b>{rto}%</b></span>}<span><i className="ndr" />{analyticsView === "closed" ? "Undelivered" : "In transit"} <b>{ndr}%</b></span>{other > 0 && <span><i />Rounding <b>{Math.round(other * 10) / 10}%</b></span>}</div></div></section>
-      <section className="analytics-card finance-card"><header><div><h2>Revenue & cost</h2><p>Based on delivered orders in this period</p></div></header><div className="finance-list"><div><span>Delivered revenue</span><strong>{formatCurrency(overview?.financials.deliveredRevenue || 0)}</strong></div><div><span>Avg. shipping cost</span><strong>{overview?.financials.avgShippingCost ? formatCurrency(overview.financials.avgShippingCost) : "Not reported"}</strong></div><div><span>Avg. delivered order</span><strong>{formatCurrency(overview?.financials.avgDeliveredOrderValue || 0)}</strong></div><div><span>COD share</span><strong>{metrics.cod?.percent || 0}% <small>({metrics.cod?.count || 0})</small></strong></div></div></section>
+      <section className="analytics-card finance-card"><header><div><h2>Revenue & cost</h2><p>Calculated only from delivered orders in the selected order-date cohort</p></div></header><div className="finance-list"><div><span>Delivered revenue</span><strong>{formatCurrency(overview?.financials.deliveredRevenue || 0)}</strong><small>Sum of {overview?.financials.deliveredCount || 0} delivered order totals</small></div><div><span>Avg. delivered shipping cost</span><strong>{overview?.financials.shippingCostCount ? formatCurrency(overview.financials.avgShippingCost) : "Not reported"}</strong><small>{overview?.financials.shippingCostCount || 0} delivered orders report shipping cost</small></div><div><span>Avg. delivered order value</span><strong>{overview?.financials.deliveredCount ? formatCurrency(overview.financials.avgDeliveredOrderValue) : "Not reported"}</strong><small>Delivered order totals only</small></div><div><span>COD share</span><strong>{metrics.cod?.percent || 0}% <small>({metrics.cod?.count || 0})</small></strong><small>All orders in this view</small></div></div></section>
       <section className="analytics-card risk-card"><header><div><h2>RTO risk split</h2><p>Tagged orders only · {overview?.risk.unknown.count || 0} orders have no recognised risk tag</p></div></header><div className="risk-split"><div><span>Low risk</span><strong>{overview?.risk.low.percent || 0}% <small>({overview?.risk.low.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.low.percent || 0}%` }} /></i></div><div className="high"><span>High / very high</span><strong>{overview?.risk.high.percent || 0}% <small>({overview?.risk.high.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.high.percent || 0}%` }} /></i></div></div></section>
       <section className="analytics-card ndr-card"><header><div><h2>NDR reasons</h2><p>Why delivery attempts failed</p></div></header><div className="reason-list">{(overview?.ndrReasons || []).map((item) => <div key={item.reason}><span title={item.reason}>{item.reason}</span><i><b style={{ width: `${(Number(item.count) / maxReason) * 100}%` }} /></i><strong>{item.count}</strong></div>)}{!overview?.ndrReasons.length && <p className="analytics-empty">No NDR orders in this period.</p>}</div></section>
       <RateChart title="Delivery % by courier" subtitle="Delivered ÷ final outcomes; highest-volume couriers first" rows={overview?.byCourier || []} />

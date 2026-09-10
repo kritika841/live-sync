@@ -67,6 +67,9 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(api, /openPopulationSql/);
   assert.match(api, /UNRESOLVED AFTER OFD/);
   assert.match(api, /deliveredRevenue/);
+  assert.match(api, /deliveredShippingCostCount/);
+  assert.match(api, /Order date in Asia\/Kolkata/);
+  assert.match(analytics, /real orders in this view/);
   assert.match(api, /first_out_for_delivery_at/);
   assert.match(api, /ndr_reason/);
   assert.match(dashboard, />Reports</);
@@ -95,4 +98,15 @@ test("shows confirmation contact numbers by default and supports contact filteri
   assert.match(confirmation, /customerPhone\?\.replace/);
   assert.match(api, /customer_phone AS customerPhone/);
   assert.doesNotMatch(confirmation, /reveal|masked/i);
+});
+
+test("keeps the sign-in action high contrast", async () => {
+  const [signIn, styles] = await Promise.all([
+    readFile(new URL("../app/auth/SignInForm.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(signIn, /button type="submit"/);
+  assert.match(styles, /\.standalone-signin button \{[^}]*background:linear-gradient/);
+  assert.match(styles, /\.standalone-signin button \{[^}]*color:#06110C/);
+  assert.doesNotMatch(styles, /\.standalone-signin button \{[^}]*var\(--accent\)/);
 });

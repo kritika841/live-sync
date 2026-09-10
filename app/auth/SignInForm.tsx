@@ -17,6 +17,6 @@ export default function SignInForm() {
     <label><span>Email address</span><input name="email" type="email" autoComplete="username" required /></label>
     <label><span>Password</span><input name="password" type="password" autoComplete="current-password" required /></label>
     {error && <p className="signin-error">{error}</p>}
-    <button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+    <button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
   </form>;
 }

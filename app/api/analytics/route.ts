@@ -19,6 +19,7 @@ const isoDate = /^\d{4}-\d{2}-\d{2}$/;
 const indiaDateSql = (column: string) => `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
 const latestOfdDateSql = indiaDateSql("out_for_delivery_at");
 const firstOfdDateSql = indiaDateSql("first_out_for_delivery_at");
+const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), created_at)");
 
 function indiaToday() {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
@@ -169,8 +170,8 @@ export async function GET(request: Request) {
   const courier = url.searchParams.get("courier")?.trim();
   const state = url.searchParams.get("state")?.trim();
   const risk = url.searchParams.get("risk")?.trim();
-  if (from) { filters.push("SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) >= ?"); values.push(from); }
-  if (to) { filters.push("SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) <= ?"); values.push(to); }
+  if (from) { filters.push(`${orderAnalyticsDateSql} >= ?`); values.push(from); }
+  if (to) { filters.push(`${orderAnalyticsDateSql} <= ?`); values.push(to); }
   if (payment) { filters.push("LOWER(payment_method) = LOWER(?)"); values.push(payment); }
   if (courier) { filters.push("LOWER(courier) = LOWER(?)"); values.push(courier); }
   if (state) { filters.push("LOWER(customer_state) = LOWER(?)"); values.push(state); }
@@ -193,8 +194,9 @@ export async function GET(request: Request) {
       SUM(CASE WHEN ${highRiskSql} THEN 1 ELSE 0 END) AS highRisk,
       SUM(CASE WHEN ${lowRiskSql} THEN 1 ELSE 0 END) AS lowRisk,
       SUM(CASE WHEN NOT (${highRiskSql}) AND NOT (${lowRiskSql}) THEN 1 ELSE 0 END) AS unknownRisk,
-      SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END) AS deliveredRevenue,
-      AVG(CASE WHEN shipping_cost > 0 AND ${shippedHistorySql} THEN shipping_cost END) AS avgShippingCost,
+      COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS deliveredRevenue,
+      AVG(CASE WHEN ${deliveredSql} AND shipping_cost > 0 THEN shipping_cost END) AS avgShippingCost,
+      COUNT(*) FILTER (WHERE ${deliveredSql} AND shipping_cost > 0) AS deliveredShippingCostCount,
       AVG(CASE WHEN ${deliveredSql} THEN total END) AS avgDeliveredOrderValue
     FROM orders WHERE ${where}
   `).bind(...values).first<Record<string, unknown>>();
@@ -225,7 +227,9 @@ export async function GET(request: Request) {
   const options = await runtime.DB.batch([
     runtime.DB.prepare("SELECT DISTINCT courier AS value FROM orders WHERE courier != '' ORDER BY courier"),
     runtime.DB.prepare("SELECT DISTINCT customer_state AS value FROM orders WHERE customer_state != '' ORDER BY customer_state"),
+    runtime.DB.prepare("SELECT key, value FROM sync_state WHERE key IN ('sync_status', 'last_sync_at', 'last_sync_count', 'last_sync_error')"),
   ]);
+  const syncState = Object.fromEntries(options[2].results.map((row) => [String(row.key), String(row.value || "")]));
 
   return Response.json({
     metrics: {
@@ -242,6 +246,8 @@ export async function GET(request: Request) {
       deliveredRevenue: Number(summary?.deliveredRevenue || 0),
       avgShippingCost: Number(summary?.avgShippingCost || 0),
       avgDeliveredOrderValue: Number(summary?.avgDeliveredOrderValue || 0),
+      deliveredCount: Number(summary?.delivered || 0),
+      shippingCostCount: Number(summary?.deliveredShippingCostCount || 0),
     },
     risk: {
       high: metric(summary?.highRisk, taggedRisk), low: metric(summary?.lowRisk, taggedRisk),
@@ -253,6 +259,15 @@ export async function GET(request: Request) {
     filterOptions: {
       couriers: options[0].results.map((row) => String(row.value)),
       states: options[1].results.map((row) => String(row.value)),
+    },
+    dataQuality: {
+      source: "Shiprocket synced orders",
+      dateBasis: "Order date in Asia/Kolkata",
+      orderCount: total,
+      lastSyncAt: syncState.last_sync_at || "",
+      syncStatus: syncState.sync_status || "unknown",
+      lastSyncCount: Number(syncState.last_sync_count || 0),
+      lastSyncError: syncState.last_sync_error || "",
     },
   });
 }

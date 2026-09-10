@@ -58,7 +58,7 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
   const [risk, setRisk] = useState("");
   const [analyticsView, setAnalyticsView] = useState<"closed" | "open">("closed");
   const [ofdDate, setOfdDate] = useState(today);
-  const [ofdOutcome, setOfdOutcome] = useState<"all" | "delivered" | "undelivered" | "out" | "attempt1" | "attempt2" | "attempt3">("all");
+  const [ofdOutcome, setOfdOutcome] = useState<"all" | "delivered" | "undelivered" | "out" | "unresolved" | "attempt1" | "attempt2" | "attempt3">("all");
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [ofd, setOfd] = useState<OfdData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -98,11 +98,13 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
 
   if (mode === "today_ofd") {
     const metrics = ofd?.metrics || {};
+    const historical = ofdDate < today;
     const shownOrders = (ofd?.orders || []).filter((order) => {
       if (ofdOutcome === "delivered") return /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(order.status);
       if (ofdOutcome === "undelivered") return /UNDELIVERED|NDR|RTO|RETURN TO ORIGIN/i.test(order.status);
       if (ofdOutcome === "out") return /^OUT FOR DELIVERY$/i.test(order.status);
-      if (ofdOutcome.startsWith("attempt")) return /^OUT FOR DELIVERY$/i.test(order.status) && order.attemptNumber === Number(ofdOutcome.slice(-1));
+      if (ofdOutcome === "unresolved") return /^UNRESOLVED AFTER OFD$/i.test(order.status);
+      if (ofdOutcome.startsWith("attempt")) return order.attemptNumber === Number(ofdOutcome.slice(-1));
       return true;
     });
     return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
@@ -112,17 +114,18 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
         <MetricCard label="Went out for delivery" metric={metrics.total} />
         <MetricCard label="Delivered" metric={metrics.delivered} />
         <MetricCard label="Undelivered" metric={metrics.undelivered} />
-        <MetricCard label="Still out for delivery" metric={metrics.stillOut} />
-        <MetricCard label="Still OFD · First attempt" metric={metrics.firstAttemptOFD} />
-        <MetricCard label="Still OFD · Second attempt" metric={metrics.secondAttemptOFD} />
-        <MetricCard label="Still OFD · Third attempt" metric={metrics.thirdAttemptOFD} />
+        <MetricCard label="Still out for delivery" metric={metrics.stillOut} hint={historical ? "Past dates cannot remain in this category" : "Live current-day status"} />
+        <MetricCard label="First OFD attempt" metric={metrics.firstAttemptOFD} />
+        <MetricCard label="Second OFD attempt" metric={metrics.secondAttemptOFD} />
+        <MetricCard label="Third OFD attempt" metric={metrics.thirdAttemptOFD} />
+        <MetricCard label="Unresolved after OFD" metric={metrics.unresolved} hint="Past-date orders without a closing delivery scan" />
         <MetricCard label="Previously undelivered" metric={metrics.previousUndelivered} />
         <MetricCard label="Moved to RTO" metric={metrics.rto} />
         {(metrics.laterAttemptOFD?.count || 0) > 0 && <MetricCard label="Still OFD · Later attempt" metric={metrics.laterAttemptOFD} />}
       </div>
       <section className="analytics-card ofd-orders-card">
-        <header><div><h2>OFD attempt register</h2><p>Latest attempt, first attempt, outcome, and NDR detail for {ofdDate}.</p></div><span className="record-count">{shownOrders.length} orders</span></header>
-        <nav className="outcome-tabs" aria-label="Filter OFD outcomes">{([['all','All'],['delivered','Delivered'],['undelivered','Undelivered / RTO'],['out','Still OFD'],['attempt1','1st attempt OFD'],['attempt2','2nd attempt OFD'],['attempt3','3rd attempt OFD']] as const).map(([key,label])=><button key={key} className={ofdOutcome===key?'active':''} onClick={()=>setOfdOutcome(key)}>{label}</button>)}</nav>
+        <header><div><h2>OFD attempt register</h2><p>{historical ? "Latest known outcome; old OFD scans without closure move to Unresolved after OFD." : "Live attempt number, current outcome, and NDR detail"} for {ofdDate}.</p></div><span className="record-count">{shownOrders.length} orders</span></header>
+        <nav className="outcome-tabs" aria-label="Filter OFD outcomes">{([['all','All'],['delivered','Delivered'],['undelivered','Undelivered / RTO'],['out','Still OFD'],['unresolved','Unresolved after OFD'],['attempt1','1st attempt OFD'],['attempt2','2nd attempt OFD'],['attempt3','3rd attempt OFD']] as const).map(([key,label])=><button key={key} className={ofdOutcome===key?'active':''} onClick={()=>setOfdOutcome(key)}>{label}</button>)}</nav>
         <div className="analytics-table-wrap"><table className="analytics-table"><thead><tr><th>Order</th><th>Attempt</th><th>Customer</th><th>OFD time</th><th>First OFD</th><th>Current outcome</th><th>NDR reason</th><th>AWB / Courier</th><th>Amount</th></tr></thead><tbody>
           {shownOrders.map((order) => <tr key={order.id}><td><strong>#{order.channelOrderId || order.id}</strong>{order.previousUndelivered && <small className="repeat-attempt">Previous attempt failed</small>}</td><td><strong className="attempt-number">Attempt {order.attemptNumber}</strong></td><td><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ")}</small></td><td>{formatDateTime(order.outForDeliveryAt)}</td><td>{formatDateTime(order.firstOutForDeliveryAt)}</td><td><span className="analytics-status">{order.status || "Unknown"}</span>{order.deliveredAt && <small>Delivered {formatDateTime(order.deliveredAt)}</small>}</td><td><strong>{order.ndrReason || "—"}</strong>{order.ndrRaisedAt && <small>{formatDateTime(order.ndrRaisedAt)}</small>}</td><td><strong>{order.awb || "—"}</strong><small>{order.courier || "Not assigned"}</small></td><td><strong>{formatCurrency(order.total)}</strong>{order.shippingCost > 0 && <small>Ship {formatCurrency(order.shippingCost)}</small>}</td></tr>)}
         </tbody></table>{loading && <div className="analytics-loading"><span className="loader" />Loading live OFD activity…</div>}{!loading && !error && !(ofd?.orders.length) && <div className="analytics-empty large">No orders went out for delivery on this date.</div>}</div>

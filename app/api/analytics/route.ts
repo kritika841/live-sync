@@ -37,11 +37,17 @@ function metric(count: unknown, total: number) {
 
 function statusBucket(statusValue: unknown) {
   const status = String(statusValue || "").trim().toUpperCase();
+  if (status === "UNRESOLVED AFTER OFD") return "unresolved" as const;
   if (status === "DELIVERED" || status === "DELIVERED TO CUSTOMER") return "delivered" as const;
   if (status.startsWith("RTO") || status.includes("RETURN TO ORIGIN")) return "rto" as const;
   if (status === "UNDELIVERED" || status === "NDR" || status === "NDR PENDING" || status.startsWith("UNDELIVERED")) return "undelivered" as const;
   if (status === "OUT FOR DELIVERY") return "stillOut" as const;
   return "other" as const;
+}
+
+function isOpenDeliveryStatus(statusValue: unknown) {
+  const status = String(statusValue || "").trim().toUpperCase();
+  return ["SHIPPED", "IN TRANSIT", "IN TRANSIT-EN-ROUTE", "IN TRANSIT-AT DESTINATION HUB", "REACHED AT DESTINATION HUB", "PICKED UP", "MISROUTED", "UNTRACEABLE", "OUT FOR DELIVERY"].includes(status);
 }
 
 export async function GET(request: Request) {
@@ -57,17 +63,21 @@ export async function GET(request: Request) {
     const requestedDate = url.searchParams.get("date") || currentIndiaDate;
     const selectedDate = isoDate.test(requestedDate) && requestedDate <= currentIndiaDate ? requestedDate : currentIndiaDate;
     const rows = await runtime.DB.prepare(`
-      WITH matching_ofd_events AS (
+      WITH matching_events AS (
         SELECT orders.id AS order_id,
           COALESCE(NULLIF(events.event_at, ''), events.received_at) AS ofd_at,
-          TO_CHAR(COALESCE(NULLIF(events.event_at, ''), events.received_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS ofd_date
+          TO_CHAR(COALESCE(NULLIF(events.event_at, ''), events.received_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS event_date,
+          events.status
         FROM orders
         JOIN webhook_events events ON
           (events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
           OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
           OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
           OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id)
-        WHERE UPPER(TRIM(events.status)) = 'OUT FOR DELIVERY'
+      ), matching_ofd_events AS (
+        SELECT order_id, ofd_at, event_date AS ofd_date
+        FROM matching_events
+        WHERE UPPER(TRIM(status)) = 'OUT FOR DELIVERY'
       ), deduped_ofd_days AS (
         SELECT order_id, ofd_date, MAX(ofd_at) AS ofd_at
         FROM matching_ofd_events
@@ -94,35 +104,43 @@ export async function GET(request: Request) {
           ON selected_event.order_id = orders.id AND selected_event.ofd_date = ?
       )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
-        customer_city AS customerCity, customer_state AS customerState, status,
+        customer_city AS customerCity, customer_state AS customerState, selected_orders.status,
         payment_method AS paymentMethod, total, awb, courier,
         shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
         selected_ofd_at AS outForDeliveryAt, delivered_at AS deliveredAt,
         ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
         shipping_cost AS shippingCost, attempt_number AS attemptNumber,
-        (attempt_number > 1) AS previousUndelivered
+        (attempt_number > 1) AS previousUndelivered,
+        COALESCE((SELECT outcome.status FROM matching_events outcome
+          WHERE outcome.order_id = selected_orders.id
+            AND outcome.ofd_at::timestamptz >= selected_orders.selected_ofd_at::timestamptz
+          ORDER BY outcome.ofd_at::timestamptz DESC LIMIT 1), selected_orders.status) AS latestKnownStatus
       FROM selected_orders
       WHERE selected_ofd_at IS NOT NULL AND selected_ofd_at != ''
       ORDER BY selected_ofd_at DESC, id DESC
     `).bind(selectedDate, selectedDate, selectedDate, selectedDate, selectedDate, selectedDate).all<Record<string, unknown>>();
-    const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> = rows.results.map((row) => ({
-      ...row,
-      attemptNumber: Math.max(1, Number(row.attemptNumber || 1)),
-      previousUndelivered: Boolean(row.previousUndelivered),
-    }));
+    const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> = rows.results.map((row) => {
+      const latestKnownStatus = String(row.latestKnownStatus || row.status || "");
+      const status = selectedDate < currentIndiaDate && isOpenDeliveryStatus(latestKnownStatus)
+        ? "UNRESOLVED AFTER OFD"
+        : latestKnownStatus;
+      return {
+        ...row, status, latestKnownStatus: undefined,
+        attemptNumber: Math.max(1, Number(row.attemptNumber || 1)),
+        previousUndelivered: Boolean(row.previousUndelivered),
+      };
+    });
     const total = orders.length;
-    const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, rto: 0, other: 0 };
-    const stillOutAttempts = { first: 0, second: 0, third: 0, later: 0 };
+    const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, unresolved: 0, rto: 0, other: 0 };
+    const attemptCounts = { first: 0, second: 0, third: 0, later: 0 };
     for (const order of orders) {
       const bucket = statusBucket(order.status);
       bucketCounts[bucket] += 1;
-      if (bucket === "stillOut") {
-        const attempt = Number(order.attemptNumber);
-        if (attempt === 1) stillOutAttempts.first += 1;
-        else if (attempt === 2) stillOutAttempts.second += 1;
-        else if (attempt === 3) stillOutAttempts.third += 1;
-        else stillOutAttempts.later += 1;
-      }
+      const attempt = Number(order.attemptNumber);
+      if (attempt === 1) attemptCounts.first += 1;
+      else if (attempt === 2) attemptCounts.second += 1;
+      else if (attempt === 3) attemptCounts.third += 1;
+      else attemptCounts.later += 1;
     }
     const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
     return Response.json({
@@ -130,8 +148,9 @@ export async function GET(request: Request) {
       metrics: {
         total: metric(total, total), delivered: metric(bucketCounts.delivered, total),
         undelivered: metric(bucketCounts.undelivered, total), stillOut: metric(bucketCounts.stillOut, total),
-        firstAttemptOFD: metric(stillOutAttempts.first, total), secondAttemptOFD: metric(stillOutAttempts.second, total),
-        thirdAttemptOFD: metric(stillOutAttempts.third, total), laterAttemptOFD: metric(stillOutAttempts.later, total),
+        unresolved: metric(bucketCounts.unresolved, total),
+        firstAttemptOFD: metric(attemptCounts.first, total), secondAttemptOFD: metric(attemptCounts.second, total),
+        thirdAttemptOFD: metric(attemptCounts.third, total), laterAttemptOFD: metric(attemptCounts.later, total),
         previousUndelivered: metric(previousUndelivered, total), rto: metric(bucketCounts.rto, total),
         other: metric(bucketCounts.other, total),
       },

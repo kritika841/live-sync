@@ -3,12 +3,13 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound } from "lucide-react";
+import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound, Warehouse } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
 import ReportsPanel from "./ReportsPanel";
 import AccountMenu from "./AccountMenu";
+import InventoryPanel from "./InventoryPanel";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high" | "approved";
@@ -65,7 +66,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmin }: { userLabel: string; userEmail: string; userRole: string; isAdmin: boolean }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
+  const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "inventory" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
@@ -305,6 +306,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
     confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "" },
     campaigns: { eyebrow: "Customer verification", title: "Campaigns", subcopy: "" },
+    inventory: { eyebrow: "Stock control", title: "Inventory", subcopy: "Components, purchase orders, reservations, and Shopify catalog" },
     analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
     today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
     reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
@@ -318,6 +320,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><ShoppingBag/><strong>Orders</strong></button>
         <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><PhoneCall/><strong>Confirmation</strong></button>
         <button title="Campaigns" className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}><Boxes/><strong>Campaigns</strong></button>
+        <button title="Inventory" className={view === "inventory" ? "active" : ""} onClick={() => setView("inventory")}><Warehouse/><strong>Inventory</strong></button>
         <button title="Analytics" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><LayoutDashboard/><strong>Analytics</strong></button>
         <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><Truck/><strong>Today’s OFD</strong></button>
         <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><PackageSearch/><strong>Reports</strong></button>
@@ -447,6 +450,8 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         </section>
 
         <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} />
+
+        <InventoryPanel active={view === "inventory"} isAdmin={isAdmin} />
 
         <AnalyticsPanel mode="overview" active={view === "analytics"} />
         <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} />

@@ -118,3 +118,28 @@ test("keeps the sign-in action high contrast", async () => {
   assert.match(styles, /\.standalone-signin button \{[^}]*color:#06110C/);
   assert.doesNotMatch(styles, /\.standalone-signin button \{[^}]*var\(--accent\)/);
 });
+
+test("includes the auditable inventory foundation without embedded Shopify secrets", async () => {
+  const [dashboard, panel, api, database, shopify, exampleEnv, plan] = await Promise.all([
+    readFile(new URL("../app/OrdersDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/InventoryPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/inventory/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/database.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/shopify.ts", import.meta.url), "utf8"),
+    readFile(new URL("../.env.example", import.meta.url), "utf8"),
+    readFile(new URL("../docs/inventory-implementation-plan.md", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, />Inventory</);
+  assert.match(panel, /Physical/);
+  assert.match(panel, /Reason required/);
+  assert.match(panel, /Awaiting secure credentials/);
+  assert.match(api, /manual_override/);
+  assert.match(api, /component\.quantity_set/);
+  assert.match(api, /Number\.isFinite\(target\)/);
+  assert.match(database, /CREATE TABLE IF NOT EXISTS component_ledger/);
+  assert.match(database, /CREATE TABLE IF NOT EXISTS supplier_invoices/);
+  assert.match(shopify, /variants\(first: 100, after: \$cursor\)/);
+  assert.match(shopify, /UPDATE inventory_products SET active=FALSE/);
+  assert.match(exampleEnv, /SHOPIFY_ADMIN_ACCESS_TOKEN=\s*$/m);
+  assert.doesNotMatch([dashboard, panel, api, database, shopify, exampleEnv, plan].join("\n"), /shpat_|shpss_/);
+});

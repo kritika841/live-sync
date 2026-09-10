@@ -56,6 +56,7 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
   const [selectedCandidates, setSelectedCandidates] = useState<Set<number>>(new Set());
   const [draggedCampaignId, setDraggedCampaignId] = useState("");
   const [openCampaignMenu, setOpenCampaignMenu] = useState("");
+  const [confirmationSearch, setConfirmationSearch] = useState("");
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -160,6 +161,14 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
       return !query || [order.channelOrderId, order.customerName, order.customerPhone].some((value) => value?.toLowerCase().includes(query));
     });
   })();
+  const confirmationOrders = data[mode].filter((order) => {
+    const query = confirmationSearch.trim().toLowerCase();
+    if (!query) return true;
+    const digits = query.replace(/\D/g, "");
+    return [order.channelOrderId, order.customerName, order.customerPhone, order.customerCity, order.customerState]
+      .some((value) => value?.toLowerCase().includes(query))
+      || Boolean(digits && order.customerPhone?.replace(/\D/g, "").includes(digits));
+  });
 
   return (
     <section className={`confirmation-view ${active ? "" : "view-hidden"}`}>
@@ -169,12 +178,14 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
         <button className={mode === "rejected" ? "active rejected" : ""} onClick={() => setMode("rejected")}><strong>Rejected <b>{data.counts.rejected}</b></strong></button>
       </div>}
 
+      {section === "confirmation" && <label className="confirmation-contact-filter"><Search size={16}/><input type="search" value={confirmationSearch} onChange={(event) => setConfirmationSearch(event.target.value)} placeholder="Filter by customer, contact number, order, city or state"/><span>{confirmationOrders.length} shown</span></label>}
+
       {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}
       {loading ? <div className="confirmation-card confirmation-loading"><i className="loader"/><span>Loading confirmation workspace…</span></div> : null}
 
       {!loading && section === "confirmation" && mode === "queue" && <article className="confirmation-card">
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMATION QUEUE</p><h2>High-RTO customer calls</h2><p>Orders are automatically assigned. Scheduled callbacks return when they are due.</p></div><span>{data.counts.approved} approved</span></header>
-        {data.queue.length ? <div className="confirmation-orders">{data.queue.map((order) => <div className="confirmation-order" key={order.id}>
+        {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => <div className="confirmation-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>{when(order.orderDate)} · {order.paymentMethod || "Payment unknown"} · ₹{Number(order.total || 0).toLocaleString("en-IN")}</small><p>{productSummary(order.products)}</p></div>
           <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{order.attempts.length}/3 recall attempts</small>{order.attempts.at(-1) && <small>Last: {order.attempts.at(-1)?.outcome} · {when(order.attempts.at(-1)?.createdAt)}</small>}</div>
@@ -184,7 +195,7 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
 
       {!loading && section === "confirmation" && mode === "confirmed" && <article className="confirmation-card confirmed-card">
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMED ORDERS</p><h2>Customer-approved orders</h2><p>Every order confirmed from the call queue is retained here.</p></div><span>{data.confirmed.length} approved</span></header>
-        {data.confirmed.length ? <div className="confirmation-orders">{data.confirmed.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order confirmed-order" key={order.id}>
+        {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order confirmed-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Confirmed {when(order.confirmedAt)}</small><p>{productSummary(order.products)}</p></div>
           <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{latest?.note || "No confirmation note"}</small></div>
@@ -194,7 +205,7 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
 
       {!loading && section === "confirmation" && mode === "rejected" && <article className="confirmation-card rejected-card">
         <header className="confirmation-header"><div><p className="eyebrow">REJECTED ORDERS</p><h2>Manual cancellation list</h2><p>These records are stored only in this dashboard. Shiprocket is never cancelled automatically.</p></div><span>{data.rejected.length} to review</span></header>
-        {data.rejected.length ? <div className="confirmation-orders">{data.rejected.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order rejected-order" key={order.id}>
+        {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order rejected-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Rejected {when(order.rejectedAt)}</small><p>{productSummary(order.products)}</p></div>
           <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{order.customerCity}, {order.customerState}</small></div>
           <div className="confirmation-meta"><span>{latest?.rejectionReason?.replaceAll("_", " ") || "Rejected"}</span><small>{latest?.note || "No note"}</small></div>

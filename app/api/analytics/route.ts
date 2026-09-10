@@ -1,3 +1,4 @@
+import { requireApiUser } from "../../../lib/auth/access";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 
 export const dynamic = "force-dynamic";
@@ -7,9 +8,17 @@ const rtoSql = "(UPPER(TRIM(status)) LIKE 'RTO%' OR UPPER(TRIM(status)) LIKE '%R
 const ndrSql = "(UPPER(TRIM(status)) IN ('UNDELIVERED', 'NDR', 'NDR PENDING') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%')";
 const cancelledSql = "UPPER(TRIM(status)) IN ('CANCELED', 'CANCELLED', 'ORDER CANCELED', 'ORDER CANCELLED')";
 const nonShippedSql = `UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED', 'PICKUP SCHEDULED', 'MANIFEST GENERATED', 'OUT FOR PICKUP', 'PICKUP EXCEPTION')`;
-const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
-const terminalSql = `(${deliveredSql} OR ${rtoSql} OR ${ndrSql})`;
-const shippedSql = `(shipped_at != '' OR UPPER(TRIM(status)) IN ('SHIPPED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'IN TRANSIT-AT DESTINATION HUB', 'REACHED AT DESTINATION HUB', 'PICKED UP', 'OUT FOR DELIVERY', 'UNDELIVERED', 'NDR', 'NDR PENDING', 'DELIVERED', 'DELIVERED TO CUSTOMER') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%' OR ${rtoSql})`;
+const inTransitSql = `UPPER(TRIM(status)) IN ('SHIPPED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'IN TRANSIT-AT DESTINATION HUB', 'REACHED AT DESTINATION HUB', 'PICKED UP', 'MISROUTED', 'UNTRACEABLE', 'OUT FOR DELIVERY')`;
+const riskValueSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' '))";
+const highRiskSql = `${riskValueSql} IN ('high', 'very high')`;
+const lowRiskSql = `${riskValueSql} = 'low'`;
+const closedSql = `(${deliveredSql} OR ${rtoSql} OR ${ndrSql})`;
+const openPopulationSql = `(${deliveredSql} OR ${inTransitSql})`;
+const shippedHistorySql = `(shipped_at != '' OR ${closedSql} OR ${inTransitSql})`;
+const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+const indiaDateSql = (column: string) => `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
+const latestOfdDateSql = indiaDateSql("out_for_delivery_at");
+const firstOfdDateSql = indiaDateSql("first_out_for_delivery_at");
 
 function indiaToday() {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
@@ -18,37 +27,71 @@ function indiaToday() {
 }
 
 function percent(count: number, total: number) {
-  return total ? Math.round((count / total) * 1000) / 10 : 0;
+  return total > 0 ? Math.round((count / total) * 1000) / 10 : 0;
 }
 
 function metric(count: unknown, total: number) {
-  const value = Number(count || 0);
+  const value = Math.max(0, Number(count || 0));
   return { count: value, percent: percent(value, total) };
 }
 
+function statusBucket(statusValue: unknown) {
+  const status = String(statusValue || "").trim().toUpperCase();
+  if (status === "DELIVERED" || status === "DELIVERED TO CUSTOMER") return "delivered" as const;
+  if (status.startsWith("RTO") || status.includes("RETURN TO ORIGIN")) return "rto" as const;
+  if (status === "UNDELIVERED" || status === "NDR" || status === "NDR PENDING" || status.startsWith("UNDELIVERED")) return "undelivered" as const;
+  if (status === "OUT FOR DELIVERY") return "stillOut" as const;
+  return "other" as const;
+}
+
 export async function GET(request: Request) {
+  const access = await requireApiUser();
+  if (access.response) return access.response;
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const url = new URL(request.url);
   const mode = url.searchParams.get("mode") === "today_ofd" ? "today_ofd" : "overview";
 
   if (mode === "today_ofd") {
-    const today = url.searchParams.get("date") || indiaToday();
+    const currentIndiaDate = indiaToday();
+    const requestedDate = url.searchParams.get("date") || currentIndiaDate;
+    const selectedDate = isoDate.test(requestedDate) && requestedDate <= currentIndiaDate ? requestedDate : currentIndiaDate;
     const rows = await runtime.DB.prepare(`
-      WITH selected_orders AS (
+      WITH matching_ofd_events AS (
+        SELECT orders.id AS order_id,
+          COALESCE(NULLIF(events.event_at, ''), events.received_at) AS ofd_at,
+          TO_CHAR(COALESCE(NULLIF(events.event_at, ''), events.received_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS ofd_date
+        FROM orders
+        JOIN webhook_events events ON
+          (events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
+          OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
+          OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
+          OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id)
+        WHERE UPPER(TRIM(events.status)) = 'OUT FOR DELIVERY'
+      ), deduped_ofd_days AS (
+        SELECT order_id, ofd_date, MAX(ofd_at) AS ofd_at
+        FROM matching_ofd_events
+        GROUP BY order_id, ofd_date
+      ), selected_orders AS (
         SELECT orders.*,
           COALESCE(
-            (SELECT MAX(events.received_at) FROM webhook_events events
-              WHERE UPPER(TRIM(events.status)) = 'OUT FOR DELIVERY'
-                AND TO_CHAR(events.received_at::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') = ?
-                AND ((events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
-                  OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
-                  OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
-                  OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id))),
-            CASE WHEN SUBSTR(out_for_delivery_at, 1, 10) = ? THEN out_for_delivery_at END,
-            CASE WHEN SUBSTR(first_out_for_delivery_at, 1, 10) = ? THEN first_out_for_delivery_at END
-          ) AS selected_ofd_at
+            selected_event.ofd_at,
+            CASE WHEN ${latestOfdDateSql} = ? THEN out_for_delivery_at END,
+            CASE WHEN ${firstOfdDateSql} = ? THEN first_out_for_delivery_at END
+          ) AS selected_ofd_at,
+          COALESCE(
+            NULLIF((SELECT COUNT(*) FROM deduped_ofd_days previous
+              WHERE previous.order_id = orders.id AND previous.ofd_date <= ?), 0),
+            CASE
+              WHEN ${firstOfdDateSql} = ? THEN 1
+              WHEN ${latestOfdDateSql} = ? THEN GREATEST(2,
+                ndr_attempts + CASE WHEN ${ndrSql} THEN 0 ELSE 1 END)
+              ELSE 1
+            END
+          )::integer AS attempt_number
         FROM orders
+        LEFT JOIN deduped_ofd_days selected_event
+          ON selected_event.order_id = orders.id AND selected_event.ofd_date = ?
       )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
         customer_city AS customerCity, customer_state AS customerState, status,
@@ -56,40 +99,41 @@ export async function GET(request: Request) {
         shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
         selected_ofd_at AS outForDeliveryAt, delivered_at AS deliveredAt,
         ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
-        shipping_cost AS shippingCost,
-        EXISTS(
-          SELECT 1 FROM webhook_events events
-          WHERE UPPER(TRIM(events.status)) LIKE 'UNDELIVERED%'
-            AND events.received_at::timestamptz < selected_orders.selected_ofd_at::timestamptz
-            AND ((events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = selected_orders.id)
-              OR (events.shipment_id IS NOT NULL AND events.shipment_id = selected_orders.shipment_id)
-              OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = selected_orders.awb)
-              OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = selected_orders.channel_order_id))
-        ) OR (
-          ndr_attempts > 0
-          AND first_out_for_delivery_at != ''
-          AND SUBSTR(first_out_for_delivery_at, 1, 10) < TO_CHAR(selected_ofd_at::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')
-        ) AS previousUndelivered
+        shipping_cost AS shippingCost, attempt_number AS attemptNumber,
+        (attempt_number > 1) AS previousUndelivered
       FROM selected_orders
-      WHERE selected_ofd_at IS NOT NULL
+      WHERE selected_ofd_at IS NOT NULL AND selected_ofd_at != ''
       ORDER BY selected_ofd_at DESC, id DESC
-    `).bind(today, today, today).all<Record<string, unknown>>();
-    const orders: Array<Record<string, unknown> & { previousUndelivered: boolean }> = rows.results.map((row) => ({
+    `).bind(selectedDate, selectedDate, selectedDate, selectedDate, selectedDate, selectedDate).all<Record<string, unknown>>();
+    const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> = rows.results.map((row) => ({
       ...row,
+      attemptNumber: Math.max(1, Number(row.attemptNumber || 1)),
       previousUndelivered: Boolean(row.previousUndelivered),
     }));
     const total = orders.length;
-    const delivered = orders.filter((order) => /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(String(order.status))).length;
-    const undelivered = orders.filter((order) => /^(UNDELIVERED|NDR|NDR PENDING)/i.test(String(order.status))).length;
-    const stillOut = orders.filter((order) => /^OUT FOR DELIVERY$/i.test(String(order.status))).length;
-    const rto = orders.filter((order) => /^RTO|RETURN TO ORIGIN/i.test(String(order.status))).length;
+    const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, rto: 0, other: 0 };
+    const stillOutAttempts = { first: 0, second: 0, third: 0, later: 0 };
+    for (const order of orders) {
+      const bucket = statusBucket(order.status);
+      bucketCounts[bucket] += 1;
+      if (bucket === "stillOut") {
+        const attempt = Number(order.attemptNumber);
+        if (attempt === 1) stillOutAttempts.first += 1;
+        else if (attempt === 2) stillOutAttempts.second += 1;
+        else if (attempt === 3) stillOutAttempts.third += 1;
+        else stillOutAttempts.later += 1;
+      }
+    }
     const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
     return Response.json({
-      date: today,
+      date: selectedDate,
       metrics: {
-        total: metric(total, total), delivered: metric(delivered, total), undelivered: metric(undelivered, total),
-        stillOut: metric(stillOut, total), previousUndelivered: metric(previousUndelivered, total),
-        rto: metric(rto, total), other: metric(Math.max(0, total - delivered - undelivered - stillOut - rto), total),
+        total: metric(total, total), delivered: metric(bucketCounts.delivered, total),
+        undelivered: metric(bucketCounts.undelivered, total), stillOut: metric(bucketCounts.stillOut, total),
+        firstAttemptOFD: metric(stillOutAttempts.first, total), secondAttemptOFD: metric(stillOutAttempts.second, total),
+        thirdAttemptOFD: metric(stillOutAttempts.third, total), laterAttemptOFD: metric(stillOutAttempts.later, total),
+        previousUndelivered: metric(previousUndelivered, total), rto: metric(bucketCounts.rto, total),
+        other: metric(bucketCounts.other, total),
       },
       orders,
     });
@@ -99,6 +143,8 @@ export async function GET(request: Request) {
   const values: unknown[] = [];
   let from = url.searchParams.get("from")?.trim();
   let to = url.searchParams.get("to")?.trim();
+  if (from && !isoDate.test(from)) from = undefined;
+  if (to && !isoDate.test(to)) to = undefined;
   if (from && to && from > to) [from, to] = [to, from];
   const payment = url.searchParams.get("payment")?.trim();
   const courier = url.searchParams.get("courier")?.trim();
@@ -110,7 +156,7 @@ export async function GET(request: Request) {
   if (courier) { filters.push("LOWER(courier) = LOWER(?)"); values.push(courier); }
   if (state) { filters.push("LOWER(customer_state) = LOWER(?)"); values.push(state); }
   if (risk === "high") filters.push(highRiskSql);
-  if (risk === "low") filters.push(`NOT (${highRiskSql})`);
+  if (risk === "low") filters.push(lowRiskSql);
   const where = filters.length ? filters.join(" AND ") : "1 = 1";
   const summary = await runtime.DB.prepare(`
     SELECT COUNT(*) AS total,
@@ -119,35 +165,39 @@ export async function GET(request: Request) {
       SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
       SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
       SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
+      SUM(CASE WHEN ${inTransitSql} THEN 1 ELSE 0 END) AS inTransit,
       SUM(CASE WHEN ${nonShippedSql} THEN 1 ELSE 0 END) AS nonShipped,
       SUM(CASE WHEN ${cancelledSql} THEN 1 ELSE 0 END) AS cancelled,
-      SUM(CASE WHEN ${terminalSql} THEN 1 ELSE 0 END) AS terminal,
-      SUM(CASE WHEN ${shippedSql} THEN 1 ELSE 0 END) AS shipped,
-      SUM(CASE WHEN ${shippedSql} AND NOT (${deliveredSql}) AND NOT (${rtoSql}) THEN 1 ELSE 0 END) AS openShipped,
+      SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed,
+      SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS openPopulation,
+      SUM(CASE WHEN ${shippedHistorySql} THEN 1 ELSE 0 END) AS shipped,
       SUM(CASE WHEN ${highRiskSql} THEN 1 ELSE 0 END) AS highRisk,
-      SUM(CASE WHEN ${highRiskSql} THEN 0 ELSE 1 END) AS lowRisk,
+      SUM(CASE WHEN ${lowRiskSql} THEN 1 ELSE 0 END) AS lowRisk,
+      SUM(CASE WHEN NOT (${highRiskSql}) AND NOT (${lowRiskSql}) THEN 1 ELSE 0 END) AS unknownRisk,
       SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END) AS deliveredRevenue,
-      AVG(CASE WHEN shipping_cost > 0 THEN shipping_cost END) AS avgShippingCost,
+      AVG(CASE WHEN shipping_cost > 0 AND ${shippedHistorySql} THEN shipping_cost END) AS avgShippingCost,
       AVG(CASE WHEN ${deliveredSql} THEN total END) AS avgDeliveredOrderValue
     FROM orders WHERE ${where}
   `).bind(...values).first<Record<string, unknown>>();
   const total = Number(summary?.total || 0);
-  const terminal = Number(summary?.terminal || 0);
+  const closed = Number(summary?.closed || 0);
+  const openPopulation = Number(summary?.openPopulation || 0);
   const shipped = Number(summary?.shipped || 0);
+  const taggedRisk = Number(summary?.highRisk || 0) + Number(summary?.lowRisk || 0);
 
   const courierRows = await runtime.DB.prepare(`
     SELECT COALESCE(NULLIF(courier, ''), 'Not assigned') AS name, COUNT(*) AS total,
       SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${terminalSql} THEN 1 ELSE 0 END) AS outcomes
+      SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS outcomes
     FROM orders WHERE ${where} GROUP BY name ORDER BY total DESC LIMIT 12
   `).bind(...values).all<{ name: string; total: number; delivered: number; outcomes: number }>();
   const stateRows = await runtime.DB.prepare(`
     SELECT COALESCE(NULLIF(customer_state, ''), 'Unknown state') AS name, COUNT(*) AS total,
       SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${terminalSql} THEN 1 ELSE 0 END) AS outcomes
+      SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS outcomes
     FROM orders WHERE ${where} GROUP BY name ORDER BY total DESC LIMIT 12
   `).bind(...values).all<{ name: string; total: number; delivered: number; outcomes: number }>();
-  const ndrReasonSql = `COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')`;
+  const ndrReasonSql = "COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')";
   const ndrReasons = await runtime.DB.prepare(`
     SELECT ${ndrReasonSql} AS reason, COUNT(*) AS count
     FROM orders WHERE ${where} AND ${ndrSql}
@@ -161,11 +211,11 @@ export async function GET(request: Request) {
   return Response.json({
     metrics: {
       total: metric(total, total), prepaid: metric(summary?.prepaid, total), cod: metric(summary?.cod, total),
-      delivered: metric(summary?.delivered, total), deliveryRate: metric(summary?.delivered, terminal),
+      delivered: metric(summary?.delivered, total), deliveryRate: metric(summary?.delivered, closed),
       shipped: metric(summary?.shipped, total), shippedDeliveryRate: metric(summary?.delivered, shipped),
-      openShipped: metric(summary?.openShipped, shipped), closed: metric(terminal, total),
-      closedRto: metric(summary?.rto, terminal), closedNdr: metric(summary?.ndr, terminal),
-      shippedRto: metric(summary?.rto, shipped),
+      openPopulation: metric(openPopulation, total), openDeliveryRate: metric(summary?.delivered, openPopulation),
+      inTransit: metric(summary?.inTransit, openPopulation), closed: metric(closed, total),
+      closedRto: metric(summary?.rto, closed), closedNdr: metric(summary?.ndr, closed),
       rto: metric(summary?.rto, total), ndr: metric(summary?.ndr, total),
       nonShipped: metric(summary?.nonShipped, total), cancelled: metric(summary?.cancelled, total),
     },
@@ -175,7 +225,8 @@ export async function GET(request: Request) {
       avgDeliveredOrderValue: Number(summary?.avgDeliveredOrderValue || 0),
     },
     risk: {
-      high: metric(summary?.highRisk, total), low: metric(summary?.lowRisk, total),
+      high: metric(summary?.highRisk, taggedRisk), low: metric(summary?.lowRisk, taggedRisk),
+      unknown: metric(summary?.unknownRisk, total),
     },
     byCourier: courierRows.results.map((row) => ({ ...row, rate: percent(Number(row.delivered || 0), Number(row.outcomes || 0)) })),
     byState: stateRows.results.map((row) => ({ ...row, rate: percent(Number(row.delivered || 0), Number(row.outcomes || 0)) })),

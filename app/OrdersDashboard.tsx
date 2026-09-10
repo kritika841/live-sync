@@ -2,11 +2,13 @@
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck } from "lucide-react";
+import Link from "next/link";
+import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
 import ReportsPanel from "./ReportsPanel";
+import AccountMenu from "./AccountMenu";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high" | "approved";
@@ -62,7 +64,7 @@ const indiaDateValue = (date: Date) => {
 };
 const todayValue = indiaDateValue(new Date());
 
-export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
+export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmin }: { userLabel: string; userEmail: string; userRole: string; isAdmin: boolean }) {
   const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
@@ -188,13 +190,20 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     setSyncing(true);
     setError("");
     try {
-      const response = await fetch("/api/sync", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
-        body: JSON.stringify({ mode: "incremental" }),
-      });
-      const payload = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(payload.error || "Sync failed");
+      let page: number | undefined;
+      let mode: "incremental" | "full" = "incremental";
+      do {
+        const response = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
+          body: JSON.stringify({ mode, page }),
+        });
+        const payload = await response.json() as { error?: string; mode?: "incremental" | "full"; hasMore?: boolean; nextPage?: number };
+        if (!response.ok) throw new Error(payload.error || "Sync failed");
+        if (payload.mode === "full") mode = "full";
+        page = payload.hasMore ? payload.nextPage : undefined;
+        await loadOrders();
+      } while (page);
       await Promise.all([loadOrders(), loadLogs()]);
       setView("reports");
     } catch (syncError) {
@@ -301,8 +310,6 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
     reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
     logs: { eyebrow: "Live activity", title: "Activity log", subcopy: "Webhook updates, manual syncs, and daily verification history" },
   }[view];
-  const initials = userLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "OP";
-
   return (
     <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar" aria-label="Dashboard sections">
@@ -315,15 +322,16 @@ export default function OrdersDashboard({ userLabel }: { userLabel: string }) {
         <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><Truck/><strong>Today’s OFD</strong></button>
         <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><PackageSearch/><strong>Reports</strong></button>
         <button title="Activity log" className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><RotateCcw/><strong>Activity log</strong></button>
+        {isAdmin && <Link href="/admin/users" title="Manage users"><UsersRound/><strong>Manage users</strong></Link>}
       </aside>
 
       <div className="app-main">
       <header className="topbar">
-        <div className="header-context"><div><p className="eyebrow">{viewCopy.eyebrow}</p><h1>{viewCopy.title}</h1></div><span className="role-badge">Operations</span></div>
+        <div className="header-context"><div><p className="eyebrow">{viewCopy.eyebrow}</p><h1>{viewCopy.title}</h1></div><span className="role-badge">{userRole === "admin" ? "Administrator" : "Operations"}</span></div>
         <div className="header-tools">
           <label className="header-search"><Search size={17}/><input value={search} onChange={(event) => { setSearch(event.target.value); setView("orders"); setPage(1); }} placeholder="Search orders, customers, AWB or SKU" aria-label="Search dashboard"/></label>
           <button className="notification-button" aria-label="Notifications"><Bell size={18}/><i className="notification-dot"/></button>
-          <span className="avatar" aria-label="Operations user">{initials}</span>
+          <AccountMenu name={userLabel} email={userEmail} isAdmin={isAdmin} />
         </div>
       </header>
 

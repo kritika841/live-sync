@@ -1,5 +1,6 @@
 import { ACTIONABLE_STATUS_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
+import { isSameOrigin, requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +46,8 @@ function serializeCandidate(row: Record<string, unknown>) {
 }
 
 export async function GET() {
+  const access = await requireApiUser();
+  if (access.response) return access.response;
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const now = new Date().toISOString();
@@ -99,7 +102,9 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  if (!sameOrigin(request)) return Response.json({ error: "A valid dashboard session is required" }, { status: 401 });
+  const access = await requireApiUser();
+  if (access.response) return access.response;
+  if (!sameOrigin(request) || !isSameOrigin(request)) return Response.json({ error: "Invalid request origin" }, { status: 403 });
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;

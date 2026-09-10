@@ -1,5 +1,6 @@
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { buildSyncReportWorkbook, type StoredSyncReport } from "../../../lib/excel-report";
+import { requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,8 @@ function normalizeReport(row: ReportRow): StoredSyncReport {
 }
 
 export async function GET(request: Request) {
+  const access = await requireApiUser();
+  if (access.response) return access.response;
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const url = new URL(request.url);

@@ -58,6 +58,7 @@ export const webhookEvents = sqliteTable("webhook_events", {
   awb: text("awb"),
   status: text("status"),
   payloadJson: text("payload_json").notNull(),
+  eventAt: text("event_at").notNull().default(""),
   receivedAt: text("received_at").notNull(),
 }, (table) => [
   index("idx_webhook_events_received_at").on(table.receivedAt),

@@ -329,12 +329,21 @@ async function syncNdrDetails(db: PostgresDatabase, token: string, channelId: nu
 
 const dateOnly = (date: Date) => date.toISOString().slice(0, 10);
 
-export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode = "incremental", source = "manual") {
+export async function syncShiprocketOrders(
+  runtime: RuntimeEnv,
+  mode: SyncMode = "incremental",
+  source = "manual",
+  options: { startPage?: number; maxPages?: number } = {},
+) {
   const db = runtime.DB;
   if (!db) throw new Error("Database binding is unavailable");
   await ensureSchema(db);
-  const initialSync = await db.prepare("SELECT value FROM sync_state WHERE key = 'initial_sync_completed_at'").first<{ value: string }>();
-  const effectiveMode: SyncMode = mode === "incremental" && !initialSync?.value ? "full" : mode;
+  const syncRows = await db.prepare("SELECT key, value FROM sync_state WHERE key IN ('initial_sync_completed_at', 'full_sync_next_page')").all<{ key: string; value: string }>();
+  const syncState = Object.fromEntries(syncRows.results.map((row) => [row.key, row.value]));
+  const effectiveMode: SyncMode = mode === "incremental" && !syncState.initial_sync_completed_at ? "full" : mode;
+  const storedPage = Math.max(1, Number(syncState.full_sync_next_page || 1));
+  const startPage = effectiveMode === "full" ? Math.max(1, Number(options.startPage || storedPage)) : 1;
+  const maxPages = effectiveMode === "full" ? Math.min(10, Math.max(1, Number(options.maxPages || 4))) : 500;
   await logActivity(db, source, "sync.started", `${effectiveMode === "full" ? "Full" : "Incremental"} Shiprocket sync started`, { mode: effectiveMode });
   await setSyncState(db, "sync_status", "running");
   await setSyncState(db, "last_sync_started_at", new Date().toISOString());
@@ -359,11 +368,12 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
         { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
       );
     };
-    const firstPage = await fetchPage(1);
+    const firstPage = await fetchPage(startPage);
     const totalPages = Math.min(Number(firstPage.meta?.pagination?.total_pages || 1), 500);
     const orders = [...(firstPage.data || [])];
-    for (let start = 2; start <= totalPages; start += 4) {
-      const pageNumbers = Array.from({ length: Math.min(4, totalPages - start + 1) }, (_, index) => start + index);
+    const endPage = Math.min(totalPages, startPage + maxPages - 1);
+    for (let start = startPage + 1; start <= endPage; start += 4) {
+      const pageNumbers = Array.from({ length: Math.min(4, endPage - start + 1) }, (_, index) => start + index);
       const pages = await Promise.all(pageNumbers.map(fetchPage));
       for (const page of pages) orders.push(...(page.data || []));
     }
@@ -373,6 +383,16 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
       await upsertOrders(db, batch);
     }
     const synced = orders.length;
+    const hasMore = effectiveMode === "full" && endPage < totalPages;
+    if (hasMore) {
+      const nextPage = endPage + 1;
+      await setSyncState(db, "full_sync_next_page", String(nextPage));
+      await setSyncState(db, "last_sync_count", String(synced));
+      await logActivity(db, source, "sync.chunk_completed", `Imported Shiprocket pages ${startPage}-${endPage} of ${totalPages}`, {
+        synced, startPage, endPage, totalPages, nextPage,
+      });
+      return { synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode, report, hasMore, nextPage, totalPages };
+    }
     await syncNdrDetails(db, token, channel.id, report);
     const completedAt = new Date().toISOString();
     report.completedAt = completedAt;
@@ -394,11 +414,14 @@ export async function syncShiprocketOrders(runtime: RuntimeEnv, mode: SyncMode =
     ).run();
     await setSyncState(db, "sync_status", "healthy");
     await setSyncState(db, "last_sync_error", "");
-    if (effectiveMode === "full") await setSyncState(db, "initial_sync_completed_at", completedAt);
+    if (effectiveMode === "full") {
+      await setSyncState(db, "initial_sync_completed_at", completedAt);
+      await setSyncState(db, "full_sync_next_page", "");
+    }
     await logActivity(db, source, "sync.completed", `Verified ${synced} orders · ${report.discrepanciesTotal} field discrepancies repaired`, {
       synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode, report,
     });
-    return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode: effectiveMode, report };
+    return { synced, channelId: channel.id, channelName: channel.name, completedAt, mode: effectiveMode, report, hasMore: false, totalPages };
   } catch (error) {
     await setSyncState(db, "sync_status", "error");
     await setSyncState(db, "last_sync_error", error instanceof Error ? error.message : "Unknown sync error");

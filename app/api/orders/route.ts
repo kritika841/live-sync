@@ -1,9 +1,12 @@
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { sqlForTab, statusTab, type OrderTab } from "../../../lib/order-status";
+import { requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  const access = await requireApiUser();
+  if (access.response) return access.response;
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const url = new URL(request.url);

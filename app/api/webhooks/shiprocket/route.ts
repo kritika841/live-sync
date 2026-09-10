@@ -43,11 +43,14 @@ export async function POST(request: Request) {
   const shipmentId = intValue(payload.shipment_id);
   const awb = textValue(payload.awb || payload.awb_code);
   const status = textValue(payload.current_status || payload.status || payload.shipment_status);
+  const eventAt = normalizeShiprocketDate(
+    payload.current_timestamp || payload.status_date || payload.updated_at || payload.created_at,
+  ) || now;
 
   await runtime.DB.prepare(`
-    INSERT INTO webhook_events (shiprocket_order_id, channel_order_id, shipment_id, awb, status, payload_json, received_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(shiprocketOrderId, channelOrderId || null, shipmentId, awb || null, status || null, JSON.stringify(payload), now).run();
+    INSERT INTO webhook_events (shiprocket_order_id, channel_order_id, shipment_id, awb, status, payload_json, event_at, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(shiprocketOrderId, channelOrderId || null, shipmentId, awb || null, status || null, JSON.stringify(payload), eventAt, now).run();
 
   const orderReference = channelOrderId || (shiprocketOrderId ? String(shiprocketOrderId) : awb) || "Unknown order";
   await logActivity(runtime.DB, "Shiprocket webhook", "order.updated", status
@@ -67,7 +70,7 @@ export async function POST(request: Request) {
       await runtime.DB.prepare("UPDATE orders SET status = ?, synced_at = ? WHERE channel_order_id = ?").bind(status, now, channelOrderId).run();
     }
     if (/^DELIVERED(?: TO CUSTOMER)?$/i.test(status)) {
-      const deliveredAt = normalizeShiprocketDate(payload.delivered_date || payload.delivered_at || payload.current_timestamp) || now;
+      const deliveredAt = normalizeShiprocketDate(payload.delivered_date || payload.delivered_at || eventAt) || now;
       if (shiprocketOrderId) {
         await runtime.DB.prepare("UPDATE orders SET delivered_at = ? WHERE id = ?").bind(deliveredAt, shiprocketOrderId).run();
       } else if (shipmentId) {
@@ -79,7 +82,7 @@ export async function POST(request: Request) {
       }
     }
     if (/^OUT FOR DELIVERY$/i.test(status)) {
-      const outForDeliveryAt = normalizeShiprocketDate(payload.out_for_delivery_date || payload.out_for_delivery_at || payload.current_timestamp) || now;
+      const outForDeliveryAt = normalizeShiprocketDate(payload.out_for_delivery_date || payload.out_for_delivery_at || eventAt) || now;
       if (shiprocketOrderId) {
         await runtime.DB.prepare(`${ofdUpdate}id = ?`).bind(outForDeliveryAt, shiprocketOrderId).run();
       } else if (shipmentId) {
@@ -93,7 +96,7 @@ export async function POST(request: Request) {
     if (/UNDELIVERED|NDR/i.test(status)) {
       const reason = textValue(payload.reason || payload.ndr_reason || payload.activity);
       const attempts = intValue(payload.attempts || payload.ndr_attempts) || 0;
-      const raisedAt = normalizeShiprocketDate(payload.ndr_raised_at || payload.current_timestamp) || now;
+      const raisedAt = normalizeShiprocketDate(payload.ndr_raised_at || eventAt) || now;
       const update = `UPDATE orders SET ndr_reason = COALESCE(NULLIF(?, ''), ndr_reason), ndr_attempts = CASE WHEN ? > 0 THEN ? ELSE ndr_attempts END, ndr_raised_at = ? WHERE `;
       if (shiprocketOrderId) await runtime.DB.prepare(`${update}id = ?`).bind(reason, attempts, attempts, raisedAt, shiprocketOrderId).run();
       else if (shipmentId) await runtime.DB.prepare(`${update}shipment_id = ?`).bind(reason, attempts, attempts, raisedAt, shipmentId).run();

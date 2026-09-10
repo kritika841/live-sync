@@ -1,4 +1,4 @@
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
+import postgres, { type Sql } from "postgres";
 
 type Row = Record<string, unknown>;
 
@@ -38,6 +38,8 @@ const resultKeyAliases: Record<string, string> = {
   ndrattempts: "ndrAttempts",
   ndrraisedat: "ndrRaisedAt",
   previousundelivered: "previousUndelivered",
+  attemptnumber: "attemptNumber",
+  eventat: "eventAt",
   confirmationstatus: "confirmationStatus",
   confirmationupdatedat: "confirmationUpdatedAt",
   confirmedat: "confirmedAt",
@@ -48,7 +50,6 @@ const resultKeyAliases: Record<string, string> = {
   campaignname: "campaignName",
   campaignposition: "campaignPosition",
   orderposition: "orderPosition",
-  attemptnumber: "attemptNumber",
   callpicked: "callPicked",
   callbackat: "callbackAt",
   nextactionat: "nextActionAt",
@@ -101,13 +102,16 @@ export class PreparedStatement {
 
 export class PostgresDatabase {
   private readonly query: (text: string, values: unknown[]) => Promise<Row[]>;
-  private readonly sql: NeonQueryFunction<false, false>;
+  private readonly sql: Sql;
 
   constructor(connectionString: string) {
-    const sql = neon(connectionString);
-    this.sql = sql;
-    this.query = async (text, values) =>
-      normalizeRows((await sql.query(postgresPlaceholders(text), values)) as Row[]);
+    this.sql = postgres(connectionString, {
+      prepare: false,
+      max: 5,
+      idle_timeout: 20,
+      connect_timeout: 15,
+    });
+    this.query = async (text, values) => normalizeRows((await this.sql.unsafe(postgresPlaceholders(text), values as never[])) as Row[]);
   }
 
   prepare(text: string) {
@@ -116,11 +120,15 @@ export class PostgresDatabase {
 
   async batch(statements: PreparedStatement[]) {
     if (!statements.length) return [];
-    const results = await this.sql.transaction(statements.map((statement) => {
-      const query = statement.toQuery();
-      return this.sql.query(query.text, query.values);
-    }));
-    return (results as Row[][]).map((rows) => ({ success: true, results: normalizeRows(rows) }));
+    return this.sql.begin(async (transaction) => {
+      const results = [];
+      for (const statement of statements) {
+        const query = statement.toQuery();
+        const rows = await transaction.unsafe(query.text, query.values as never[]);
+        results.push({ success: true, results: normalizeRows(rows as Row[]) });
+      }
+      return results;
+    });
   }
 }
 
@@ -139,8 +147,8 @@ let database: PostgresDatabase | undefined;
 let schemaReady: Promise<void> | undefined;
 
 export function getRuntimeEnv(): RuntimeEnv {
-  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-  if (!connectionString) throw new Error("DATABASE_URL is not configured");
+  const connectionString = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!connectionString) throw new Error("SUPABASE_DB_URL is not configured");
   database ??= new PostgresDatabase(connectionString);
   return {
     DB: database,
@@ -184,13 +192,14 @@ async function createSchema(db: PostgresDatabase) {
       )
     `),
     db.prepare(`CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS webhook_events (id BIGSERIAL PRIMARY KEY, shiprocket_order_id BIGINT, channel_order_id TEXT, shipment_id BIGINT, awb TEXT, status TEXT, payload_json TEXT NOT NULL, received_at TEXT NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS webhook_events (id BIGSERIAL PRIMARY KEY, shiprocket_order_id BIGINT, channel_order_id TEXT, shipment_id BIGINT, awb TEXT, status TEXT, payload_json TEXT NOT NULL, event_at TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS activity_logs (id BIGSERIAL PRIMARY KEY, source TEXT NOT NULL, event_type TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', message TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS sync_reports (id BIGSERIAL PRIMARY KEY, mode TEXT NOT NULL, source TEXT NOT NULL, checked INTEGER NOT NULL DEFAULT 0, new_orders INTEGER NOT NULL DEFAULT 0, changed_orders INTEGER NOT NULL DEFAULT 0, unchanged_orders INTEGER NOT NULL DEFAULT 0, discrepancies_total INTEGER NOT NULL DEFAULT 0, ndr_records INTEGER NOT NULL DEFAULT 0, ndr_enriched INTEGER NOT NULL DEFAULT 0, fields_json TEXT NOT NULL DEFAULT '{}', changes_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL)`),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_status TEXT NOT NULL DEFAULT 'not_required'"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_updated_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rejected_at TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS event_at TEXT NOT NULL DEFAULT ''"),
     db.prepare(`CREATE TABLE IF NOT EXISTS campaigns (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
       criteria_json TEXT NOT NULL DEFAULT '{}', position INTEGER NOT NULL DEFAULT 0,

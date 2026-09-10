@@ -1,5 +1,6 @@
 import { getRuntimeEnv } from "../../../lib/database";
 import { syncShiprocketOrders } from "../../../lib/shiprocket";
+import { requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -24,13 +25,20 @@ export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   const provided = request.headers.get("x-api-key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
   const secretAccess = safeEqual(provided, runtime.SHIPROCKET_WEBHOOK_SECRET || "");
+  if (!secretAccess) {
+    const access = await requireApiUser();
+    if (access.response) return access.response;
+  }
   if (!secretAccess && !isSameOriginDashboardRequest(request)) {
     return Response.json({ error: "A valid sync API key is required" }, { status: 401 });
   }
-  const body = await request.json().catch(() => ({})) as { mode?: string };
+  const body = await request.json().catch(() => ({})) as { mode?: string; page?: number };
   const mode = body.mode === "full" ? "full" : "incremental";
   try {
-    const result = await syncShiprocketOrders(runtime, mode, "manual sync");
+    const result = await syncShiprocketOrders(runtime, mode, "manual sync", {
+      startPage: Number.isFinite(Number(body.page)) ? Math.max(1, Number(body.page)) : undefined,
+      maxPages: 4,
+    });
     return Response.json(result);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Sync failed" }, { status: 502 });

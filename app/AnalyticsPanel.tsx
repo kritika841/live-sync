@@ -7,7 +7,7 @@ type Breakdown = { name: string; total: number; delivered: number; outcomes: num
 type OverviewData = {
   metrics: Record<string, Metric>;
   financials: { deliveredRevenue: number; avgShippingCost: number; avgDeliveredOrderValue: number };
-  risk: { high: Metric; low: Metric };
+  risk: { high: Metric; low: Metric; unknown: Metric };
   byCourier: Breakdown[];
   byState: Breakdown[];
   ndrReasons: Array<{ reason: string; count: number }>;
@@ -17,7 +17,8 @@ type OfdOrder = {
   id: number; channelOrderId: string; customerName: string; customerCity: string; customerState: string;
   status: string; paymentMethod: string; total: number; awb: string; courier: string;
   shippedAt: string; firstOutForDeliveryAt: string; outForDeliveryAt: string; deliveredAt: string;
-  ndrReason: string; ndrAttempts: number; ndrRaisedAt: string; shippingCost: number; previousUndelivered: boolean;
+  ndrReason: string; ndrAttempts: number; ndrRaisedAt: string; shippingCost: number;
+  attemptNumber: number; previousUndelivered: boolean;
 };
 type OfdData = { date: string; metrics: Record<string, Metric>; orders: OfdOrder[] };
 
@@ -55,9 +56,9 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
   const [courier, setCourier] = useState("");
   const [state, setState] = useState("");
   const [risk, setRisk] = useState("");
-  const [analyticsView, setAnalyticsView] = useState<"closed" | "shipped">("closed");
+  const [analyticsView, setAnalyticsView] = useState<"closed" | "open">("closed");
   const [ofdDate, setOfdDate] = useState(today);
-  const [ofdOutcome, setOfdOutcome] = useState<"all" | "delivered" | "undelivered" | "out">("all");
+  const [ofdOutcome, setOfdOutcome] = useState<"all" | "delivered" | "undelivered" | "out" | "attempt1" | "attempt2" | "attempt3">("all");
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [ofd, setOfd] = useState<OfdData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -101,6 +102,7 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
       if (ofdOutcome === "delivered") return /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(order.status);
       if (ofdOutcome === "undelivered") return /UNDELIVERED|NDR|RTO|RETURN TO ORIGIN/i.test(order.status);
       if (ofdOutcome === "out") return /^OUT FOR DELIVERY$/i.test(order.status);
+      if (ofdOutcome.startsWith("attempt")) return /^OUT FOR DELIVERY$/i.test(order.status) && order.attemptNumber === Number(ofdOutcome.slice(-1));
       return true;
     });
     return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
@@ -111,23 +113,27 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
         <MetricCard label="Delivered" metric={metrics.delivered} />
         <MetricCard label="Undelivered" metric={metrics.undelivered} />
         <MetricCard label="Still out for delivery" metric={metrics.stillOut} />
+        <MetricCard label="Still OFD · First attempt" metric={metrics.firstAttemptOFD} />
+        <MetricCard label="Still OFD · Second attempt" metric={metrics.secondAttemptOFD} />
+        <MetricCard label="Still OFD · Third attempt" metric={metrics.thirdAttemptOFD} />
         <MetricCard label="Previously undelivered" metric={metrics.previousUndelivered} />
         <MetricCard label="Moved to RTO" metric={metrics.rto} />
+        {(metrics.laterAttemptOFD?.count || 0) > 0 && <MetricCard label="Still OFD · Later attempt" metric={metrics.laterAttemptOFD} />}
       </div>
       <section className="analytics-card ofd-orders-card">
         <header><div><h2>OFD attempt register</h2><p>Latest attempt, first attempt, outcome, and NDR detail for {ofdDate}.</p></div><span className="record-count">{shownOrders.length} orders</span></header>
-        <nav className="outcome-tabs" aria-label="Filter OFD outcomes">{([['all','All'],['delivered','Delivered'],['undelivered','Undelivered / RTO'],['out','Still OFD']] as const).map(([key,label])=><button key={key} className={ofdOutcome===key?'active':''} onClick={()=>setOfdOutcome(key)}>{label}</button>)}</nav>
-        <div className="analytics-table-wrap"><table className="analytics-table"><thead><tr><th>Order</th><th>Customer</th><th>Latest OFD</th><th>First OFD</th><th>Current outcome</th><th>NDR reason</th><th>AWB / Courier</th><th>Amount</th></tr></thead><tbody>
-          {shownOrders.map((order) => <tr key={order.id}><td><strong>#{order.channelOrderId || order.id}</strong>{order.previousUndelivered && <small className="repeat-attempt">Repeat attempt · {Math.max(2, order.ndrAttempts || 0)} attempts</small>}</td><td><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ")}</small></td><td>{formatDateTime(order.outForDeliveryAt)}</td><td>{formatDateTime(order.firstOutForDeliveryAt)}</td><td><span className="analytics-status">{order.status || "Unknown"}</span>{order.deliveredAt && <small>Delivered {formatDateTime(order.deliveredAt)}</small>}</td><td><strong>{order.ndrReason || "—"}</strong>{order.ndrRaisedAt && <small>{formatDateTime(order.ndrRaisedAt)}</small>}</td><td><strong>{order.awb || "—"}</strong><small>{order.courier || "Not assigned"}</small></td><td><strong>{formatCurrency(order.total)}</strong>{order.shippingCost > 0 && <small>Ship {formatCurrency(order.shippingCost)}</small>}</td></tr>)}
+        <nav className="outcome-tabs" aria-label="Filter OFD outcomes">{([['all','All'],['delivered','Delivered'],['undelivered','Undelivered / RTO'],['out','Still OFD'],['attempt1','1st attempt OFD'],['attempt2','2nd attempt OFD'],['attempt3','3rd attempt OFD']] as const).map(([key,label])=><button key={key} className={ofdOutcome===key?'active':''} onClick={()=>setOfdOutcome(key)}>{label}</button>)}</nav>
+        <div className="analytics-table-wrap"><table className="analytics-table"><thead><tr><th>Order</th><th>Attempt</th><th>Customer</th><th>OFD time</th><th>First OFD</th><th>Current outcome</th><th>NDR reason</th><th>AWB / Courier</th><th>Amount</th></tr></thead><tbody>
+          {shownOrders.map((order) => <tr key={order.id}><td><strong>#{order.channelOrderId || order.id}</strong>{order.previousUndelivered && <small className="repeat-attempt">Previous attempt failed</small>}</td><td><strong className="attempt-number">Attempt {order.attemptNumber}</strong></td><td><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ")}</small></td><td>{formatDateTime(order.outForDeliveryAt)}</td><td>{formatDateTime(order.firstOutForDeliveryAt)}</td><td><span className="analytics-status">{order.status || "Unknown"}</span>{order.deliveredAt && <small>Delivered {formatDateTime(order.deliveredAt)}</small>}</td><td><strong>{order.ndrReason || "—"}</strong>{order.ndrRaisedAt && <small>{formatDateTime(order.ndrRaisedAt)}</small>}</td><td><strong>{order.awb || "—"}</strong><small>{order.courier || "Not assigned"}</small></td><td><strong>{formatCurrency(order.total)}</strong>{order.shippingCost > 0 && <small>Ship {formatCurrency(order.shippingCost)}</small>}</td></tr>)}
         </tbody></table>{loading && <div className="analytics-loading"><span className="loader" />Loading live OFD activity…</div>}{!loading && !error && !(ofd?.orders.length) && <div className="analytics-empty large">No orders went out for delivery on this date.</div>}</div>
       </section>
     </section>;
   }
 
   const metrics = overview?.metrics || {};
-  const delivered = analyticsView === "closed" ? metrics.deliveryRate?.percent || 0 : metrics.shippedDeliveryRate?.percent || 0;
-  const rto = analyticsView === "closed" ? metrics.closedRto?.percent || 0 : metrics.shippedRto?.percent || 0;
-  const ndr = analyticsView === "closed" ? metrics.closedNdr?.percent || 0 : metrics.openShipped?.percent || 0;
+  const delivered = analyticsView === "closed" ? metrics.deliveryRate?.percent || 0 : metrics.openDeliveryRate?.percent || 0;
+  const rto = analyticsView === "closed" ? metrics.closedRto?.percent || 0 : 0;
+  const ndr = analyticsView === "closed" ? metrics.closedNdr?.percent || 0 : metrics.inTransit?.percent || 0;
   const other = Math.max(0, 100 - delivered - rto - ndr);
   const maxReason = Math.max(1, ...(overview?.ndrReasons || []).map((item) => Number(item.count)));
   return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
@@ -143,7 +149,7 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
     {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
     <nav className="analytics-mode-tabs" aria-label="Analytics calculation view">
       <button className={analyticsView === "closed" ? "active" : ""} onClick={() => setAnalyticsView("closed")}><strong>Closed outcomes</strong><span>Delivered ÷ (Delivered + RTO + Undelivered) × 100</span></button>
-      <button className={analyticsView === "shipped" ? "active" : ""} onClick={() => setAnalyticsView("shipped")}><strong>Shipped funnel</strong><span>Delivered ÷ all shipped orders × 100</span></button>
+      <button className={analyticsView === "open" ? "active" : ""} onClick={() => setAnalyticsView("open")}><strong>Open delivery view</strong><span>Delivered ÷ (Delivered + In transit) × 100 · Undelivered attempts excluded</span></button>
     </nav>
     <div className="metrics-grid">
       {analyticsView === "closed" ? <>
@@ -154,18 +160,18 @@ export default function AnalyticsPanel({ mode, active }: { mode: "overview" | "t
         <MetricCard label="Closed population" metric={metrics.closed} />
         <MetricCard label="Prepaid" metric={metrics.prepaid} />
       </> : <>
-        <MetricCard label="Delivered ÷ shipped" metric={metrics.shippedDeliveryRate} hint="Shipped-funnel delivery rate" />
-        <MetricCard label="All shipped" metric={metrics.shipped} hint="Funnel population" />
-        <MetricCard label="Open shipped orders" metric={metrics.openShipped} hint="In transit, OFD, or NDR" />
-        <MetricCard label="RTO from shipped" metric={metrics.shippedRto} />
+        <MetricCard label="Open delivery rate" metric={metrics.openDeliveryRate} hint="Delivered ÷ (Delivered + In transit)" />
+        <MetricCard label="Open population" metric={metrics.openPopulation} hint="Delivered + In transit" />
+        <MetricCard label="In transit" metric={metrics.inTransit} hint="Includes OFD; excludes undelivered attempts" />
+        <MetricCard label="All historically shipped" metric={metrics.shipped} hint="Reference count only" />
         <MetricCard label="Non-shipped" metric={metrics.nonShipped} />
         <MetricCard label="Cancelled" metric={metrics.cancelled} />
       </>}
     </div>
     <div className="analytics-grid overview-grid">
-      <section className="analytics-card outcome-card"><header><div><h2>{analyticsView === "closed" ? "Closed outcome mix" : "Shipped funnel outcome"}</h2><p>{analyticsView === "closed" ? "Only final outcomes are included" : "Delivered, RTO, and orders still open after shipping"}</p></div></header><div className="donut-layout"><div className="donut" style={{ background: `conic-gradient(#46d495 0 ${delivered}%, #ff706b ${delivered}% ${delivered + rto}%, #f0aa5c ${delivered + rto}% ${delivered + rto + ndr}%, #27302c ${delivered + rto + ndr}% 100%)` }}><span><strong>{analyticsView === "closed" ? metrics.closed?.count || 0 : metrics.shipped?.count || 0}</strong><small>{analyticsView === "closed" ? "closed" : "shipped"}</small></span></div><div className="legend"><span><i className="delivered" />Delivered <b>{delivered}%</b></span><span><i className="rto" />RTO <b>{rto}%</b></span><span><i className="ndr" />{analyticsView === "closed" ? "Undelivered" : "Still open"} <b>{ndr}%</b></span>{other > 0 && <span><i />Other <b>{Math.round(other * 10) / 10}%</b></span>}</div></div></section>
+      <section className="analytics-card outcome-card"><header><div><h2>{analyticsView === "closed" ? "Closed outcome mix" : "Open delivery mix"}</h2><p>{analyticsView === "closed" ? "Delivered, RTO, and attempted-undelivered orders" : "Delivered and currently in-transit orders only"}</p></div></header><div className="donut-layout"><div className="donut" style={{ background: `conic-gradient(#46d495 0 ${delivered}%, #ff706b ${delivered}% ${delivered + rto}%, #f0aa5c ${delivered + rto}% ${delivered + rto + ndr}%, #27302c ${delivered + rto + ndr}% 100%)` }}><span><strong>{analyticsView === "closed" ? metrics.closed?.count || 0 : metrics.openPopulation?.count || 0}</strong><small>{analyticsView === "closed" ? "closed" : "open population"}</small></span></div><div className="legend"><span><i className="delivered" />Delivered <b>{delivered}%</b></span>{analyticsView === "closed" && <span><i className="rto" />RTO <b>{rto}%</b></span>}<span><i className="ndr" />{analyticsView === "closed" ? "Undelivered" : "In transit"} <b>{ndr}%</b></span>{other > 0 && <span><i />Rounding <b>{Math.round(other * 10) / 10}%</b></span>}</div></div></section>
       <section className="analytics-card finance-card"><header><div><h2>Revenue & cost</h2><p>Based on delivered orders in this period</p></div></header><div className="finance-list"><div><span>Delivered revenue</span><strong>{formatCurrency(overview?.financials.deliveredRevenue || 0)}</strong></div><div><span>Avg. shipping cost</span><strong>{overview?.financials.avgShippingCost ? formatCurrency(overview.financials.avgShippingCost) : "Not reported"}</strong></div><div><span>Avg. delivered order</span><strong>{formatCurrency(overview?.financials.avgDeliveredOrderValue || 0)}</strong></div><div><span>COD share</span><strong>{metrics.cod?.percent || 0}% <small>({metrics.cod?.count || 0})</small></strong></div></div></section>
-      <section className="analytics-card risk-card"><header><div><h2>RTO risk split</h2><p>Based on Shiprocket risk tags</p></div></header><div className="risk-split"><div><span>Low risk</span><strong>{overview?.risk.low.percent || 0}% <small>({overview?.risk.low.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.low.percent || 0}%` }} /></i></div><div className="high"><span>High / very high</span><strong>{overview?.risk.high.percent || 0}% <small>({overview?.risk.high.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.high.percent || 0}%` }} /></i></div></div></section>
+      <section className="analytics-card risk-card"><header><div><h2>RTO risk split</h2><p>Tagged orders only · {overview?.risk.unknown.count || 0} orders have no recognised risk tag</p></div></header><div className="risk-split"><div><span>Low risk</span><strong>{overview?.risk.low.percent || 0}% <small>({overview?.risk.low.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.low.percent || 0}%` }} /></i></div><div className="high"><span>High / very high</span><strong>{overview?.risk.high.percent || 0}% <small>({overview?.risk.high.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.high.percent || 0}%` }} /></i></div></div></section>
       <section className="analytics-card ndr-card"><header><div><h2>NDR reasons</h2><p>Why delivery attempts failed</p></div></header><div className="reason-list">{(overview?.ndrReasons || []).map((item) => <div key={item.reason}><span title={item.reason}>{item.reason}</span><i><b style={{ width: `${(Number(item.count) / maxReason) * 100}%` }} /></i><strong>{item.count}</strong></div>)}{!overview?.ndrReasons.length && <p className="analytics-empty">No NDR orders in this period.</p>}</div></section>
       <RateChart title="Delivery % by courier" subtitle="Delivered ÷ final outcomes; highest-volume couriers first" rows={overview?.byCourier || []} />
       <RateChart title="Delivery % by state" subtitle="Delivered ÷ final outcomes; highest-volume states first" rows={overview?.byState || []} />

@@ -11,14 +11,17 @@
     "start": "next start",
     "test": "npm run build",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "sync:full": "tsx scripts/full-sync.ts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.1.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.116.0",
     "drizzle-orm": "0.45.2",
-    "fflate": "^0.8.2",
+    "fflate": "^0.8.3",
     "lucide-react": "^0.468.0",
-    "next": "^16.2.6",
+    "next": "^16.3.4",
+    "postgres": "^3.4.9",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
@@ -42,6 +45,7 @@
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
+    "tsx": "^4.20.6",
     "typescript-eslint": "8.59.3",
     "vinext": "1.0.0-beta.2",
     "vite": "8.0.13",

@@ -1,8 +1,11 @@
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
+import { requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const access = await requireApiUser();
+  if (access.response) return access.response;
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
   const rows = await runtime.DB.prepare(`

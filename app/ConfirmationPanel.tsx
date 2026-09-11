@@ -57,6 +57,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
   const [selectedCandidates, setSelectedCandidates] = useState<Set<number>>(new Set());
   const [draggedCampaignId, setDraggedCampaignId] = useState("");
   const [openCampaignMenu, setOpenCampaignMenu] = useState("");
+  const [openOrderMenu, setOpenOrderMenu] = useState<number | null>(null);
   const [confirmationSearch, setConfirmationSearch] = useState("");
 
   const load = useCallback(async (quiet = false) => {
@@ -191,7 +192,19 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>{when(order.orderDate)} · {order.paymentMethod || "Payment unknown"} · ₹{Number(order.total || 0).toLocaleString("en-IN")}</small><p>{productSummary(order.products)}</p></div>
           <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{order.attempts.length}/3 recall attempts</small>{order.attempts.at(-1) && <small>Last: {order.attempts.at(-1)?.outcome} · {when(order.attempts.at(-1)?.createdAt)}</small>}</div>
-          <div className="confirmation-actions"><button className="positive" onClick={() => openAction(order, "confirm")}>Confirm</button><button onClick={() => openAction(order, "callback")}>Callback</button><button onClick={() => openAction(order, "unreachable")}>No answer</button><button className="danger" onClick={() => openAction(order, "reject")}>Reject</button></div>
+          <div className="confirmation-actions">
+            <div className="confirmation-primary-actions">
+              <button className="confirmation-accept" onClick={() => openAction(order, "confirm")}>Accept</button>
+              <button className="confirmation-reject" onClick={() => openAction(order, "reject")}>Reject</button>
+            </div>
+            <div className="confirmation-more-wrap">
+              <button className="confirmation-more" type="button" aria-label={`More actions for order ${order.channelOrderId}`} aria-expanded={openOrderMenu === order.id} onClick={() => setOpenOrderMenu((current) => current === order.id ? null : order.id)}><MoreHorizontal size={18}/></button>
+              {openOrderMenu === order.id && <div className="confirmation-action-menu">
+                <button type="button" onClick={() => { setOpenOrderMenu(null); openAction(order, "callback"); }}>Callback</button>
+                <button type="button" onClick={() => { setOpenOrderMenu(null); openAction(order, "unreachable"); }}>No answer</button>
+              </div>}
+            </div>
+          </div>
         </div>)}</div> : <div className="confirmation-empty"><span>✓</span><h3>Queue is clear</h3><p>New high-RTO orders will appear here automatically.</p></div>}
       </article>}
 

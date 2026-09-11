@@ -234,10 +234,22 @@ td small { display:block; max-width:200px; margin-top:4px; color:#59645e; font-s
 .confirmation-order p { max-width:360px; margin:8px 0 0; overflow:hidden; color:#8b9690; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
 .confirmation-order a { display:block; width:max-content; margin-top:5px; color:#72d9a8; font-size:10px; font-weight:750; text-decoration:none; }
 .confirmation-meta span { display:inline-block; padding:5px 8px; border-radius:99px; background:#192b22; color:#9ed6b8; font-size:8px; font-weight:800; }
-.confirmation-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+.confirmation-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+.confirmation-primary-actions { display:flex; align-items:center; gap:8px; }
 .confirmation-actions button,.confirmation-modal footer button,.campaign-create,.campaign-row-actions button,.candidate-heading button { padding:7px 9px; border:1px solid #2e3733; border-radius:7px; background:#171c1a; color:#a4afa9; font-size:8px; font-weight:850; }
 .confirmation-actions button.positive,.confirmation-modal footer button.positive { border-color:#397152; background:#183a28; color:#b9ebd0; }
 .confirmation-actions button.danger,.confirmation-modal footer button.danger,.campaign-row-actions button.danger { border-color:#713936; background:#351b1a; color:#f0aaa5; }
+.confirmation-actions button.confirmation-accept,.confirmation-actions button.confirmation-reject { min-width:82px; min-height:38px; padding:9px 16px; border:0; border-radius:7px; color:#fff; font-size:10px; font-weight:900; letter-spacing:.01em; box-shadow:inset 0 1px #ffffff29,0 4px 12px #0003; }
+.confirmation-actions button.confirmation-accept { background:#238636; }
+.confirmation-actions button.confirmation-accept:hover { background:#2ea043; }
+.confirmation-actions button.confirmation-reject { background:#c62828; }
+.confirmation-actions button.confirmation-reject:hover { background:#dc3535; }
+.confirmation-more-wrap { position:relative; }
+.confirmation-actions button.confirmation-more { width:38px; height:38px; display:grid; place-items:center; padding:0; border-color:#344152; background:#151e28; color:#aab5c1; }
+.confirmation-action-menu { position:absolute; z-index:12; top:calc(100% + 7px); right:0; width:145px; padding:5px; border:1px solid #344152; border-radius:9px; background:#172230; box-shadow:0 16px 36px #0008; }
+.confirmation-actions .confirmation-action-menu button { width:100%; display:block; padding:10px 11px; border:0; background:transparent; color:#d2dbe4; font-size:10px; text-align:left; }
+.confirmation-actions .confirmation-action-menu button:hover { background:#223142; color:#fff; }
+.confirmation-card:has(.confirmation-actions) { overflow:visible; }
 .confirmation-empty { min-height:260px; display:flex; flex-direction:column; align-items:center; justify-content:center; color:#637069; text-align:center; }
 .confirmation-empty>span { width:38px; height:38px; display:grid; place-items:center; border:1px solid #31523f; border-radius:50%; background:#15291e; color:#73d7a6; }
 .confirmation-empty h3 { margin:13px 0 0; color:#cbd7d0; font-size:14px; }.confirmation-empty p{margin:7px 0 0;font-size:9px}

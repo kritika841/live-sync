@@ -68,9 +68,10 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
     loadAbort.current = controller;
     if (!quiet) setLoading(true);
     try {
-      const response = await fetch("/api/confirmation", { cache: "no-store", signal: controller.signal });
-      const payload = await readJson<ConfirmationData>(response);
-      setData(payload);
+      const params = new URLSearchParams({ section, mode });
+      const response = await fetch(`/api/confirmation?${params}`, { cache: "no-store", signal: controller.signal });
+      const payload = await readJson<Partial<ConfirmationData>>(response);
+      setData((current) => ({ ...current, ...payload, counts: payload.counts ? { ...current.counts, ...payload.counts } : current.counts }));
       setError("");
     } catch (cause) {
       if (!controller.signal.aborted && !quiet) setError(cause instanceof Error ? cause.message : "Could not load confirmations");
@@ -78,7 +79,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
       if (loadAbort.current === controller) loadAbort.current = null;
       if (!quiet) setLoading(false);
     }
-  }, []);
+  }, [mode, section]);
 
   useEffect(() => {
     if (!active || preview) return;
@@ -107,6 +108,8 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         body: JSON.stringify(payload),
       });
       await readJson(response);
+      loadAbort.current?.abort();
+      loadAbort.current = null;
       await load(true);
       return true;
     } catch (cause) {

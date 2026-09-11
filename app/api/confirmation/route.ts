@@ -46,42 +46,63 @@ function serializeCandidate(row: Record<string, unknown>) {
   return { ...row, rawJson: undefined, products: [], attempts: [], tags: extractOrderTags(raw) };
 }
 
-async function handleGET() {
+async function handleGET(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
+  const url = new URL(request.url);
+  const section = url.searchParams.get("section") === "campaigns" ? "campaigns" : "confirmation";
+  const requestedMode = url.searchParams.get("mode");
+  const mode = requestedMode === "confirmed" || requestedMode === "rejected" ? requestedMode : "queue";
   const now = new Date().toISOString();
-  const [queue, confirmed, rejected, campaigns, candidates, availableTagRows] = await Promise.all([
-    runtime.DB.prepare(`SELECT ${orderColumns}
+
+  if (section === "campaigns") {
+    const [campaigns, candidates] = await Promise.all([
+      runtime.DB.prepare(`SELECT c.id, c.name, c.description, c.criteria_json AS criteriaJson, c.position,
+        c.is_active AS isActive, c.auto_assign AS autoAssign, COUNT(ca.order_id) AS orderCount
+        FROM campaigns c LEFT JOIN campaign_assignments ca ON ca.campaign_id=c.id
+        GROUP BY c.id ORDER BY c.position, c.created_at`).all<Record<string, unknown>>(),
+      runtime.DB.prepare(`SELECT ${candidateColumns}
+        FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
+        WHERE ${ACTIONABLE_STATUS_SQL} AND o.confirmation_status NOT IN ('confirmed','rejected')
+        ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC`).all<Record<string, unknown>>(),
+    ]);
+    const serializedCandidates = candidates.results.map((row) => serializeCandidate(row));
+    const availableTags = [...new Map(serializedCandidates.flatMap((order) => order.tags).map((tag) => [tag.trim().toLowerCase(), tag.trim()])).values()]
+      .filter(Boolean).sort((left, right) => left.localeCompare(right));
+    return Response.json({
+      campaigns: campaigns.results.map((row) => ({ ...row, criteria: JSON.parse(String(row.criteriaJson || "{}")), criteriaJson: undefined })),
+      candidates: serializedCandidates,
+      availableTags,
+    });
+  }
+
+  const listQuery = mode === "confirmed"
+    ? runtime.DB.prepare(`SELECT ${orderColumns}
+      FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
+      WHERE o.confirmation_status='confirmed' ORDER BY o.confirmed_at DESC, o.id DESC`)
+    : mode === "rejected"
+      ? runtime.DB.prepare(`SELECT ${orderColumns}
+        FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
+        WHERE o.confirmation_status='rejected' ORDER BY o.rejected_at DESC, o.id DESC`)
+      : runtime.DB.prepare(`SELECT ${orderColumns}
       FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id JOIN campaigns c ON c.id=ca.campaign_id
       WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
         AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
           AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))
-      ORDER BY c.position, ca.position, COALESCE(NULLIF(o.order_date,''),o.created_at), o.id`).bind(now).all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT ${orderColumns}
-      FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
-      WHERE o.confirmation_status='confirmed' ORDER BY o.confirmed_at DESC, o.id DESC`).all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT ${orderColumns}
-      FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
-      WHERE o.confirmation_status='rejected' ORDER BY o.rejected_at DESC, o.id DESC`).all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT c.id, c.name, c.description, c.criteria_json AS criteriaJson, c.position,
-      c.is_active AS isActive, c.auto_assign AS autoAssign, COUNT(ca.order_id) AS orderCount
-      FROM campaigns c LEFT JOIN campaign_assignments ca ON ca.campaign_id=c.id
-      GROUP BY c.id ORDER BY c.position, c.created_at`).all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT ${candidateColumns}
-      FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
-      WHERE ${ACTIONABLE_STATUS_SQL} AND o.confirmation_status NOT IN ('confirmed','rejected')
-      ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC`).all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT MIN(BTRIM(tag)) AS tag FROM (
-      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'order_tag')='array' THEN raw_json::jsonb->'order_tag' ELSE '[]'::jsonb END) AS tag FROM orders
-      UNION ALL
-      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'sr_tags')='array' THEN raw_json::jsonb->'sr_tags' ELSE '[]'::jsonb END) AS tag FROM orders
-      UNION ALL
-      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw_json::jsonb->'tags')='array' THEN raw_json::jsonb->'tags' ELSE '[]'::jsonb END) AS tag FROM orders
-    ) available WHERE BTRIM(tag)<>'' GROUP BY LOWER(BTRIM(tag)) ORDER BY LOWER(MIN(BTRIM(tag)))`).all<{ tag: string }>(),
+      ORDER BY c.position, ca.position, COALESCE(NULLIF(o.order_date,''),o.created_at), o.id`).bind(now);
+  const [orders, countRow] = await Promise.all([
+    listQuery.all<Record<string, unknown>>(),
+    runtime.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id
+        WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
+          AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
+            AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))) AS queue,
+      (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed') AS confirmed,
+      (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; rejected: number }>(),
   ]);
-  const visibleIds = [...queue.results, ...confirmed.results, ...rejected.results].map((row) => Number(row.id));
+  const visibleIds = orders.results.map((row) => Number(row.id));
   const attemptRows = visibleIds.length ? await runtime.DB.prepare(`SELECT id, order_id AS orderId, attempt_number AS attemptNumber,
     outcome, note, call_picked AS callPicked, rejection_reason AS rejectionReason, callback_at AS callbackAt,
     next_action_at AS nextActionAt, created_at AS createdAt FROM confirmation_attempts
@@ -91,14 +112,16 @@ async function handleGET() {
     const id = Number(attempt.orderId);
     attemptsByOrder.set(id, [...(attemptsByOrder.get(id) || []), attempt]);
   }
+  const serialized = orders.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || []));
+  const counts = {
+    queue: Number(countRow?.queue || 0),
+    confirmed: Number(countRow?.confirmed || 0),
+    rejected: Number(countRow?.rejected || 0),
+    approved: Number(countRow?.confirmed || 0),
+  };
   return Response.json({
-    queue: queue.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
-    confirmed: confirmed.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
-    rejected: rejected.results.map((row) => serializeOrder(row, attemptsByOrder.get(Number(row.id)) || [])),
-    campaigns: campaigns.results.map((row) => ({ ...row, criteria: JSON.parse(String(row.criteriaJson || "{}")), criteriaJson: undefined })),
-    candidates: candidates.results.map((row) => serializeCandidate(row)),
-    availableTags: availableTagRows.results.map((row) => row.tag),
-    counts: { queue: queue.results.length, confirmed: confirmed.results.length, rejected: rejected.results.length, approved: confirmed.results.length },
+    [mode]: serialized,
+    counts,
   });
 }
 

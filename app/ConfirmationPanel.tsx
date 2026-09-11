@@ -1,8 +1,9 @@
 "use client";
 
 import { Modal } from "./Modal";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, GripVertical, MoreHorizontal, Search, UsersRound } from "lucide-react";
+import { readJson } from "../lib/http";
 
 type Attempt = { attemptNumber: number; outcome: string; note: string; rejectionReason?: string; nextActionAt?: string; createdAt: string };
 type ConfirmationOrder = {
@@ -59,18 +60,22 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
   const [openCampaignMenu, setOpenCampaignMenu] = useState("");
   const [openOrderMenu, setOpenOrderMenu] = useState<number | null>(null);
   const [confirmationSearch, setConfirmationSearch] = useState("");
+  const loadAbort = useRef<AbortController | null>(null);
 
   const load = useCallback(async (quiet = false) => {
+    if (loadAbort.current) return;
+    const controller = new AbortController();
+    loadAbort.current = controller;
     if (!quiet) setLoading(true);
     try {
-      const response = await fetch("/api/confirmation", { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Could not load confirmations");
+      const response = await fetch("/api/confirmation", { cache: "no-store", signal: controller.signal });
+      const payload = await readJson<ConfirmationData>(response);
       setData(payload);
       setError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not load confirmations");
+      if (!controller.signal.aborted && !quiet) setError(cause instanceof Error ? cause.message : "Could not load confirmations");
     } finally {
+      if (loadAbort.current === controller) loadAbort.current = null;
       if (!quiet) setLoading(false);
     }
   }, []);
@@ -79,7 +84,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
     if (!active || preview) return;
     const initial = window.setTimeout(() => void load(), 0);
     const timer = window.setInterval(() => void load(true), 30000);
-    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); loadAbort.current?.abort(); loadAbort.current = null; };
   }, [active, load, preview]);
 
   useEffect(() => {
@@ -101,8 +106,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
         body: JSON.stringify(payload),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Action failed");
+      await readJson(response);
       await load(true);
       return true;
     } catch (cause) {

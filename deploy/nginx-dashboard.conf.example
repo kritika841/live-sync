@@ -1,0 +1,17 @@
+# Add as a separate virtual host. Keep the existing project's configuration.
+# Replace dashboard.example.com; provision HTTPS before exposing login/webhooks.
+server {
+    listen 80;
+    server_name dashboard.example.com;
+    client_max_body_size 12m;
+    location / {
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 310s;
+    }
+}

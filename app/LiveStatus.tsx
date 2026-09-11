@@ -1,0 +1,5 @@
+'use client';
+import { useEffect,useState } from 'react';
+import { readJson } from '../lib/http';
+type Status={state:string;lastSyncAt?:string;lastEventAt?:string;pending?:number};
+export default function LiveStatus({preview=false}:{preview?:boolean}){const [status,setStatus]=useState<Status>({state:preview?'offline':'checking'});useEffect(()=>{if(preview)return;const controller=new AbortController();async function poll(){try{setStatus(await readJson<Status>(await fetch('/api/health/sync',{cache:'no-store',signal:controller.signal})));}catch{if(!controller.signal.aborted)setStatus({state:'offline'});}}void poll();const id=setInterval(poll,15000);return()=>{controller.abort();clearInterval(id);};},[preview]);const label={healthy:'Up to date',syncing:'Syncing',stale:'Sync delayed',offline:'Offline',checking:'Connecting'}[status.state]||'Sync delayed';return <span className={`global-live-status ${status.state}`} role="status" title={`Last sync: ${status.lastSyncAt?new Date(status.lastSyncAt).toLocaleString('en-IN'):'Unavailable'}${status.pending?` · ${status.pending} pending events`:''}`}><i/>{label}</span>;}

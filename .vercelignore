@@ -1,0 +1,9 @@
+.env*
+.dev.vars
+.local
+.agents
+.codex
+.git
+node_modules
+.next
+tests

@@ -1,0 +1,17 @@
+[Unit]
+Description=Satmi operations dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+User=satmi
+WorkingDirectory=/opt/satmi
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 5001
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,7 @@
-import { ensureSchema, getRuntimeEnv, logActivity } from "../../../../lib/database";
-import { fetchSpecificOrder, normalizeShiprocketDate } from "../../../../lib/shiprocket";
+import { errorResponse } from "../../../../lib/http";
+import { reconcileInventorySafely } from "../../../../lib/operations/reconcile";
+import { ensureSchema, getRuntimeEnv, logActivity, setSyncState } from "../../../../lib/database";
+import { fetchSpecificOrder, normalizeShiprocketDate, syncRecentOrders } from "../../../../lib/shiprocket";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +26,7 @@ const ofdUpdate = `UPDATE orders SET
   END
   FROM (SELECT ?::text AS event_at) incoming WHERE `;
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const runtime = getRuntimeEnv();
   const secret = runtime.SHIPROCKET_WEBHOOK_SECRET || "";
   const provided = request.headers.get("x-api-key")
@@ -59,7 +61,12 @@ export async function POST(request: Request) {
     shiprocketOrderId, channelOrderId, shipmentId, awb, status,
   });
 
-  if (status) {
+  const newer = await runtime.DB.prepare(`SELECT 1 FROM webhook_events WHERE
+    ((shiprocket_order_id IS NOT NULL AND shiprocket_order_id=?) OR (shipment_id IS NOT NULL AND shipment_id=?)
+      OR (awb IS NOT NULL AND awb!='' AND awb=?) OR (channel_order_id IS NOT NULL AND channel_order_id!='' AND channel_order_id=?))
+    AND COALESCE(NULLIF(event_at,''),received_at)::timestamptz > ?::timestamptz LIMIT 1`
+  ).bind(shiprocketOrderId,shipmentId,awb,channelOrderId,eventAt).all();
+  if (status && !newer.results.length) {
     if (shiprocketOrderId) {
       await runtime.DB.prepare("UPDATE orders SET status = ?, synced_at = ? WHERE id = ?").bind(status, now, shiprocketOrderId).run();
     } else if (shipmentId) {
@@ -106,11 +113,18 @@ export async function POST(request: Request) {
   }
 
   if (shiprocketOrderId) {
-    try { await fetchSpecificOrder(runtime, shiprocketOrderId); } catch { /* Daily reconciliation repairs any transient API miss. */ }
+    await fetchSpecificOrder(runtime, shiprocketOrderId);
   }
+  else { await syncRecentOrders(runtime); }
+  await setSyncState(runtime.DB,"last_webhook_at",now);
+  await reconcileInventorySafely();
   return Response.json({ received: true });
 }
 
-export async function GET() {
+async function handleGET() {
   return Response.json({ ok: true, endpoint: "Shiprocket order status webhook" });
 }
+
+export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }

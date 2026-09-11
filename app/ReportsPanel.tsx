@@ -19,11 +19,11 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
 }
 
-export default function ReportsPanel({ active }: { active: boolean }) {
+export default function ReportsPanel({ active, preview=false }: { active: boolean; preview?:boolean }) {
   const [reports, setReports] = useState<Report[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Report | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!preview);
   const [error, setError] = useState("");
 
   const loadReports = useCallback(async () => {
@@ -42,17 +42,17 @@ export default function ReportsPanel({ active }: { active: boolean }) {
   }, []);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || preview) return;
     const timer = window.setTimeout(() => void loadReports(), 0);
     return () => window.clearTimeout(timer);
-  }, [active, loadReports]);
+  }, [active, loadReports, preview]);
   useEffect(() => {
-    if (!active) return;
+    if (!active || preview) return;
     const interval = window.setInterval(() => void loadReports(), 10000);
     return () => window.clearInterval(interval);
-  }, [active, loadReports]);
+  }, [active, loadReports, preview]);
   useEffect(() => {
-    if (!active || !selectedId) return;
+    if (!active || preview || !selectedId) return;
     const controller = new AbortController();
     fetch(`/api/reports?id=${selectedId}`, { signal: controller.signal, cache: "no-store" })
       .then(async (response) => {
@@ -63,7 +63,7 @@ export default function ReportsPanel({ active }: { active: boolean }) {
       .then(setSelected)
       .catch((loadError: Error) => { if (loadError.name !== "AbortError") setError(loadError.message); });
     return () => controller.abort();
-  }, [active, selectedId]);
+  }, [active, selectedId, preview]);
 
   return (
     <section className={`reports-view ${!active ? "view-hidden" : ""}`}>

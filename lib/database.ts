@@ -134,7 +134,8 @@ export class PostgresDatabase {
   constructor(connectionString: string) {
     this.sql = postgres(connectionString, {
       prepare: false,
-      max: 5,
+      onnotice: () => {},
+      max: 3,
       idle_timeout: 20,
       connect_timeout: 15,
     });
@@ -145,9 +146,14 @@ export class PostgresDatabase {
     return new PreparedStatement(this.query, text);
   }
 
+  async transaction<T>(work: (sql: import("postgres").TransactionSql) => Promise<T>): Promise<T> {
+    return this.sql.begin(work) as Promise<T>;
+  }
+
   async batch(statements: PreparedStatement[]) {
     if (!statements.length) return [];
     return this.sql.begin(async (transaction) => {
+      // Serialize writes within the transaction for compatibility with Supabase transaction pooling.
       const results = [];
       for (const statement of statements) {
         const query = statement.toQuery();
@@ -177,7 +183,7 @@ let database: PostgresDatabase | undefined;
 let schemaReady: Promise<void> | undefined;
 
 export function getRuntimeEnv(): RuntimeEnv {
-  const connectionString = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const connectionString = process.env.SUPABASE_DB_URL;
   if (!connectionString) throw new Error("SUPABASE_DB_URL is not configured");
   database ??= new PostgresDatabase(connectionString);
   return {
@@ -196,11 +202,28 @@ export function getRuntimeEnv(): RuntimeEnv {
 }
 
 export async function ensureSchema(db: PostgresDatabase) {
-  schemaReady ??= createSchema(db).catch((error) => {
+  schemaReady ??= initializeSchema(db).catch((error) => {
     schemaReady = undefined;
     throw error;
   });
   return schemaReady;
+}
+
+// Avoid repeating ALTER TABLE on every serverless cold start while order writes run.
+const coreSchemaRevision = "2026-09-11";
+async function initializeSchema(db: PostgresDatabase) {
+  const tables=await db.prepare("SELECT to_regclass('public.sync_state') AS state, to_regclass('public.operations_schema_versions') AS versions").first<{state:string|null;versions:string|null}>();
+  if(tables?.state){
+    const current=await db.prepare("SELECT value FROM sync_state WHERE key='core_schema_revision'").first<{value:string}>();
+    if(current?.value===coreSchemaRevision)return;
+    // Existing 0013 installations were initialized with this exact core schema.
+    if(!current && tables.versions){
+      const installed=await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0013_support_outbox'").first();
+      if(installed){await setSyncState(db,"core_schema_revision",coreSchemaRevision);return;}
+    }
+  }
+  await createSchema(db);
+  await setSyncState(db,"core_schema_revision",coreSchemaRevision);
 }
 
 async function createSchema(db: PostgresDatabase) {

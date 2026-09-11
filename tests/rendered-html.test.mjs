@@ -43,13 +43,15 @@ test("includes live sync, persistence, webhook, and scheduled reconciliation sur
 });
 
 test("includes live analytics and today's out-for-delivery tracking", async () => {
-  const [dashboard, analytics, api, database, sync] = await Promise.all([
+  const [dashboard, analytics, apiRoute, database, sync, ofd] = await Promise.all([
     readFile(new URL("../app/OrdersDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AnalyticsPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/analytics/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/database.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/shiprocket.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/ofd.ts", import.meta.url), "utf8"),
   ]);
+  const api=apiRoute+ofd;
   assert.match(dashboard, />Analytics</);
   assert.match(dashboard, />Today’s OFD</);
   assert.match(analytics, /Delivery % by courier/);
@@ -58,13 +60,13 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(analytics, /Undelivered attempts excluded/);
   assert.match(analytics, /NDR reasons/);
   assert.match(analytics, /Previously undelivered/);
-  assert.match(analytics, /First OFD attempt/);
-  assert.match(analytics, /Second OFD attempt/);
-  assert.match(analytics, /Third OFD attempt/);
+  assert.match(analytics, /1st recorded OFD day/);
+  assert.match(analytics, /2nd recorded OFD day/);
+  assert.match(analytics, /3rd recorded OFD day/);
   assert.match(analytics, /Unresolved after OFD/);
   assert.match(analytics, /Filter OFD outcomes/);
   assert.match(api, /out_for_delivery_at/);
-  assert.match(api, /deduped_ofd_days/);
+  assert.match(api, /loadOfdRecords/);
   assert.match(api, /event_at/);
   assert.match(api, /openPopulationSql/);
   assert.match(api, /UNRESOLVED AFTER OFD/);
@@ -131,11 +133,10 @@ test("includes the auditable inventory foundation without embedded Shopify secre
   ]);
   assert.match(dashboard, />Inventory</);
   assert.match(panel, /Physical/);
-  assert.match(panel, /Reason required/);
-  assert.match(panel, /Awaiting secure credentials/);
-  assert.match(api, /manual_override/);
-  assert.match(api, /component\.quantity_set/);
-  assert.match(api, /Number\.isFinite\(target\)/);
+  assert.match(panel, /reason is required/i);
+  assert.match(panel, /Sync Shopify products/);
+  assert.match(api, /mutateInventory/);
+  assert.match(api, /errorResponse/);
   assert.match(database, /CREATE TABLE IF NOT EXISTS component_ledger/);
   assert.match(database, /CREATE TABLE IF NOT EXISTS supplier_invoices/);
   assert.match(shopify, /variants\(first: 100, after: \$cursor\)/);

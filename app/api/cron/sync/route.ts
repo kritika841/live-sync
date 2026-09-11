@@ -1,3 +1,4 @@
+import { errorResponse } from "../../../../lib/http";
 import { getRuntimeEnv } from "../../../../lib/database";
 import { syncShiprocketOrders } from "../../../../lib/shiprocket";
 
@@ -11,7 +12,7 @@ function safeEqual(left: string, right: string) {
   return difference === 0;
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const secret = process.env.CRON_SECRET || "";
   const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
   if (!safeEqual(provided, secret)) return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -23,3 +24,5 @@ export async function GET(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Scheduled sync failed" }, { status: 502 });
   }
 }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }

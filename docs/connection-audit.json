@@ -1,0 +1,28 @@
+{
+  "checkedAt": "2026-09-11T03:12:28.454Z",
+  "authentication": {
+    "url": false,
+    "publishableKey": false,
+    "adminKey": false
+  },
+  "shopify": {
+    "domain": true,
+    "token": true,
+    "status": 200,
+    "verified": true
+  },
+  "database": {
+    "accessible": false,
+    "code": "53000",
+    "error": "Your project has exceeded the data transfer quota. Upgrade your plan to increase limits."
+  },
+  "shiprocket": {
+    "authStatus": 200,
+    "authenticated": true,
+    "ordersStatus": 200,
+    "sampleCount": 100,
+    "statusCounts": {
+      "NEW": 100
+    }
+  }
+}

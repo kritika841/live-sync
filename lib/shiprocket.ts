@@ -1,3 +1,4 @@
+import { reconcileInventorySafely } from "./operations/reconcile";
 import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type RuntimeEnv } from "./database";
 import { routeConfirmationOrders } from "./confirmation";
 
@@ -20,7 +21,7 @@ function required(value: string | undefined, name: string) {
 }
 
 async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, { ...init, signal: init.signal || AbortSignal.timeout(20000), cache: "no-store" });
   let payload: unknown;
   try { payload = await response.json(); } catch { payload = null; }
   if (!response.ok) {
@@ -29,6 +30,7 @@ async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
       : `Shiprocket request failed with status ${response.status}`;
     throw new Error(message);
   }
+  if (!payload || typeof payload !== "object") throw new Error("Shiprocket returned an empty or invalid response");
   return payload as T;
 }
 
@@ -397,6 +399,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
     });
     if (statements.length) await db.batch(statements);
     await routeConfirmationOrders(db, orders.slice(start, start + 100).map((order) => numberValue(order.id)));
+    await reconcileInventorySafely(orders.slice(start, start + 100).map((order) => numberValue(order.id)));
   }
 }
 
@@ -512,6 +515,7 @@ export async function syncShiprocketOrders(
     const synced = orders.length;
     const hasMore = effectiveMode === "full" && endPage < totalPages;
     if (hasMore) {
+      await setSyncState(db,"sync_status","pending");
       const nextPage = endPage + 1;
       await setSyncState(db, "full_sync_next_page", String(nextPage));
       await setSyncState(db, "last_sync_count", String(synced));
@@ -568,6 +572,53 @@ export async function fetchSpecificOrder(runtime: RuntimeEnv, shiprocketOrderId:
     `${API_ROOT}/orders/show/${shiprocketOrderId}`,
     { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
   );
-  if (result.data) await upsertOrders(runtime.DB, [result.data]);
+  if (!result.data) throw new Error("Shiprocket order details are unavailable");
+  const channel = await resolveChannel(runtime,token);
+  if (Number(result.data.channel_id) !== channel.id) throw new Error("Webhook order belongs to another channel");
+  await upsertOrders(runtime.DB, [result.data]);
   return result.data;
+}
+
+
+/** Bounded, overlapping incremental import; independent of any browser session. */
+export async function syncRecentOrders(runtime: RuntimeEnv) {
+  const db = runtime.DB;
+  await ensureSchema(db);
+  const lease = new Date(Date.now() + 360000).toISOString();
+  const acquired = await db.prepare(`INSERT INTO sync_state (key,value,updated_at) VALUES ('fast_sync_lease',?,?)
+    ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at
+    WHERE sync_state.value < ? RETURNING key`).bind(lease,new Date().toISOString(),new Date().toISOString()).all();
+  if (!acquired.results.length) return { skipped: true, reason: "Already running" };
+  try {
+    const state = await db.prepare("SELECT key,value FROM sync_state WHERE key IN ('fast_sync_cursor','fast_sync_from')").all<{key:string;value:string}>();
+    const values = Object.fromEntries(state.results.map(r=>[r.key,r.value]));
+    const from = values.fast_sync_from || new Date(Date.now()-2*86400000).toISOString().slice(0,10);
+    const cursor = Math.max(1,Number(values.fast_sync_cursor)||1);
+    const token = await getShiprocketToken(runtime);
+    const channel = await resolveChannel(runtime,token);
+    const page = async (number:number) => {
+      const params = new URLSearchParams({page:String(number),per_page:"50",sort:"DESC",sort_by:"id",channel_id:String(channel.id),updated_from:from,updated_to:new Date(Date.now()+86400000).toISOString().slice(0,10)});
+      const result = await apiJson<{data?:ShiprocketOrder[];meta?:{pagination?:{total_pages?:number}}}>(`${API_ROOT}/orders?${params}`,{headers:{authorization:`Bearer ${token}`}});
+      if (!Array.isArray(result.data)) throw new Error("Shiprocket order list is missing");
+      await upsertOrders(db,result.data);
+      return {count:result.data.length,total:Math.max(1,Number(result.meta?.pagination?.total_pages)||1)};
+    };
+    // Always import the newest page even while draining a larger backlog.
+    const first = await page(1);
+    let imported=first.count;
+    let next=Math.max(2,cursor);
+    for(let i=0;i<1 && next<=first.total;i++,next++) imported+=(await page(next)).count;
+    const pending=next<=first.total;
+    await setSyncState(db,"fast_sync_cursor",pending?String(next):"1");
+    await setSyncState(db,"fast_sync_from",pending?from:new Date(Date.now()-2*86400000).toISOString().slice(0,10));
+    await setSyncState(db,"fast_sync_error","");
+    await setSyncState(db,"fast_sync_checked_at",new Date().toISOString());
+    if(!pending) await setSyncState(db,"fast_sync_last_at",new Date().toISOString());
+    return {imported,pending,nextPage:pending?next:null};
+  } catch(error) {
+    await setSyncState(db,"fast_sync_error",error instanceof Error?error.message:"Sync failed");
+    throw error;
+  } finally {
+    await db.prepare("DELETE FROM sync_state WHERE key='fast_sync_lease' AND value=?").bind(lease).run();
+  }
 }

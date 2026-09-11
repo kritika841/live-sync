@@ -1,0 +1,40 @@
+import {test,after} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import postgres from 'postgres';
+process.env.SUPABASE_DB_URL='postgres://satmi_test@127.0.0.1:55439/postgres';
+const {commitDocument}=await import('../lib/operations/documents');
+const {mutateInventory}=await import('../lib/operations/inventory');
+const {parseRows,extractPdf}=await import('../lib/operations/pdf');
+const {verifyPush}=await import('../lib/operations/gmail');
+const sql=postgres(process.env.SUPABASE_DB_URL,{max:1});
+after(()=>sql.end());
+const u={id:'pdf-test',email:'pdf@example.test',name:'Test',role:'admin'};
+test('PDF row parser excludes totals and retains units; unreadable files fail',async()=>{
+ assert.deepEqual(parseRows(['1  Incense sticks  2 kg  300  600','Grand total  2  600']),[{description:'Incense sticks',quantity:'2',unit:'kg',cost:'300'}]);
+ assert.deepEqual(parseRows(['Text without numeric columns']),[]);
+ await assert.rejects(()=>extractPdf(new File(['bad'],'fake.pdf')),/valid PDF/);
+ await assert.rejects(()=>verifyPush(new Request('https://example.test',{headers:{authorization:'Bearer x.x.x'}})),/Invalid push identity/);
+});
+test('PDF text extraction from a real PDF stream',async()=>{
+ const stream='BT /F1 12 Tf 40 750 Td (Incense sticks  2 kg  300  600) Tj ET';
+ const objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`];
+ let pdf='%PDF-1.4\n';const offsets=[0];objects.forEach((o,i)=>{offsets.push(pdf.length);pdf+=`${i+1} 0 obj\n${o}\nendobj\n`;});const xref=pdf.length;pdf+=`xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(o=>String(o).padStart(10,'0')+' 00000 n \n').join('')}trailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n${xref}\n%%EOF`;
+ const r=await extractPdf(new File([pdf],'po.pdf'));assert.match(r.text,/Incense/);assert.equal(r.lines[0]?.quantity,'2');
+});
+test('PDF PO and invoice transactions enforce review, matching, duplicate safety and no implicit stock receipt',async()=>{
+ const c=randomUUID(),v=randomUUID();await mutateInventory({action:'component',id:c,name:'PDF incense',sku:c,unit:'g'},u);await mutateInventory({action:'vendor',id:v,name:'PDF vendor '+v},u);
+ const file=()=>({key:'test/'+randomUUID(),hash:randomUUID(),name:'test.pdf',text:'test'});
+ const po=await commitDocument({kind:'po',vendorId:v,number:randomUUID(),date:'2026-09-11',lines:[{description:'Incense',componentId:c,unit:'kg',quantity:'2',cost:'300',checked:true}]},file(),u);
+ const [line]=await sql`SELECT * FROM purchase_order_lines WHERE purchase_order_id=${po.id}`;assert.equal(Number(line.conversion_factor),1000);
+ const invoice={kind:'invoice' as const,poId:po.id,number:randomUUID(),date:'2026-09-11',amount:'300',lines:[{description:'Incense',lineId:line.id,unit:'g',quantity:'1000',cost:'0.3',checked:true}]};
+ await assert.rejects(()=>commitDocument({...invoice,lines:invoice.lines.map(l=>({...l,checked:false}))},file(),u),/Check every line/);
+ const uploaded=file();const result=await commitDocument(invoice,uploaded,u);assert.equal(result.status,'review_required');assert.deepEqual(result.comparisons[0].flags,['Not fully received']);
+ assert.equal((await sql`SELECT * FROM component_ledger WHERE component_id=${c}`).length,0);
+ await assert.rejects(()=>commitDocument(invoice,uploaded,u));assert.equal((await sql`SELECT * FROM supplier_invoices WHERE purchase_order_id=${po.id}`).length,1);
+ await assert.rejects(()=>commitDocument({...invoice,number:randomUUID(),lines:invoice.lines.map(l=>({...l,lineId:'wrong'}))},file(),u),/does not belong/);
+ await mutateInventory({action:'receive',poId:po.id,requestKey:randomUUID(),lines:[{lineId:line.id,accepted:2,rejected:0}]},u);
+ const rechecked=await mutateInventory({action:'invoice_recheck',id:result.id},u);assert.ok('status' in rechecked);assert.equal(rechecked.status,'matched');
+ const matched=await commitDocument({...invoice,number:randomUUID()},file(),u);assert.equal(matched.status,'matched');
+ const over=await commitDocument({...invoice,number:randomUUID()},file(),u);assert.ok(over.comparisons[0].flags.includes('Exceeds ordered quantity'));
+});

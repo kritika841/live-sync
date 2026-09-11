@@ -1,7 +1,8 @@
 "use client";
 
+import { Modal } from "./Modal";
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { CheckCircle2, GripVertical, MoreHorizontal, Search, SlidersHorizontal, UsersRound, X } from "lucide-react";
+import { CheckCircle2, GripVertical, MoreHorizontal, Search, UsersRound } from "lucide-react";
 
 type Attempt = { attemptNumber: number; outcome: string; note: string; rejectionReason?: string; nextActionAt?: string; createdAt: string };
 type ConfirmationOrder = {
@@ -33,10 +34,10 @@ function productSummary(products: ConfirmationOrder["products"]) {
   return products.length ? products.map((product) => `${product.name || product.sku || "Product"}${product.quantity ? ` ×${product.quantity}` : ""}`).join(", ") : "—";
 }
 
-export default function ConfirmationPanel({ active, section }: { active: boolean; section: "confirmation" | "campaigns" }) {
+export default function ConfirmationPanel({ active, section, preview=false }: { active: boolean; preview?:boolean; section: "confirmation" | "campaigns" }) {
   const [mode, setMode] = useState<Mode>("queue");
   const [data, setData] = useState<ConfirmationData>(emptyData);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!preview);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<ConfirmationOrder | null>(null);
@@ -74,11 +75,11 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
   }, []);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || preview) return;
     const initial = window.setTimeout(() => void load(), 0);
     const timer = window.setInterval(() => void load(true), 30000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  }, [active, load]);
+  }, [active, load, preview]);
 
   useEffect(() => {
     if (!createOpen) return;
@@ -90,6 +91,7 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
   }, [busy, createOpen]);
 
   async function post(payload: Record<string, unknown>) {
+    if (preview) { setError("Connection unavailable"); return false; }
     setBusy(true);
     setError("");
     try {
@@ -223,26 +225,25 @@ export default function ConfirmationPanel({ active, section }: { active: boolean
         </div>)}</div>
       </article></div>}
 
-      {createOpen && <div className="campaign-workflow-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) setCreateOpen(false); }}><form className="campaign-workflow" role="dialog" aria-modal="true" aria-labelledby="campaign-workflow-title" onSubmit={createCampaign}>
-        <section className="workflow-panel workflow-header"><div><p className="eyebrow">NEW CAMPAIGN</p><h2 id="campaign-workflow-title">Create campaign</h2><p>Define matching rules and choose the current orders to include.</p></div><button type="button" aria-label="Close campaign workflow" onClick={() => setCreateOpen(false)}><X size={20}/></button></section>
-        <section className="workflow-panel workflow-section"><div className="workflow-section-heading"><span>01</span><div><h3>Campaign details</h3><p>Name this confirmation workflow for easy identification.</p></div></div><div className="workflow-details-grid"><label>Campaign name<input required value={campaignName} onChange={(event) => setCampaignName(event.target.value)} placeholder="e.g. B2G1 verification"/></label><label>Description<input value={campaignDescription} onChange={(event) => setCampaignDescription(event.target.value)} placeholder="Optional context"/></label></div></section>
-        <section className="workflow-panel workflow-section"><div className="workflow-section-heading"><span>02</span><div><h3>Filtering controls</h3><p>Every selected condition must match before an order is assigned.</p></div><SlidersHorizontal size={18}/></div><div className="workflow-filter-grid"><label>From date<input type="date" value={campaignDateFrom} max={campaignDateTo || undefined} onChange={(event) => setCampaignDateFrom(event.target.value)}/></label><label>To date<input type="date" value={campaignDateTo} min={campaignDateFrom || undefined} onChange={(event) => setCampaignDateTo(event.target.value)}/></label><label>Payment<select value={campaignPayment} onChange={(event) => setCampaignPayment(event.target.value)}><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select></label><label className="workflow-toggle" htmlFor="campaign-auto-assign"><input id="campaign-auto-assign" type="checkbox" checked={autoAssign} onChange={(event) => setAutoAssign(event.target.checked)}/><span aria-hidden="true"><i/></span><strong>Auto-assign <small>Include future matching orders</small></strong></label></div>
+      <Modal title="Create campaign" open={createOpen} onClose={()=>setCreateOpen(false)} busy={busy} wide><form className="campaign-workflow" onSubmit={createCampaign}>
+        <section className="workflow-panel workflow-section"><div className="workflow-details-grid"><label>Campaign name<input required value={campaignName} onChange={(event) => setCampaignName(event.target.value)} placeholder="e.g. B2G1 verification"/></label><label>Description<input value={campaignDescription} onChange={(event) => setCampaignDescription(event.target.value)} placeholder="Optional context"/></label></div></section>
+        <section className="workflow-panel workflow-section"><div className="workflow-filter-grid"><label>From date<input type="date" value={campaignDateFrom} max={campaignDateTo || undefined} onChange={(event) => setCampaignDateFrom(event.target.value)}/></label><label>To date<input type="date" value={campaignDateTo} min={campaignDateFrom || undefined} onChange={(event) => setCampaignDateTo(event.target.value)}/></label><label>Payment<select value={campaignPayment} onChange={(event) => setCampaignPayment(event.target.value)}><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select></label><label className="workflow-toggle" htmlFor="campaign-auto-assign"><input id="campaign-auto-assign" type="checkbox" checked={autoAssign} onChange={(event) => setAutoAssign(event.target.checked)}/><span aria-hidden="true"><i/></span><strong>Auto-assign <small>Include future matching orders</small></strong></label></div>
           <fieldset className="campaign-tags"><legend>Order tags <span>{selectedTags.size ? `${selectedTags.size} selected · ` : ""}All selected tags must be present</span></legend><div className="campaign-tag-options">{data.availableTags.map((tag) => { const selected = selectedTags.has(tag); return <label className={selected ? "selected" : ""} key={tag}><input type="checkbox" checked={selected} onChange={(event) => setSelectedTags((current) => { const next = new Set(current); if (event.target.checked) next.add(tag); else next.delete(tag); return next; })}/><span className="campaign-tag-check" aria-hidden="true">{selected ? "✓" : ""}</span><strong>{tag}</strong></label>; })}</div>{!data.availableTags.length && <p>No order tags are available yet.</p>}{selectedTags.size > 0 && <button className="campaign-tags-clear" type="button" onClick={() => setSelectedTags(new Set())}>Clear selected tags</button>}</fieldset>
         </section>
-        <section className="workflow-panel workflow-orders"><div className="candidate-heading"><div><span>03</span><strong>Select current orders <small>{candidates.length} matching</small></strong></div><label className="workflow-search"><Search size={16}/><input value={candidateSearch} onChange={(event) => setCandidateSearch(event.target.value)} placeholder="Search order, customer or phone"/></label><button type="button" onClick={() => setSelectedCandidates(new Set(candidates.map((order) => order.id)))}>Select matching</button></div>
+        <section className="workflow-panel workflow-orders"><div className="candidate-heading"><div><strong>Select current orders <small>{candidates.length} matching</small></strong></div><label className="workflow-search"><Search size={16}/><input value={candidateSearch} onChange={(event) => setCandidateSearch(event.target.value)} placeholder="Search order, customer or phone"/></label><button type="button" onClick={() => setSelectedCandidates(new Set(candidates.map((order) => order.id)))}>Select matching</button></div>
           <div className="workflow-table-wrap"><table className="workflow-table"><thead><tr><th aria-label="Select order"/><th>Order</th><th>Customer</th><th>Payment</th><th>Order date</th><th>Tags</th><th>Status</th></tr></thead><tbody>{candidates.map((order) => <tr key={order.id}><td><input aria-label={`Select order ${order.channelOrderId}`} type="checkbox" checked={selectedCandidates.has(order.id)} onChange={(event) => setSelectedCandidates((current) => { const next = new Set(current); if (event.target.checked) next.add(order.id); else next.delete(order.id); return next; })}/></td><td><strong>#{order.channelOrderId}</strong></td><td><strong>{order.customerName || "Customer"}</strong><small>{order.customerPhone || "No phone"}</small></td><td><span className={`workflow-status ${order.paymentMethod?.toLowerCase() === "cod" ? "cod" : "prepaid"}`}>{order.paymentMethod || "Unknown"}</span></td><td>{when(order.orderDate)}</td><td><div className="workflow-tag-list">{order.tags.length ? order.tags.map((tag) => <span key={tag}>{tag}</span>) : <small>No tags</small>}</div></td><td><span className="workflow-status ready">{order.confirmationStatus || "Ready"}</span></td></tr>)}</tbody></table>{!candidates.length && <div className="workflow-empty">No orders match the current filters.</div>}</div>
         </section>
         <footer className="workflow-panel workflow-submit"><div><CheckCircle2 size={18}/><span><strong>{selectedCandidates.size} orders selected</strong><small>{autoAssign ? "Future matching orders will be added automatically." : "Only selected current orders will be assigned."}</small></span></div><div><button type="button" onClick={() => setCreateOpen(false)}>Cancel</button><button className="workflow-submit-button" disabled={busy} type="submit">{busy ? "Creating…" : "Create campaign"}</button></div></footer>
-      </form></div>}
+      </form></Modal>
 
-      {selectedOrder && <div className="confirmation-modal-backdrop" role="button" tabIndex={0} aria-label="Close confirmation dialog" onKeyDown={(event) => event.key === "Escape" && !busy && setSelectedOrder(null)} onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) setSelectedOrder(null); }}><form className="confirmation-modal" onSubmit={submitOrderAction}>
+      <Modal title="Order confirmation" open={!!selectedOrder} onClose={()=>setSelectedOrder(null)} busy={busy}>{selectedOrder && <form className="confirmation-modal" onSubmit={submitOrderAction}>
         <header><div><p className="eyebrow">ORDER #{selectedOrder.channelOrderId}</p><h2>{orderAction === "confirm" ? "Confirm customer order" : orderAction === "reject" ? "Reject confirmation" : orderAction === "callback" ? "Schedule callback" : "Record no answer"}</h2></div><button type="button" onClick={() => setSelectedOrder(null)}>×</button></header>
         {orderAction === "reject" && <div className="manual-warning"><strong>Dashboard record only</strong><span>You must cancel this order manually in Shiprocket.</span></div>}
         {orderAction === "callback" && <label>Callback time<input required type="datetime-local" value={callbackAt} onChange={(event) => setCallbackAt(event.target.value)}/></label>}
         {orderAction === "reject" && <label>Reason<select value={rejectionReason} onChange={(event) => setRejectionReason(event.target.value)}><option value="customer_cancelled">Customer cancelled</option><option value="duplicate_order">Duplicate order</option><option value="incorrect_details">Incorrect details</option><option value="customer_unreachable">Customer unreachable</option><option value="other">Other</option></select></label>}
         <label>Call note<textarea required value={note} onChange={(event) => setNote(event.target.value)} placeholder="Record what the customer said and any useful context" rows={4}/></label>
         <footer><button type="button" onClick={() => setSelectedOrder(null)}>Cancel</button><button className={orderAction === "reject" ? "danger" : "positive"} disabled={busy} type="submit">{busy ? "Saving…" : orderAction === "confirm" ? "Mark approved" : orderAction === "reject" ? "Add to rejected" : "Save attempt"}</button></footer>
-      </form></div>}
+      </form>}</Modal>
     </section>
   );
 }

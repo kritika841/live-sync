@@ -1,15 +1,18 @@
 "use client";
 
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { readJson } from "../lib/http";
 import Image from "next/image";
 import Link from "next/link";
-import { Bell, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound, Warehouse } from "lucide-react";
+import { Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound, Warehouse } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
 import ReportsPanel from "./ReportsPanel";
 import AccountMenu from "./AccountMenu";
 import InventoryPanel from "./InventoryPanel";
+import SupportPanel from "./SupportPanel";
+import LiveStatus from "./LiveStatus";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high" | "approved";
@@ -65,8 +68,9 @@ const indiaDateValue = (date: Date) => {
 };
 const todayValue = indiaDateValue(new Date());
 
-export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmin }: { userLabel: string; userEmail: string; userRole: string; isAdmin: boolean }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "inventory" | "analytics" | "today_ofd" | "reports" | "logs">("orders");
+export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmin, preview = false }: { userLabel: string; userEmail: string; userRole: string; isAdmin: boolean; preview?: boolean }) {
+  const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "inventory" | "support" | "analytics" | "today_ofd" | "reports" | "logs">(preview ? "inventory" : "orders");
+  useEffect(() => { const timer=setTimeout(() => { if (new URLSearchParams(window.location.search).get("view") === "support") setView("support"); },0); return () => clearTimeout(timer); }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
@@ -104,27 +108,32 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     return params.toString();
   }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, from, to, deliveredDate]);
 
-  const loading = loadedQuery !== query;
+  const currentQuery=useRef(query);
+  useEffect(()=>{currentQuery.current=query;},[query]);
+  const loading = !preview && !loadedQuery && !error;
+  const changingQuery = !!loadedQuery && loadedQuery !== query;
 
   async function loadOrders() {
+    if (preview) return;
     setError("");
     try {
       const response = await fetch(`/api/orders?${query}`, { cache: "no-store" });
-      const payload = await response.json() as OrdersResponse & { error?: string };
+      const payload = await readJson(response) as OrdersResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not load orders");
+      if(currentQuery.current!==query)return;
       setData(payload);
       setLoadedQuery(query);
-      setSelectedOrders(new Map());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load orders");
     }
   }
 
   useEffect(() => {
+    if (preview) return;
     const controller = new AbortController();
     fetch(`/api/orders?${query}`, { signal: controller.signal, cache: "no-store" })
       .then(async (response) => {
-        const payload = await response.json() as OrdersResponse & { error?: string };
+        const payload = await readJson(response) as OrdersResponse & { error?: string };
         if (!response.ok) throw new Error(payload.error || "Could not load orders");
         return payload;
       })
@@ -139,19 +148,21 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         if (loadError.name !== "AbortError") setError(loadError.message || "Could not load orders");
       });
     return () => controller.abort();
-  }, [query]);
+  }, [query, preview]);
 
   useEffect(() => {
+    if (preview) return;
     const controller = new AbortController();
     fetch("/api/logs", { signal: controller.signal, cache: "no-store" })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Could not load activity logs")))
+      .then((response) => readJson<LogsResponse>(response))
       .then((payload: LogsResponse) => setLogsData(payload))
       .catch((logsError: Error) => { if (logsError.name !== "AbortError") setError(logsError.message); })
       .finally(() => setLogsLoading(false));
     return () => controller.abort();
-  }, []);
+  }, [preview]);
 
   useEffect(() => {
+    if (preview) return;
     if (view !== "logs") return;
     const interval = window.setInterval(() => {
       fetch("/api/logs", { cache: "no-store" })
@@ -160,24 +171,32 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         .catch(() => { /* Keep the last successful live snapshot. */ });
     }, 5000);
     return () => window.clearInterval(interval);
-  }, [view]);
+  }, [view, preview]);
 
   useEffect(() => {
+    if (preview) return;
     if (view !== "orders") return;
-    const interval = window.setInterval(() => {
-      fetch(`/api/orders?${query}`, { cache: "no-store" })
-        .then((response) => response.ok ? response.json() : null)
-        .then((payload: OrdersResponse | null) => { if (payload) setData(payload); })
-        .catch(() => { /* Keep the last successful live snapshot. */ });
-    }, 10000);
-    return () => window.clearInterval(interval);
-  }, [query, view]);
+    const controller=new AbortController();
+    let running=false;
+    const refresh=async()=>{
+      if(running)return;running=true;
+      try{
+        const response=await fetch(`/api/orders?${query}`,{cache:"no-store",signal:controller.signal});
+        const payload=await readJson<OrdersResponse>(response);
+        if(!controller.signal.aborted && currentQuery.current===query){setData(payload);setLoadedQuery(query);}
+      }catch{/* Preserve the visible snapshot during a background failure. */}
+      finally{running=false;}
+    };
+    const interval=window.setInterval(()=>void refresh(),10000);
+    return()=>{controller.abort();window.clearInterval(interval);};
+  }, [query, view, preview]);
 
   async function loadLogs() {
+    if (preview) return;
     setLogsLoading(true);
     try {
       const response = await fetch("/api/logs", { cache: "no-store" });
-      const payload = await response.json() as LogsResponse & { error?: string };
+      const payload = await readJson(response) as LogsResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not load activity logs");
       setLogsData(payload);
     } catch (logsError) {
@@ -188,6 +207,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   }
 
   async function syncNow() {
+    if (preview) return;
     setSyncing(true);
     setError("");
     try {
@@ -199,7 +219,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
           body: JSON.stringify({ mode, page }),
         });
-        const payload = await response.json() as { error?: string; mode?: "incremental" | "full"; hasMore?: boolean; nextPage?: number };
+        const payload = await readJson(response) as { error?: string; mode?: "incremental" | "full"; hasMore?: boolean; nextPage?: number };
         if (!response.ok) throw new Error(payload.error || "Sync failed");
         if (payload.mode === "full") mode = "full";
         page = payload.hasMore ? payload.nextPage : undefined;
@@ -271,7 +291,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
       params.delete("page");
       params.set("selection", "all");
       const response = await fetch(`/api/orders?${params.toString()}`, { cache: "no-store" });
-      const payload = await response.json() as { orders?: Array<{ id: number; channelOrderId: string }>; error?: string };
+      const payload = await readJson(response) as { orders?: Array<{ id: number; channelOrderId: string }>; error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not select all orders");
       setSelectedOrders(new Map((payload.orders || []).map((order) => [order.id, String(order.channelOrderId || order.id)])));
       setCopyState("idle");
@@ -297,30 +317,31 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   }
 
   const appliedFilters = [payment, courier, pickup, from, to, tab === "delivered" ? deliveredDate : ""].filter(Boolean).length;
-  const lastSync = data.sync.last_sync_at;
   const visibleIds = data.orders.map((order) => order.id);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrders.has(id));
   const someVisibleSelected = visibleIds.some((id) => selectedOrders.has(id));
   const allResultsSelected = data.total > 0 && selectedOrders.size === data.total;
   const viewCopy = {
-    orders: { eyebrow: "Order management", title: "Orders", subcopy: lastSync ? `Last verified ${formatDate(lastSync)}` : "Waiting for the first Shiprocket sync" },
-    confirmation: { eyebrow: "Customer verification", title: "Confirmation", subcopy: "" },
-    campaigns: { eyebrow: "Customer verification", title: "Campaigns", subcopy: "" },
-    inventory: { eyebrow: "Stock control", title: "Inventory", subcopy: "Components, purchase orders, reservations, and Shopify catalog" },
-    analytics: { eyebrow: "Performance intelligence", title: "Analytics", subcopy: "Live delivery, RTO, NDR, revenue, courier, state, and risk insights" },
-    today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD", subcopy: "Track each out-for-delivery attempt through its live outcome" },
-    reports: { eyebrow: "Reconciliation archive", title: "Reports", subcopy: "Saved sync reports, discrepancy tables, and Excel exports" },
-    logs: { eyebrow: "Live activity", title: "Activity log", subcopy: "Webhook updates, manual syncs, and daily verification history" },
+    orders: { eyebrow: "Order management", title: "Orders" },
+    confirmation: { eyebrow: "Customer verification", title: "Confirmation" },
+    campaigns: { eyebrow: "Customer verification", title: "Campaigns" },
+    support: { eyebrow: "Customer care", title: "Customer support" },
+    inventory: { eyebrow: "Stock control", title: "Inventory" },
+    analytics: { eyebrow: "Performance intelligence", title: "Analytics" },
+    today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD" },
+    reports: { eyebrow: "Reconciliation archive", title: "Reports" },
+    logs: { eyebrow: "Live activity", title: "Activity log" },
   }[view];
   return (
     <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar" aria-label="Dashboard sections">
-        <div className="sidebar-brand"><Image className="sidebar-brand-logo" src="/satmi-logo.svg" alt="Satmi" width={112} height={74} priority/></div>
+        <div className="sidebar-brand"><Image className="sidebar-brand-logo" src="/satmi-logo.png" alt="Satmi" width={112} height={74} priority/></div>
         <div className="sidebar-heading"><p>Workspace</p><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "Expand side menu" : "Collapse side menu"} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronRight size={15}/> : <ChevronLeft size={15}/>}</button></div>
         <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><ShoppingBag/><strong>Orders</strong></button>
         <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><PhoneCall/><strong>Confirmation</strong></button>
         <button title="Campaigns" className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}><Boxes/><strong>Campaigns</strong></button>
         <button title="Inventory" className={view === "inventory" ? "active" : ""} onClick={() => setView("inventory")}><Warehouse/><strong>Inventory</strong></button>
+        {(isAdmin || ["support_agent", "support_manager"].includes(userRole)) && <button title="Customer support" className={view === "support" ? "active" : ""} onClick={() => setView("support")}><UsersRound/><strong>Customer support</strong></button>}
         <button title="Analytics" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><LayoutDashboard/><strong>Analytics</strong></button>
         <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><Truck/><strong>Today’s OFD</strong></button>
         <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><PackageSearch/><strong>Reports</strong></button>
@@ -333,22 +354,13 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         <div className="header-context"><div><p className="eyebrow">{viewCopy.eyebrow}</p><h1>{viewCopy.title}</h1></div><span className="role-badge">{userRole === "admin" ? "Administrator" : "Operations"}</span></div>
         <div className="header-tools">
           <label className="header-search"><Search size={17}/><input value={search} onChange={(event) => { setSearch(event.target.value); setView("orders"); setPage(1); }} placeholder="Search orders, customers, AWB or SKU" aria-label="Search dashboard"/></label>
-          <button className="notification-button" aria-label="Notifications"><Bell size={18}/><i className="notification-dot"/></button>
-          <AccountMenu name={userLabel} email={userEmail} isAdmin={isAdmin} />
+          <LiveStatus preview={preview} />
+          <AccountMenu preview={preview} name={userLabel} email={userEmail} isAdmin={isAdmin} />
         </div>
       </header>
 
       <section className="workspace">
-        <div className="page-heading">
-          <div>
-            {viewCopy.subcopy && <p className="subcopy">{viewCopy.subcopy}</p>}
-          </div>
-          {view === "orders" ? (
-            <button className="sync-button" onClick={syncNow} disabled={syncing}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "Syncing…" : "Sync now"}</button>
-          ) : (
-            <span className="live-refresh"><i />Updating live</span>
-          )}
-        </div>
+        {view === "orders" && <div className="page-heading"><button className="sync-button" onClick={syncNow} disabled={syncing || preview}>{syncing ? "Syncing…" : "Sync now"}</button></div>}
 
         {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => loadOrders()}>Try again</button></div>}
 
@@ -405,8 +417,8 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           )}
 
           <div className="selection-controls">
-            <label><input type="checkbox" checked={allResultsSelected} ref={(element) => { if (element) element.indeterminate = selectedOrders.size > 0 && !allResultsSelected; }} onChange={toggleAllResults} disabled={selectingAll || loading || data.total === 0} /><span>{selectingAll ? "Selecting…" : `All pages (${data.total})`}</span></label>
-            <label><input type="checkbox" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={toggleAllVisible} disabled={loading || data.orders.length === 0} /><span>This page ({data.orders.length})</span></label>
+            <label><input type="checkbox" checked={allResultsSelected} ref={(element) => { if (element) element.indeterminate = selectedOrders.size > 0 && !allResultsSelected; }} onChange={toggleAllResults} disabled={selectingAll || loading || changingQuery || data.total === 0} /><span>{selectingAll ? "Selecting…" : `All pages (${data.total})`}</span></label>
+            <label><input type="checkbox" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={toggleAllVisible} disabled={loading || changingQuery || data.orders.length === 0} /><span>This page ({data.orders.length})</span></label>
           </div>
 
           {selectedOrders.size > 0 && (
@@ -417,7 +429,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
             </div>
           )}
 
-          <div className="table-wrap">
+          <div className="table-wrap" aria-busy={changingQuery}>
             <table>
               <thead><tr><th>Order</th><th>Customer</th><th>Products</th><th>Order date</th><th>Payment</th><th>Amount</th><th>Status</th><th>AWB / Courier</th></tr></thead>
               <tbody>
@@ -449,18 +461,19 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           )}
         </section>
 
-        <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} />
+        <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} preview={preview} />
 
-        <InventoryPanel active={view === "inventory"} isAdmin={isAdmin} />
+        <InventoryPanel active={view === "inventory"} isAdmin={isAdmin || ["operations", "warehouse"].includes(userRole)} preview={preview} />
+        <SupportPanel active={view === "support"} isAdmin={isAdmin} preview={preview} />
 
-        <AnalyticsPanel mode="overview" active={view === "analytics"} />
-        <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} />
-        <ReportsPanel active={view === "reports"} />
+        <AnalyticsPanel mode="overview" active={view === "analytics"} preview={preview} />
+        <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} preview={preview} />
+        <ReportsPanel active={view === "reports"} preview={preview} />
 
         <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">
             <div><p className="eyebrow">Live activity</p><h2>Sync & webhook logs</h2><p>Latest 200 changes received from Shiprocket and scheduled verification runs.</p></div>
-            <span className="live-refresh"><i />Auto-updating</span>
+
           </header>
           <div className="log-health">
             <span><i className={logsData.sync.sync_status === "healthy" ? "healthy" : ""} />Sync {logsData.sync.sync_status || "waiting"}</span>

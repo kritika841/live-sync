@@ -10,7 +10,7 @@ export default async function UsersPage() {
   return (
     <main className="admin-shell">
       <header className="admin-topbar">
-        <Link href="/" className="admin-brand"><Image src="/satmi-logo.svg" alt="Satmi" width={86} height={54} priority /></Link>
+        <Link href="/" className="admin-brand"><Image src="/satmi-logo.png" alt="Satmi" width={86} height={54} priority /></Link>
         <div><span>{user.name}</span><strong>Administrator</strong></div>
         <Link href="/" className="admin-back">Back to dashboard</Link>
       </header>

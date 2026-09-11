@@ -7,12 +7,18 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "test": "npm run build",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "sync:full": "tsx scripts/full-sync.ts",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "test:regression": "node --test tests/rendered-html.test.mjs",
+    "test:operations": "node --import tsx --test tests/operations.test.ts",
+    "check:operations": "node --env-file=.env.local --import tsx scripts/check-operations-config.ts",
+    "scheduler": "node --env-file=.env.local scripts/scheduler.mjs",
+    "catalog:fetch": "node --env-file=.env.local scripts/fetch-shopify-products.mjs",
+    "vercel-build": "npm run build && node --import tsx scripts/bootstrap-production.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
@@ -23,7 +29,8 @@
     "next": "^16.3.4",
     "postgres": "^3.4.9",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "unpdf": "^1.8.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -44,8 +51,8 @@
     "globals": "16.4.0",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
-    "typescript": "5.9.3",
     "tsx": "^4.20.6",
+    "typescript": "5.9.3",
     "typescript-eslint": "8.59.3",
     "vinext": "1.0.0-beta.2",
     "vite": "8.0.13",

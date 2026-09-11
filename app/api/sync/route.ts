@@ -1,6 +1,7 @@
+import { errorResponse } from "../../../lib/http";
 import { getRuntimeEnv } from "../../../lib/database";
 import { syncShiprocketOrders } from "../../../lib/shiprocket";
-import { requireApiUser } from "../../../lib/auth/access";
+import { requireApiUser, isAdmin } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -21,13 +22,14 @@ function isSameOriginDashboardRequest(request: Request) {
     && Boolean(origin && host && origin === `${protocol}://${host}`);
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const runtime = getRuntimeEnv();
   const provided = request.headers.get("x-api-key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
   const secretAccess = safeEqual(provided, runtime.SHIPROCKET_WEBHOOK_SECRET || "");
   if (!secretAccess) {
     const access = await requireApiUser();
     if (access.response) return access.response;
+    if(!isAdmin(access.user) && access.user.role!=="operations")return Response.json({error:"Operations access required"},{status:403});
   }
   if (!secretAccess && !isSameOriginDashboardRequest(request)) {
     return Response.json({ error: "A valid sync API key is required" }, { status: 401 });
@@ -41,6 +43,8 @@ export async function POST(request: Request) {
     });
     return Response.json(result);
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Sync failed" }, { status: 502 });
+    return errorResponse(error);
   }
 }
+
+export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }

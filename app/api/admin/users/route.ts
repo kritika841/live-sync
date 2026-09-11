@@ -1,3 +1,4 @@
+import { errorResponse } from "../../../../lib/http";
 import { isSameOrigin, requireApiAdmin } from "../../../../lib/auth/access";
 import { ensureSchema, getRuntimeEnv, logActivity } from "../../../../lib/database";
 import { getSupabaseAdmin } from "../../../../lib/supabase/admin";
@@ -25,7 +26,7 @@ async function audit(actorEmail: string, eventType: string, message: string, det
   await logActivity(runtime.DB, actorEmail, eventType, message, details);
 }
 
-export async function GET() {
+async function handleGET() {
   const access = await requireApiAdmin();
   if (access.response) return access.response;
   const supabaseAdmin = getSupabaseAdmin();
@@ -45,7 +46,7 @@ export async function GET() {
   return Response.json({ users, total: Number(data?.total || users.length), currentUserId: access.user.id });
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const access = await requireApiAdmin();
   if (access.response) return access.response;
   const supabaseAdmin = getSupabaseAdmin();
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
     const email = String(body.email || "").trim().toLowerCase();
     const name = String(body.name || "").trim();
     const password = String(body.password || "");
-    const role = body.role === "admin" ? "admin" : "user";
+    const role = ["admin", "support_manager", "support_agent", "operations", "warehouse", "user"].includes(String(body.role)) ? String(body.role) : "user";
     if (!name || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
       return Response.json({ error: "A name, valid email, and password of at least 8 characters are required" }, { status: 400 });
     }
@@ -84,7 +85,7 @@ export async function POST(request: Request) {
   if (!userId) return Response.json({ error: "User is required" }, { status: 400 });
 
   if (action === "set_role") {
-    const role = body.role === "admin" ? "admin" : "user";
+    const role = ["admin", "support_manager", "support_agent", "operations", "warehouse", "user"].includes(String(body.role)) ? String(body.role) : "user";
     if (userId === access.user.id && role !== "admin") {
       return Response.json({ error: "You cannot remove your own administrator access" }, { status: 400 });
     }
@@ -122,3 +123,7 @@ export async function POST(request: Request) {
 
   return Response.json({ error: "Unsupported action" }, { status: 400 });
 }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+
+export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }

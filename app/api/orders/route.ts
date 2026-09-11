@@ -1,3 +1,4 @@
+import { errorResponse } from "../../../lib/http";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { sqlForTab, statusTab, type OrderTab } from "../../../lib/order-status";
 import { requireApiUser } from "../../../lib/auth/access";
@@ -5,6 +6,9 @@ import { requireApiUser } from "../../../lib/auth/access";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  try { return await loadOrders(request); } catch (error) { return errorResponse(error); }
+}
+async function loadOrders(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
@@ -15,7 +19,7 @@ export async function GET(request: Request) {
   const requestedRisk = url.searchParams.get("risk");
   const risk = requestedRisk === "high" || requestedRisk === "low" || requestedRisk === "approved" ? requestedRisk : "all";
   const approved = risk === "approved";
-  const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+  const page = Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1));
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
   const filters: string[] = [];
@@ -100,7 +104,7 @@ export async function GET(request: Request) {
   const pickups = await runtime.DB.prepare("SELECT DISTINCT pickup_location AS pickup FROM orders WHERE pickup_location != '' ORDER BY pickup_location").all<{ pickup: string }>();
 
   return Response.json({
-    orders: rows.results.map((row) => ({ ...row, products: JSON.parse(String(row.productsJson || "[]")), productsJson: undefined })),
+    orders: rows.results.map((row) => ({ ...row, products: safeProducts(row.productsJson), productsJson: undefined })),
     counts,
     riskCounts: {
       all: Number(riskCountRow?.low || 0) + Number(riskCountRow?.high || 0),
@@ -116,3 +120,5 @@ export async function GET(request: Request) {
     filterOptions: { couriers: couriers.results.map((row) => row.courier), pickups: pickups.results.map((row) => row.pickup) },
   });
 }
+
+function safeProducts(value: unknown) { try { const data=JSON.parse(String(value || "[]")); return Array.isArray(data) ? data : []; } catch { return []; } }

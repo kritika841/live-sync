@@ -1,3 +1,4 @@
+import { errorResponse } from "../../../lib/http";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { buildSyncReportWorkbook, type StoredSyncReport } from "../../../lib/excel-report";
 import { requireApiUser } from "../../../lib/auth/access";
@@ -19,7 +20,7 @@ function normalizeReport(row: ReportRow): StoredSyncReport {
   return { ...report, fields, changes };
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
@@ -76,3 +77,5 @@ export async function GET(request: Request) {
     totalPages: Math.max(1, Math.ceil(total / perPage)),
   }, { headers: { "cache-control": "no-store" } });
 }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }

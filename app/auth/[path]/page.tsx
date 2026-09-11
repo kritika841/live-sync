@@ -11,13 +11,14 @@ export default async function AuthPage({ params }: { params: Promise<{ path: str
   const { path } = await params;
   if (!publicViews.has(path)) notFound();
 
-  const user = await currentDashboardUser();
+  const configured=Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY);
+  const user = configured ? await currentDashboardUser() : null;
   if (user) redirect("/");
 
   return (
     <main className="auth-shell">
       <section className="auth-brand-panel">
-        <Image src="/satmi-logo.svg" alt="Satmi" width={150} height={96} style={{ height: "auto" }} priority />
+        <Image src="/satmi-logo.png" alt="Satmi" width={150} height={96} style={{ height: "auto" }} priority />
         <div>
           <p className="eyebrow">Private operations workspace</p>
           <h1>Shiprocket orders, secured for your team.</h1>
@@ -26,7 +27,7 @@ export default async function AuthPage({ params }: { params: Promise<{ path: str
       </section>
       <section className="auth-form-panel">
         <div className="auth-form-wrap">
-          <SignInForm />
+          <SignInForm configured={configured} />
           <p className="auth-help">Need access? Ask a Satmi administrator to add your email address.</p>
         </div>
       </section>

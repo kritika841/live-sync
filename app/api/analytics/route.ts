@@ -1,6 +1,8 @@
+import { loadOfdRecords } from "../../../lib/ofd";
+import { errorResponse } from "../../../lib/http";
 import { requireApiUser } from "../../../lib/auth/access";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
-import { refreshTrackingHistoryForDate } from "../../../lib/shiprocket";
+
 
 export const dynamic = "force-dynamic";
 
@@ -18,8 +20,6 @@ const openPopulationSql = `(${deliveredSql} OR ${inTransitSql})`;
 const shippedHistorySql = `(shipped_at != '' OR ${closedSql} OR ${inTransitSql})`;
 const isoDate = /^\d{4}-\d{2}-\d{2}$/;
 const indiaDateSql = (column: string) => `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
-const latestOfdDateSql = indiaDateSql("out_for_delivery_at");
-const firstOfdDateSql = indiaDateSql("first_out_for_delivery_at");
 const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), created_at)");
 
 function indiaToday() {
@@ -60,7 +60,7 @@ function indiaDateFromValue(value: unknown) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed);
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
@@ -72,89 +72,32 @@ export async function GET(request: Request) {
     const currentIndiaDate = indiaToday();
     const requestedDate = url.searchParams.get("date") || currentIndiaDate;
     const selectedDate = isoDate.test(requestedDate) && requestedDate <= currentIndiaDate ? requestedDate : currentIndiaDate;
-    let trackingHistory: Record<string, unknown> = { status: "healthy" };
-    try {
-      trackingHistory = await refreshTrackingHistoryForDate(runtime, selectedDate);
-    } catch (error) {
-      trackingHistory = { status: "error", error: error instanceof Error ? error.message : "Tracking history refresh failed" };
-    }
-    const rows = await runtime.DB.prepare(`
-      WITH matching_events AS (
-        SELECT orders.id AS order_id,
-          COALESCE(NULLIF(events.event_at, ''), events.received_at) AS ofd_at,
-          TO_CHAR(COALESCE(NULLIF(events.event_at, ''), events.received_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS event_date,
-          events.status
-        FROM orders
-        JOIN webhook_events events ON
-          (events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
-          OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
-          OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
-          OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id)
-      ), matching_ofd_events AS (
-        SELECT order_id, ofd_at, event_date AS ofd_date
-        FROM matching_events
-        WHERE UPPER(TRIM(status)) = 'OUT FOR DELIVERY'
-      ), deduped_ofd_days AS (
-        SELECT order_id, ofd_date, MAX(ofd_at) AS ofd_at
-        FROM matching_ofd_events
-        GROUP BY order_id, ofd_date
-      ), selected_orders AS (
-        SELECT orders.*,
-          COALESCE(
-            selected_event.ofd_at,
-            CASE WHEN ${latestOfdDateSql} = ? THEN out_for_delivery_at END,
-            CASE WHEN ${firstOfdDateSql} = ? THEN first_out_for_delivery_at END
-          ) AS selected_ofd_at,
-          GREATEST(
-            1,
-            (SELECT COUNT(*) FROM deduped_ofd_days previous
-              WHERE previous.order_id = orders.id AND previous.ofd_date <= ?),
-            1 + (SELECT COUNT(DISTINCT failed.event_date) FROM matching_events failed
-              WHERE failed.order_id = orders.id AND failed.event_date < ? AND (${ndrSql})),
-            CASE WHEN ${latestOfdDateSql} = ? AND ndr_attempts > 0
-              THEN ndr_attempts + CASE WHEN ${ndrSql} THEN 0 ELSE 1 END ELSE 1 END
-          )::integer AS attempt_number
-        FROM orders
-        LEFT JOIN deduped_ofd_days selected_event
-          ON selected_event.order_id = orders.id AND selected_event.ofd_date = ?
-      )
-      SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
-        customer_city AS customerCity, customer_state AS customerState, selected_orders.status,
-        payment_method AS paymentMethod, total, awb, courier,
-        shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
-        selected_ofd_at AS outForDeliveryAt, delivered_at AS deliveredAt,
-        ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
-        shipping_cost AS shippingCost, attempt_number AS attemptNumber,
-        (attempt_number > 1) AS previousUndelivered,
-        (SELECT outcome.status FROM matching_events outcome
-          WHERE outcome.order_id = selected_orders.id
-            AND outcome.ofd_at::timestamptz >= selected_orders.selected_ofd_at::timestamptz
-            AND outcome.event_date = ?
-          ORDER BY outcome.ofd_at::timestamptz DESC LIMIT 1) AS latestKnownStatus
-      FROM selected_orders
-      WHERE selected_ofd_at IS NOT NULL AND selected_ofd_at != ''
-      ORDER BY selected_ofd_at DESC, id DESC
-    `).bind(selectedDate, selectedDate, selectedDate, selectedDate, selectedDate, selectedDate, selectedDate).all<Record<string, unknown>>();
+    const history = await runtime.DB.prepare("SELECT key,value FROM sync_state WHERE key IN ('tracking_history_status','tracking_history_last_sync_at')").all<{key:string;value:string}>();
+    const historyState = Object.fromEntries(history.results.map(r=>[r.key,r.value]));
+    const trackingHistory = {status:historyState.tracking_history_status || "pending",lastSyncAt:historyState.tracking_history_last_sync_at || "",cached:true};
+    const rows = await loadOfdRecords(runtime.DB,selectedDate);
     const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> = rows.results.map((row) => {
       let status = String(row.latestKnownStatus || "");
-      if (!status && indiaDateFromValue(row.deliveredAt) === selectedDate) status = "DELIVERED";
+      if ((!status || isOpenDeliveryStatus(status)) && indiaDateFromValue(row.deliveredAt) === selectedDate) status = "DELIVERED";
       if (!status && indiaDateFromValue(row.ndrRaisedAt) === selectedDate) status = "UNDELIVERED";
       if (!status) status = selectedDate === currentIndiaDate ? String(row.status || "") : "UNRESOLVED AFTER OFD";
       if (selectedDate < currentIndiaDate && isOpenDeliveryStatus(status)) status = "UNRESOLVED AFTER OFD";
       return {
         ...row, status, latestKnownStatus: undefined,
-        attemptNumber: Math.max(1, Number(row.attemptNumber || 1)),
+        attemptNumber: Number(row.attemptNumber || 0),
+        attemptBasis: "recorded_ofd_days",
         previousUndelivered: Boolean(row.previousUndelivered),
       };
     });
     const total = orders.length;
     const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, unresolved: 0, rto: 0, other: 0 };
-    const attemptCounts = { first: 0, second: 0, third: 0, later: 0 };
+    const attemptCounts = { first: 0, second: 0, third: 0, later: 0, unknown: 0 };
     for (const order of orders) {
       const bucket = statusBucket(order.status);
       bucketCounts[bucket] += 1;
       const attempt = Number(order.attemptNumber);
-      if (attempt === 1) attemptCounts.first += 1;
+      if (!attempt) attemptCounts.unknown += 1;
+      else if (attempt === 1) attemptCounts.first += 1;
       else if (attempt === 2) attemptCounts.second += 1;
       else if (attempt === 3) attemptCounts.third += 1;
       else attemptCounts.later += 1;
@@ -167,10 +110,12 @@ export async function GET(request: Request) {
         undelivered: metric(bucketCounts.undelivered, total), stillOut: metric(bucketCounts.stillOut, total),
         unresolved: metric(bucketCounts.unresolved, total),
         firstAttemptOFD: metric(attemptCounts.first, total), secondAttemptOFD: metric(attemptCounts.second, total),
+        unknownAttemptOFD: metric(attemptCounts.unknown, total),
         thirdAttemptOFD: metric(attemptCounts.third, total), laterAttemptOFD: metric(attemptCounts.later, total),
         previousUndelivered: metric(previousUndelivered, total), rto: metric(bucketCounts.rto, total),
         other: metric(bucketCounts.other, total),
       },
+      attemptBasis: "Recorded OFD days; courier attempt ordinals are not verified",
       trackingHistory,
       orders,
     });
@@ -288,3 +233,5 @@ export async function GET(request: Request) {
     },
   });
 }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }

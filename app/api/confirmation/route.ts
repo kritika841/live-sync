@@ -1,3 +1,4 @@
+import { errorResponse } from "../../../lib/http";
 import { ACTIONABLE_STATUS_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { isSameOrigin, requireApiUser } from "../../../lib/auth/access";
@@ -45,7 +46,7 @@ function serializeCandidate(row: Record<string, unknown>) {
   return { ...row, rawJson: undefined, products: [], attempts: [], tags: extractOrderTags(raw) };
 }
 
-export async function GET() {
+async function handleGET() {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
@@ -101,9 +102,10 @@ export async function GET() {
   });
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
+  if (["support_agent","support_manager","warehouse"].includes(access.user.role)) return Response.json({error:"Order confirmation access required"},{status:403});
   if (!sameOrigin(request) || !isSameOrigin(request)) return Response.json({ error: "Invalid request origin" }, { status: 403 });
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
@@ -191,3 +193,7 @@ export async function POST(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Confirmation action failed" }, { status: 422 });
   }
 }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+
+export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }

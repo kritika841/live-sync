@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { Modal, useEntryDialog } from "../../Modal";
 import { CircleUserRound, KeyRound, ShieldCheck, UserPlus, UserRoundCheck, UserRoundX } from "lucide-react";
 
 type ManagedUser = {
@@ -22,6 +23,8 @@ function formatDate(value: string) {
 }
 
 export default function AdminUsers({ currentUserId }: { currentUserId: string }) {
+  const [createOpen,setCreateOpen]=useState(false);
+  const {requestEntry,dialog}=useEntryDialog();
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -63,8 +66,10 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
       if (!response.ok) throw new Error(data.error || "The action could not be completed");
       setNotice(data.message || "Saved.");
       await loadUsers();
+      return true;
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "The action could not be completed");
+      return false;
     } finally {
       setBusy("");
     }
@@ -74,33 +79,34 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
     event.preventDefault();
     const form = event.currentTarget;
     const values = new FormData(form);
-    await request({ action: "create", name: values.get("name"), email: values.get("email"), password: values.get("password"), role: values.get("role") }, "create");
-    form.reset();
+    const saved=await request({ action: "create", name: values.get("name"), email: values.get("email"), password: values.get("password"), role: values.get("role") }, "create");
+    if(saved){form.reset();setCreateOpen(false);}
   }
 
-  function setPassword(user: ManagedUser) {
-    const password = window.prompt(`Enter a new password for ${user.email} (minimum 8 characters):`);
+  async function setPassword(user: ManagedUser) {
+    const values=await requestEntry("Set password",[{name:"password",label:"New password (minimum 8 characters)",type:"password"}]);
+    const password=values?.password ?? null;
     if (password === null) return;
     void request({ action: "set_password", userId: user.id, password }, `password:${user.id}`);
   }
 
   return (
-    <section className="admin-workspace">
+    <section className="admin-workspace">{dialog}
       <div className="admin-heading">
-        <div><p className="eyebrow">Access control</p><h1>Dashboard users</h1><p>Create accounts, assign passwords, control administrator access, and disable accounts.</p></div>
+        <div><p className="eyebrow">Access control</p><h1>Dashboard users</h1></div>
         <span><ShieldCheck size={17}/> Admin managed</span>
       </div>
 
       {(error || notice) && <div className={`admin-notice ${error ? "error" : "success"}`}>{error || notice}</div>}
 
-      <form className="invite-card" onSubmit={createUser}>
-        <div className="invite-copy"><span><UserPlus size={18}/></span><div><h2>Add a user</h2><p>Assign the credentials they will use to sign in.</p></div></div>
+      <button className="action-launch" onClick={()=>setCreateOpen(true)}>+ Add user</button><Modal title="Add user" open={createOpen} onClose={()=>setCreateOpen(false)} busy={!!busy}><form className="invite-card" onSubmit={createUser}>{error && <p role="alert" className="signin-error">{error}</p>}
+        <div className="invite-copy"><span><UserPlus size={18}/></span><div><h2>Add a user</h2></div></div>
         <label><span>Name</span><input name="name" required autoComplete="off" placeholder="Full name" /></label>
         <label><span>Email address</span><input name="email" type="email" required autoComplete="off" placeholder="name@company.com" /></label>
         <label><span>Password</span><input name="password" type="password" minLength={8} required autoComplete="new-password" placeholder="Minimum 8 characters" /></label>
-        <label><span>Role</span><select name="role" defaultValue="user"><option value="user">User</option><option value="admin">Administrator</option></select></label>
+        <label><span>Role</span><select name="role" defaultValue="user"><option value="user">User</option><option value="admin">Administrator</option><option value="support_manager">Support manager</option><option value="support_agent">Support agent</option><option value="operations">Operations</option><option value="warehouse">Warehouse</option></select></label>
         <button disabled={Boolean(busy)}>{busy === "create" ? "Adding…" : "Add user"}</button>
-      </form>
+      </form></Modal>
 
       <section className="users-card">
         <header><div><h2>People with access</h2><p>{users.length} account{users.length === 1 ? "" : "s"}</p></div></header>
@@ -112,7 +118,7 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
                 <span className="user-icon"><CircleUserRound size={20}/></span>
                 <div className="user-identity"><strong>{user.name || user.email}{self && <em>You</em>}</strong><span>{user.email}</span><small>Added {formatDate(user.createdAt)}</small></div>
                 <div className={`user-status ${user.banned ? "disabled" : "active"}`}>{user.banned ? "Disabled" : "Active"}</div>
-                <label className="role-select"><span>Role</span><select value={user.role === "admin" ? "admin" : "user"} disabled={Boolean(busy) || self} onChange={(event) => void request({ action: "set_role", userId: user.id, role: event.target.value }, `role:${user.id}`)}><option value="user">User</option><option value="admin">Administrator</option></select></label>
+                <button disabled={Boolean(busy)||self} onClick={async()=>{const result=await requestEntry("Change role",[{name:"role",label:"Role",value:user.role,options:["user","admin","support_manager","support_agent","operations","warehouse"].map(value=>({value,label:value.replaceAll("_"," ")}))}]);if(result)void request({action:"set_role",userId:user.id,role:result.role},`role:${user.id}`);}}>{user.role.replaceAll("_"," ")}</button>
                 <div className="user-actions">
                   <button title="Assign a new password" disabled={Boolean(busy)} onClick={() => setPassword(user)}><KeyRound size={15}/> Set password</button>
                   <button className={user.banned ? "enable" : "disable"} disabled={Boolean(busy) || self} onClick={() => void request({ action: user.banned ? "enable" : "disable", userId: user.id }, `${user.banned ? "enable" : "disable"}:${user.id}`)}>{user.banned ? <UserRoundCheck size={15}/> : <UserRoundX size={15}/>} {user.banned ? "Enable" : "Disable"}</button>

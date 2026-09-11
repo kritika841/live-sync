@@ -1,9 +1,10 @@
+import { errorResponse } from "../../../lib/http";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+async function handleGET() {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
@@ -24,3 +25,5 @@ export async function GET() {
     sync: Object.fromEntries(stateRows.results.map((row) => [row.key, row.value])),
   });
 }
+
+export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }

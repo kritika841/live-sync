@@ -152,9 +152,16 @@ async function handlePOST(request: Request) {
       await runtime.DB.batch(ids.map((id, index) => runtime.DB.prepare("UPDATE campaigns SET position=?,updated_at=? WHERE id=?").bind(index, now, id)));
       return Response.json({ ok: true });
     }
+    if (action === "set_campaign_routing") {
+      const campaignId = String(body.campaignId || "");
+      if (campaignId !== "cmp_default_high_rto") throw new Error("Manual override is only available for the permanent campaign");
+      await runtime.DB.prepare("UPDATE campaigns SET auto_assign=?,updated_at=? WHERE id=? AND is_active=TRUE")
+        .bind(Boolean(body.autoAssign), now, campaignId).run();
+      return Response.json({ ok: true });
+    }
     if (action === "deactivate_campaign") {
       const campaignId = String(body.campaignId || "");
-      if (!campaignId || campaignId === "cmp_default_high_rto") throw new Error("The automatic High RTO campaign cannot be deactivated");
+      if (!campaignId) throw new Error("Campaign is required");
       await runtime.DB.batch([
         runtime.DB.prepare("UPDATE campaigns SET is_active=FALSE,updated_at=? WHERE id=?").bind(now, campaignId),
         runtime.DB.prepare("DELETE FROM campaign_assignments WHERE campaign_id=?").bind(campaignId),

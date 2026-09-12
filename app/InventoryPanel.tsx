@@ -630,7 +630,13 @@ export default function InventoryPanel({
                   </button>
                 )}
               </form>
-              <a className="action-launch" href={`/api/inventory/po?id=${encodeURIComponent(po)}`} target="_blank" rel="noreferrer">Download PDF</a><h3>Receipt history</h3>
+              <div className="ops-actions">
+                <a className="action-launch" href={`/api/inventory/po?id=${encodeURIComponent(po)}`} target="_blank" rel="noreferrer">Download PDF</a>
+                {isAdmin && <button className="ops-primary" onClick={()=>{setInvoicePo(po);setReceiveOpen(false);setTab("invoices");setInvoiceOpen(true)}}>Upload invoice for this PO</button>}
+              </div>
+              <h3>Invoices for this PO</h3>
+              {data.invoices.filter(i=>i.purchase_order_id===po).length ? data.invoices.filter(i=>i.purchase_order_id===po).map(i=><div className="ops-history" key={i.id}><span><strong>{i.invoice_number}</strong> · {i.status}<small>{i.invoice_date || "No invoice date"} · ₹{n(i.grand_total)}</small></span><a href={`/api/inventory/files?id=${i.id}`} target="_blank" rel="noreferrer"><FileText size={14}/> View invoice</a></div>) : <p className="ops-muted">No invoice uploaded for this PO yet.</p>}
+              <h3>Receipt history</h3>
               {data.receipts
                 .filter((r) => r.purchase_order_id === po)
                 .map((r) => (

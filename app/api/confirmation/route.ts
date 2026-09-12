@@ -32,9 +32,13 @@ const candidateColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer
 function serializeOrder(row: Record<string, unknown>, attempts: Record<string, unknown>[] = []) {
   let raw: Record<string, unknown> = {};
   try { raw = JSON.parse(String(row.rawJson || "{}")); } catch { /* Keep malformed legacy payloads usable. */ }
+  const others = raw.others && typeof raw.others === "object" ? raw.others as Record<string, unknown> : {};
   return {
     ...row,
-    customerPhone: completePhone(row.customerPhone, raw.customer_phone_unmasked, raw.billing_phone, raw.shipping_phone),
+    // Shiprocket has used both top-level and `others` contact fields across
+    // report versions. Keep the stored value first, then accept every known
+    // unmasked source; completePhone still rejects redacted values.
+    customerPhone: completePhone(row.customerPhone, raw.customer_phone_unmasked, raw.billing_phone, raw.shipping_phone, raw.billing_phone_number, raw.shipping_phone_number, raw.phone, others.billing_phone_number, others.shipping_phone_number, others.billing_phone, others.shipping_phone, others.phone),
     products: JSON.parse(String(row.productsJson || "[]")),
     productsJson: undefined,
     rawJson: undefined,

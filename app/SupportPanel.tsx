@@ -45,6 +45,7 @@ const empty = {
   messages: [],
   events: [],
   orders: [],
+  customer: { name: "", email: "", phone: "", tags: [] },
   connection: { email: "kritika@satmi.in", connected: false },
   canManage: false,
   userId: "",
@@ -422,6 +423,57 @@ export default function SupportPanel({
             </div>
           )}
         </div>
+        {ticket && (
+          <aside className="support-ticket-fields">
+            <p className="eyebrow">Ticket controls</p>
+            <label>
+              Assignee
+              <select
+                disabled={busy || !canManage}
+                value={ticket.assignee_id || ""}
+                onChange={(event) => void act("assign", { agentId: event.target.value })}
+              >
+                <option value="">Unassigned</option>
+                {data.agents.filter((agent) => agent.available).map((agent) => (
+                  <option key={agent.user_id} value={agent.user_id}>{agent.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Status
+              <select
+                disabled={busy}
+                value={ticket.status}
+                onChange={(event) => void act("status", { status: event.target.value })}
+              >
+                {["open", "in_progress", "waiting", "resolved"].map((status) => (
+                  <option key={status} value={status}>{status.replaceAll("_", " ")}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Priority
+              <select
+                disabled={busy}
+                value={ticket.priority}
+                onChange={(event) => void act("priority", { priority: event.target.value })}
+              >
+                {["low", "normal", "high", "urgent"].map((priority) => (
+                  <option key={priority} value={priority}>{priority}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              disabled={busy}
+              onClick={async () => {
+                const response = await requestEntry("Escalate ticket", [{ name: "reason", label: "Reason" }]);
+                if (response?.reason) void act("escalate", { reason: response.reason });
+              }}
+            >
+              <ArrowUpRight size={14} /> Escalate
+            </button>
+          </aside>
+        )}
         <div className="support-conversation">
           {ticket ? (
             <>
@@ -431,23 +483,7 @@ export default function SupportPanel({
                 </p>
                 <h2>{ticket.subject}</h2>
                 <p>{ticket.customer_email} · Assigned to {data.agents.find(a => a.user_id===ticket.assignee_id)?.name || "Awaiting available agent"}</p>
-                <div className="ops-actions">
-                  <button disabled={busy} onClick={async()=>{const result=await requestEntry("Ticket status",[{name:"value",label:"Ticket status",value:ticket.status,options:["open","in_progress","waiting","resolved"].map(s=>({value:s,label:s.replaceAll("_"," ")}))}]);if(result)void act("status",{status:result.value});}}>Ticket status</button>
-                  <button disabled={busy} onClick={async()=>{const result=await requestEntry("Priority",[{name:"value",label:"Priority",value:ticket.priority,options:["low","normal","high","urgent"].map(s=>({value:s,label:s}))}]);if(result)void act("priority",{priority:result.value});}}>Priority</button>
-                  {canManage && (
-                    <button disabled={busy} onClick={async()=>{const result=await requestEntry("Assigned agent",[{name:"value",label:"Assigned agent",value:ticket.assignee_id || "",options:[{value:"",label:"Unassigned"},...data.agents.filter(a=>a.available).map(a=>({value:a.user_id,label:a.name}))]}]);if(result)void act("assign",{agentId:result.value});}}>Assigned agent</button>
-                  )}
-                  <button
-                    disabled={busy}
-                    onClick={async () => {
-                      const response=await requestEntry("Escalate ticket",[{name:"reason",label:"Reason"}]);
-                      const reason=response?.reason;
-                      if (reason) void act("escalate", { reason });
-                    }}
-                  >
-                    <ArrowUpRight size={14} /> Escalate
-                  </button>
-                </div>
+                <span className="support-channel">Email conversation</span>
               </header>
               <div className="support-thread">
                 {(data.messages as Message[]).map((m) => (
@@ -574,8 +610,14 @@ export default function SupportPanel({
             </div>
           )}
         </div>
-        {ticket && (              <aside className="support-context">
-                <h3>Customer context</h3><p>{ticket.customer_email}</p><h3>Orders & ticket history</h3>
+        {ticket && (
+          <aside className="support-context">
+                <p className="eyebrow">Requester</p>
+                <h3>{data.customer.name || "Customer"}</h3>
+                <p>{data.customer.email}</p>
+                {data.customer.phone && <p>{data.customer.phone}</p>}
+                {!!data.customer.tags.length && <div className="support-tags">{data.customer.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+                <h3>Recent orders</h3>
                 {(
                   data.orders as {
                     id: number;
@@ -588,13 +630,12 @@ export default function SupportPanel({
                     {o.channel_order_id} · {o.status} · AWB {o.awb || "—"}
                   </p>
                 ))}
-                {(data.events as Event[]).map((e) => (
-                  <p key={e.id}>
-                    {date(e.created_at)} · {e.action.replaceAll("_", " ")}{" "}
-                    <small>{JSON.stringify(e.details)}</small>
-                  </p>
+                <h3>Interactions</h3>
+                {(data.events as Event[]).map((event) => (
+                  <p key={event.id}>{date(event.created_at)} · {event.action.replaceAll("_", " ")}</p>
                 ))}
-              </aside>)}
+              </aside>
+        )}
       </div>
     </section>
   );

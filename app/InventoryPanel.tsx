@@ -31,10 +31,10 @@ const empty = {
   activity: [],
 } as unknown as Data;
 const tabs = [
+  ["pos", "Purchase orders"],
   ["stock", "Stock & components"],
   ["products", "Products & recipes"],
   ["vendors", "Vendors"],
-  ["pos", "Purchase orders"],
   ["invoices", "Invoices"],
   ["sales", "Manual sales"],
   ["orders", "Order insights"],
@@ -60,7 +60,7 @@ export default function InventoryPanel({
   preview?: boolean;
 }) {
   const [data, setData] = useState<Data>(empty),
-    [tab, setTab] = useState<string>("stock"),
+    [tab, setTab] = useState<string>("pos"),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),

@@ -214,7 +214,7 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         await sql`UPDATE purchase_order_lines SET received_quantity=received_quantity-${l.accepted_quantity},rejected_quantity=rejected_quantity-${l.rejected_quantity} WHERE id=${l.purchase_order_line_id}`;
       }
       await sql`UPDATE goods_receipts SET status='void' WHERE id=${id}`;
-      await sql`UPDATE purchase_orders SET status='partially_received' WHERE id=${r.purchase_order_id}`;
+      await sql`UPDATE purchase_orders SET status=CASE WHEN EXISTS(SELECT 1 FROM purchase_order_lines WHERE purchase_order_id=${r.purchase_order_id} AND received_quantity>0.000001) THEN 'partially_received' ELSE 'ordered' END,updated_at=${now} WHERE id=${r.purchase_order_id}`;
     } else if (action === "cancel_po") {
       const reason = required(b.reason, "Reason");
       const [p] =

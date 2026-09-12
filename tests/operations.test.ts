@@ -217,6 +217,25 @@ test("operations integration: receipts, conversions, concurrency, recipes, sales
   assert.equal(escalated.status, "escalated");
   assert.equal(escalated.assignee_id, "test-manager");
 });
+test("receipt reversal removes received stock and reopens a fully reversed PO", async () => {
+  const component = randomUUID(), vendor = randomUUID(), po = randomUUID();
+  await mutateInventory({ action: "component", id: component, name: "Reversal material", sku: component, unit: "g" }, admin);
+  await mutateInventory({ action: "vendor", id: vendor, name: "Reversal vendor", address: "Test address", bankDetails: "Test bank" }, admin);
+  await mutateInventory({ action: "po", id: po, number: po, vendorId: vendor, lines: [{ componentId: component, quantity: 1, unit: "kg", cost: 10 }] }, admin);
+  const [line] = await sql`SELECT id FROM purchase_order_lines WHERE purchase_order_id=${po}`;
+  const invoice = randomUUID();
+  await sql`INSERT INTO supplier_invoices(id,supplier_id,purchase_order_id,invoice_number,storage_key,file_hash,created_at,updated_at) VALUES(${invoice},${vendor},${po},${invoice},'test-invoice',${invoice},now(),now())`;
+  await sql`INSERT INTO supplier_invoice_lines(id,supplier_invoice_id,purchase_order_line_id,component_id,quantity) VALUES(${randomUUID()},${invoice},${line.id},${component},1)`;
+  const receipt = await mutateInventory({ action: "receive", poId: po, invoiceId: invoice, requestKey: randomUUID(), lines: [{ lineId: line.id, accepted: 1, rejected: 0 }] }, admin);
+  let [stock] = await sql`SELECT COALESCE(SUM(quantity_delta),0) quantity FROM component_ledger WHERE component_id=${component}`;
+  assert.equal(Number(stock.quantity), 1000);
+  await mutateInventory({ action: "reverse_receipt", id: receipt.id, reason: "Test reversal" }, admin);
+  [stock] = await sql`SELECT COALESCE(SUM(quantity_delta),0) quantity FROM component_ledger WHERE component_id=${component}`;
+  assert.equal(Number(stock.quantity), 0);
+  const [reopened] = await sql`SELECT status FROM purchase_orders WHERE id=${po}`;
+  assert.equal(reopened.status, "ordered");
+});
+
 test("conversion and HTTP failures are explicit", async () => {
   assert.equal(conversion("kg", "g"), 1000);
   assert.throws(() => conversion("pack", "g"), /Cannot convert/);

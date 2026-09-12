@@ -7,6 +7,18 @@ import { HttpError, required } from "../http";
 import { operationsDb } from "./schema";
 import { manager } from "./access";
 export const mailbox = () => process.env.SUPPORT_MAILBOX || "kritika@satmi.in";
+function customerTags(raw: unknown) {
+  try {
+    const value = JSON.parse(String(raw || "{}"));
+    const tags = value.shopify_tags ?? value.tags ?? value.order_tag ?? [];
+    return (Array.isArray(tags) ? tags : String(tags).split(","))
+      .map((tag) => String(tag).trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
 export async function supportEvent(
   sql: TransactionSql,
   u: string,
@@ -100,6 +112,7 @@ export async function supportData(
     let messages: readonly unknown[] = [];
     let events: readonly unknown[] = [];
     let orders: readonly unknown[] = [];
+    let customer = { name: "", email: "", phone: "", tags: [] as string[] };
     if (id) {
       const t = await ticketAccess(sql, id, u);
       selectedTicket = t;
@@ -109,6 +122,14 @@ export async function supportData(
         await sql`SELECT * FROM support_events WHERE ticket_id=${id} ORDER BY created_at`;
       orders =
         await sql`SELECT id,channel_order_id,status,awb,courier FROM orders WHERE LOWER(customer_email)=LOWER(${t.customer_email}) ORDER BY created_at DESC LIMIT 20`;
+      const [customerOrder] =
+        await sql`SELECT customer_name,customer_phone,raw_json FROM orders WHERE LOWER(customer_email)=LOWER(${t.customer_email}) ORDER BY created_at DESC LIMIT 1`;
+      customer = {
+        name: String(customerOrder?.customer_name || t.customer_name || ""),
+        email: t.customer_email,
+        phone: String(customerOrder?.customer_phone || ""),
+        tags: customerTags(customerOrder?.raw_json),
+      };
     }
     const [connection] =
       await sql`SELECT email,last_sync_at,last_error,watch_expiration,import_complete,encrypted_refresh_token<>'' connected FROM support_mailboxes WHERE email=${mailbox()}`;
@@ -123,6 +144,7 @@ export async function supportData(
       messages,
       events,
       orders,
+      customer,
       connection: connection || { email: mailbox(), connected: false },
       canManage: manager(u),
       userId: u.id,

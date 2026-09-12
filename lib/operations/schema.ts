@@ -53,6 +53,8 @@ export async function operationsDb() {
       }
       const [performanceVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0016_po_documents_performance'`;
       if(!performanceVersion){await sql.unsafe(PO_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0016_po_documents_performance')`;}
+      const [inventoryReadVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0017_inventory_read_performance'`;
+      if(!inventoryReadVersion){await sql.unsafe(INVENTORY_READ_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0017_inventory_read_performance')`;}
     });
   })()
     .catch((e) => {
@@ -75,4 +77,11 @@ CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders (UPPER(TRIM(status))
 CREATE INDEX IF NOT EXISTS idx_orders_confirmation_date ON orders (confirmation_status,confirmed_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_confirmation_attempt_order ON confirmation_attempts (order_id,attempt_number,id);
 CREATE INDEX IF NOT EXISTS idx_assignments_campaign ON campaign_assignments (campaign_id,position,order_id);
+`;
+
+const INVENTORY_READ_PERFORMANCE_MIGRATION = `
+CREATE INDEX IF NOT EXISTS idx_purchase_order_lines_po ON purchase_order_lines (purchase_order_id);
+CREATE INDEX IF NOT EXISTS idx_component_ledger_component ON component_ledger (component_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_allocations_component_state ON inventory_order_allocations (component_id,state);
+CREATE INDEX IF NOT EXISTS idx_inventory_audit_events_id ON inventory_audit_events (id DESC);
 `;

@@ -72,6 +72,8 @@ export default function InventoryPanel({
       { componentId: "", quantity: "", unit: "unit", cost: "0" },
     ]);
   const {requestEntry,dialog} = useEntryDialog();
+  const retryTimer = useRef<number | undefined>(undefined);
+  const retryLoad = useRef<() => void>(() => {});
   const [invoicePo,setInvoicePo] = useState("");
   const [invoiceOpen,setInvoiceOpen]=useState(false);
   const [receiveOpen,setReceiveOpen]=useState(false);
@@ -87,15 +89,26 @@ export default function InventoryPanel({
       );
       setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load inventory");
+      // Keep the last usable snapshot on a transient gateway timeout.  A retry
+      // is less disruptive than replacing the workspace with a raw 504 error.
+      if (e instanceof Error && /temporarily busy|usable response/i.test(e.message)) {
+        setError("");
+        window.clearTimeout(retryTimer.current);
+        retryTimer.current = window.setTimeout(() => retryLoad.current(), 2500);
+      } else {
+        setError(e instanceof Error ? e.message : "Could not load inventory");
+      }
     } finally {
       setLoading(false);
     }
   }, [preview]);
   useEffect(() => {
+    retryLoad.current = () => void load();
+  }, [load]);
+  useEffect(() => {
     if (!active) return;
     const timer = setTimeout(() => void load(), 0);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); window.clearTimeout(retryTimer.current); };
   }, [active, load]);
   const pending = useRef<{
     signature: string;
@@ -661,7 +674,9 @@ export default function InventoryPanel({
             </article></Modal>
           )}
           {isAdmin && <ProcurementPdf kind="po" components={data.components.map(c=>({id:c.id,name:c.name,sku:c.sku,unit:c.unit}))} vendors={data.vendors.map(v=>({id:v.id,name:v.name}))} pos={data.pos.map(p=>({id:p.id,po_number:p.po_number,supplier_name:p.supplier_name}))} poLines={data.lines.map(l=>({id:l.id,purchase_order_id:l.purchase_order_id,component_id:l.component_id,component_name:l.component_name,purchase_unit:l.purchase_unit,ordered_quantity:Number(l.ordered_quantity),received_quantity:Number(l.received_quantity),unit_cost:Number(l.unit_cost),invoiced_quantity:Number(l.invoiced_quantity)}))} onSaved={load} preview={preview}/>}
-          {isAdmin && <PurchaseOrderForm vendors={data.vendors as unknown as Array<{id:string;name:string;phone:string;tax_id:string;address:string}>} components={data.components as unknown as Array<{id:string;name:string;unit:string}>} onSave={b=>save("po",b)} busy={busy}/>}
+          {isAdmin && (
+            <PurchaseOrderForm vendors={data.vendors as unknown as Array<{id:string;name:string;phone:string;tax_id:string;address:string}>} components={data.components as unknown as Array<{id:string;name:string;unit:string}>} onSave={b=>save("po",b)} busy={busy} onOpenStock={()=>setTab("stock")} onOpenVendors={()=>setTab("vendors")}/>
+          )}
 
         </>
       )}

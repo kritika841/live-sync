@@ -56,7 +56,9 @@ export async function readJson<T = Record<string, unknown>>(
     throw new Error(
       response.status === 401
         ? "Your session expired. Please sign in again."
-        : `The server returned an empty or invalid response (${response.status}). Please retry or check the server connection.`,
+        : response.status === 504
+          ? "The service is temporarily busy. Please retry in a moment."
+          : "The server did not return a usable response. Please retry.",
     );
   }
   if (!response.ok)

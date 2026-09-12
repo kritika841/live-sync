@@ -242,7 +242,7 @@ test("conversion and HTTP failures are explicit", async () => {
   assert.equal(decrypt(encrypt("secret")), "secret");
   await assert.rejects(
     readJson(new Response("", { status: 502 })),
-    /empty or invalid/,
+    /did not return a usable response/,
   );
   const r = errorResponse(
     new Error("Your project has exceeded the data transfer quota"),

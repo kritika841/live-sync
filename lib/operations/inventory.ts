@@ -4,6 +4,15 @@ import type { TransactionSql } from "postgres";
 import { isAdmin, type DashboardUser } from "../auth/access";
 import { HttpError, required, quantity } from "../http";
 import { operationsDb } from "./schema";
+// Inventory rows aggregate several independently evolving tables. The client
+// intentionally reads their dynamic columns, while mutations validate each
+// field at the boundary below.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type InventoryRow = { [key: string]: any };
+export type InventorySnapshot = Record<
+  "components" | "products" | "recipes" | "vendors" | "pos" | "lines" | "receipts" | "invoices" | "sales" | "orders" | "allocations" | "activity",
+  InventoryRow[]
+>;
 export function conversion(unit: string, stockUnit: string) {
   if (unit === stockUnit) return 1;
   if (unit === "kg" && stockUnit === "g") return 1000;
@@ -31,47 +40,26 @@ async function ledger(
 ) {
   await sql`INSERT INTO component_ledger(component_id,quantity_delta,entry_type,reference_type,reference_id,reason,actor_id,actor_email,idempotency_key,created_at) VALUES(${component},${delta},${type},${type},${ref},${reason},${u.id},${u.email},${key},${new Date().toISOString()})`;
 }
-export async function inventoryData() {
+export async function inventoryData(): Promise<InventorySnapshot> {
   const db = await operationsDb();
-  return db.transaction(async (sql) => {
-    const components =
-      await sql`SELECT c.*,COALESCE((SELECT SUM(quantity_delta) FROM component_ledger WHERE component_id=c.id),0) physical, COALESCE((SELECT SUM(required) FROM inventory_order_allocations WHERE component_id=c.id AND state='reserved'),0)+COALESCE((SELECT SUM(allocated_quantity-consumed_quantity) FROM order_requirements WHERE component_id=c.id),0) reserved, COALESCE((SELECT SUM((l.ordered_quantity-l.received_quantity)*l.conversion_factor) FROM purchase_order_lines l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.component_id=c.id AND p.status IN ('ordered','partially_received')),0) incoming FROM inventory_components c ORDER BY c.name`;
-    const products =
-      await sql`SELECT p.*, (SELECT id FROM recipe_versions WHERE product_id=p.id AND active ORDER BY version DESC LIMIT 1) recipe_id FROM inventory_products p ORDER BY title`;
-    const recipes =
-      await sql`SELECT r.*,COALESCE(jsonb_agg(jsonb_build_object('component_id',i.component_id,'quantity',i.quantity)) FILTER(WHERE i.id IS NOT NULL),'[]') items FROM recipe_versions r LEFT JOIN recipe_items i ON i.recipe_version_id=r.id WHERE r.active GROUP BY r.id`;
-    const vendors = await sql`SELECT * FROM suppliers ORDER BY name`;
-    const pos =
-      await sql`SELECT p.*,s.name supplier_name,EXISTS(SELECT 1 FROM procurement_documents d WHERE d.entity_id=p.id) has_document FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.created_at DESC LIMIT 500`;
-    const lines =
-      await sql`SELECT l.*,c.name component_name,c.unit stock_unit,COALESCE((SELECT SUM(il.quantity) FROM supplier_invoice_lines il JOIN supplier_invoices i ON i.id=il.supplier_invoice_id WHERE il.purchase_order_line_id=l.id AND i.status<>'rejected'),0) invoiced_quantity FROM purchase_order_lines l LEFT JOIN inventory_components c ON c.id=l.component_id`;
-    const receipts =
-      await sql`SELECT r.*,COALESCE(jsonb_agg(jsonb_build_object('component_id',l.component_id,'accepted',l.accepted_quantity,'rejected',l.rejected_quantity,'conversion_factor',l.conversion_factor)) FILTER(WHERE l.id IS NOT NULL),'[]') lines FROM goods_receipts r LEFT JOIN goods_receipt_lines l ON l.goods_receipt_id=r.id GROUP BY r.id ORDER BY r.created_at DESC LIMIT 500`;
-    const invoices =
-      await sql`SELECT id,supplier_id,purchase_order_id,invoice_number,invoice_date,original_filename,status,grand_total,created_at,extracted_json FROM supplier_invoices ORDER BY created_at DESC LIMIT 500`;
-    const sales =
-      await sql`SELECT s.*,p.title product_name FROM manual_sales s JOIN inventory_products p ON p.id=s.product_id ORDER BY s.created_at DESC LIMIT 200`;
-    const orders =
-      await sql`SELECT id,channel_order_id,customer_name,status,products_json FROM orders ORDER BY created_at DESC LIMIT 200`;
-    const allocations =
-      await sql`SELECT a.*,c.name component_name,c.recoverable FROM inventory_order_allocations a JOIN inventory_components c ON c.id=a.component_id ORDER BY a.created_at DESC LIMIT 2000`;
-    const activity =
-      await sql`SELECT * FROM inventory_audit_events ORDER BY id DESC LIMIT 300`;
-    return {
-      components,
-      products,
-      recipes,
-      vendors,
-      pos,
-      lines,
-      receipts,
-      invoices,
-      sales,
-      orders,
-      allocations,
-      activity,
-    };
-  });
+  // This is a read-only dashboard snapshot.  Running each independent query in
+  // its own pooled connection avoids holding one transaction open for a dozen
+  // sequential reads, which was the main source of inventory 504s.
+  const [components, products, recipes, vendors, pos, lines, receipts, invoices, sales, orders, allocations, activity] = await Promise.all([
+    db.prepare("SELECT c.*,COALESCE((SELECT SUM(quantity_delta) FROM component_ledger WHERE component_id=c.id),0) physical, COALESCE((SELECT SUM(required) FROM inventory_order_allocations WHERE component_id=c.id AND state='reserved'),0)+COALESCE((SELECT SUM(allocated_quantity-consumed_quantity) FROM order_requirements WHERE component_id=c.id),0) reserved, COALESCE((SELECT SUM((l.ordered_quantity-l.received_quantity)*l.conversion_factor) FROM purchase_order_lines l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.component_id=c.id AND p.status IN ('ordered','partially_received')),0) incoming FROM inventory_components c ORDER BY c.name").all(),
+    db.prepare("SELECT p.*, (SELECT id FROM recipe_versions WHERE product_id=p.id AND active ORDER BY version DESC LIMIT 1) recipe_id FROM inventory_products p ORDER BY title").all(),
+    db.prepare("SELECT r.*,COALESCE(jsonb_agg(jsonb_build_object('component_id',i.component_id,'quantity',i.quantity)) FILTER(WHERE i.id IS NOT NULL),'[]') items FROM recipe_versions r LEFT JOIN recipe_items i ON i.recipe_version_id=r.id WHERE r.active GROUP BY r.id").all(),
+    db.prepare("SELECT * FROM suppliers ORDER BY name").all(),
+    db.prepare("SELECT p.*,s.name supplier_name,EXISTS(SELECT 1 FROM procurement_documents d WHERE d.entity_id=p.id) has_document FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.created_at DESC LIMIT 500").all(),
+    db.prepare("WITH recent_pos AS (SELECT id FROM purchase_orders ORDER BY created_at DESC LIMIT 500) SELECT l.*,c.name component_name,c.unit stock_unit,COALESCE((SELECT SUM(il.quantity) FROM supplier_invoice_lines il JOIN supplier_invoices i ON i.id=il.supplier_invoice_id WHERE il.purchase_order_line_id=l.id AND i.status<>'rejected'),0) invoiced_quantity FROM purchase_order_lines l JOIN recent_pos p ON p.id=l.purchase_order_id LEFT JOIN inventory_components c ON c.id=l.component_id").all(),
+    db.prepare("SELECT r.*,COALESCE(jsonb_agg(jsonb_build_object('component_id',l.component_id,'accepted',l.accepted_quantity,'rejected',l.rejected_quantity,'conversion_factor',l.conversion_factor)) FILTER(WHERE l.id IS NOT NULL),'[]') lines FROM goods_receipts r LEFT JOIN goods_receipt_lines l ON l.goods_receipt_id=r.id GROUP BY r.id ORDER BY r.created_at DESC LIMIT 500").all(),
+    db.prepare("SELECT id,supplier_id,purchase_order_id,invoice_number,invoice_date,original_filename,status,grand_total,created_at,extracted_json FROM supplier_invoices ORDER BY created_at DESC LIMIT 500").all(),
+    db.prepare("SELECT s.*,p.title product_name FROM manual_sales s JOIN inventory_products p ON p.id=s.product_id ORDER BY s.created_at DESC LIMIT 200").all(),
+    db.prepare("SELECT id,channel_order_id,customer_name,status,products_json FROM orders ORDER BY created_at DESC LIMIT 200").all(),
+    db.prepare("SELECT a.*,c.name component_name,c.recoverable FROM inventory_order_allocations a JOIN inventory_components c ON c.id=a.component_id ORDER BY a.created_at DESC LIMIT 2000").all(),
+    db.prepare("SELECT * FROM inventory_audit_events ORDER BY id DESC LIMIT 300").all(),
+  ]);
+  return {components:components.results as InventoryRow[],products:products.results as InventoryRow[],recipes:recipes.results as InventoryRow[],vendors:vendors.results as InventoryRow[],pos:pos.results as InventoryRow[],lines:lines.results as InventoryRow[],receipts:receipts.results as InventoryRow[],invoices:invoices.results as InventoryRow[],sales:sales.results as InventoryRow[],orders:orders.results as InventoryRow[],allocations:allocations.results as InventoryRow[],activity:activity.results as InventoryRow[]};
 }
 type Body = Record<string, unknown>;
 function itemList(v: unknown): Body[] {

@@ -8,7 +8,7 @@ export const poDefaults = {
  conditions:'Goods must match the specifications mentioned in this PO.\nAny damaged or incorrect items must be replaced by the vendor.\nInvoice should mention the PO Number.\nPayment will be processed as per the agreed payment terms after receipt and verification of goods.',
 };
 export type PoDetails=typeof poDefaults;
-export type PoDocument={number:string;date:string;expected:string;details:PoDetails;lines:Array<{description:string;quantity:number;cost:number;gst:number}>};
+export type PoDocument={number:string;date:string;expected:string;details:PoDetails;lines:Array<{description:string;quantity:number;cost:number;gst:number;unit?:string}>};
 export const poTotal=(lines:PoDocument['lines'])=>lines.reduce((sum,line)=>sum+Math.round(line.quantity*line.cost*(1+line.gst/100)*100)/100,0);
 export async function renderPurchaseOrder(po:PoDocument) {
  const doc=await PDFDocument.create();const regular=await doc.embedFont(StandardFonts.Helvetica),bold=await doc.embedFont(StandardFonts.HelveticaBold);
@@ -36,7 +36,7 @@ export async function renderPurchaseOrder(po:PoDocument) {
  for(const [index,line] of po.lines.entries()) {
   const height=Math.max(13,wrap(line.description,widths[1]-5,7.2,true).length*9+5);
   if(y-height<60){ensure(y);row(['S. No.','Item Description','Qty','Unit Price','GST','Total Amount'],13);}
-  row([String(index+1),line.description,String(line.quantity),line.cost.toLocaleString('en-IN'),`${line.gst}%`,(Math.round(line.quantity*line.cost*(1+line.gst/100)*100)/100).toLocaleString('en-IN')],height);
+  row([String(index+1),line.description,[line.quantity,line.unit].filter(v=>v!==undefined&&v!=='').join(' '),line.cost.toLocaleString('en-IN'),`${line.gst}%`,(Math.round(line.quantity*line.cost*(1+line.gst/100)*100)/100).toLocaleString('en-IN')],height);
  }
  const total=poTotal(po.lines).toLocaleString('en-IN',{maximumFractionDigits:2});row(['','','','','SUB TOTAL',total],13,true);
  y-=33;ensure(180);page.drawRectangle({x:127,y:y-3,width:205,height:13,color:yellow,borderColor:ink,borderWidth:.5});pair('Grand Total',total,true);pair('Payment Terms',po.details.paymentTerms,true);pair('Payment Method:',po.details.paymentMethod,true);pair('Advance Payment :',po.details.advancePayment,true);

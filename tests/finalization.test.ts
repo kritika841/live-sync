@@ -59,5 +59,10 @@ test('manual support tickets choose least-loaded available agent and deduplicate
  const second=await mutateSupport({...request,requestKey:randomUUID()},admin);
  const rows=await sql`SELECT assignee_id,ticket_number FROM support_tickets WHERE id IN (${first.id},${second.id})`;
  assert.equal(new Set(rows.map(r=>r.assignee_id)).size,2);assert.equal(new Set(rows.map(r=>r.ticket_number)).size,2);
+ const waiting=randomUUID();await sql`INSERT INTO support_tickets(id,mailbox,gmail_thread_id,subject,customer_email) SELECT ${waiting},mailbox,${randomUUID()},'Waiting case','waiting@example.test' FROM support_tickets WHERE id=${first.id}`;
+ await mutateSupport({action:'availability',agentId:a,available:true},admin);
+ const [assigned]=await sql`SELECT assignee_id FROM support_tickets WHERE id=${waiting}`;assert.ok(assigned.assignee_id);
+ const [preserved]=await sql`SELECT assignee_id FROM support_tickets WHERE id=${first.id}`;assert.equal(preserved.assignee_id,rows.find(r=>Number(r.ticket_number)===Math.min(...rows.map(r=>Number(r.ticket_number))))?.assignee_id);
+
  } finally { for(const agent of previous) await sql`UPDATE support_agents SET available=${agent.available} WHERE user_id=${agent.user_id}`; }
 });

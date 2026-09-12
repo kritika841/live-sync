@@ -55,3 +55,5 @@ The support layout follows Zendesk Agent Workspace's list/conversation/context p
 Shiprocket reconciliation can run in deployment via VALIDATE_SHIPROCKET_ON_DEPLOY=true, optionally refreshing authoritative order fields with RECONCILE_SHIPROCKET_ON_DEPLOY=true. It compares July–September records and independently classified status counts against database analytics SQL, preserving confirmations and Shopify tags. Aggregate results are stored in sync_state.shiprocket_validation_json; raw provider files remain ignored.
 
 Validation: 16 database integration tests and 2 cache/PDF tests passed. TypeScript and production build passed. Excel formulas and rendered PDF/Excel output checked. No customer emails were sent in testing.
+
+Support follow-up: refreshing the registered team or setting an agent available now assigns waiting unassigned tickets by least active workload, without changing existing owners. The integration regression verifies this transition.

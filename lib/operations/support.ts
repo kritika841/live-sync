@@ -16,6 +16,19 @@ export async function supportEvent(
 ) {
   await sql`INSERT INTO support_events(ticket_id,actor_id,action,details) VALUES(${id},${u},${action},${JSON.stringify(details)})`;
 }
+export async function assignWaitingTickets(sql: TransactionSql) {
+  await sql`SELECT pg_advisory_xact_lock(421994)`;
+  const agents = await sql`SELECT a.user_id,COUNT(t.id)::int load FROM support_agents a LEFT JOIN support_tickets t ON t.assignee_id=a.user_id AND t.status<>'resolved' WHERE a.available AND a.role='support_agent' GROUP BY a.user_id`;
+  if (!agents.length) return;
+  const waiting = await sql`SELECT id FROM support_tickets WHERE assignee_id IS NULL AND status IN ('open','in_progress','waiting') ORDER BY created_at,id FOR UPDATE`;
+  for (const ticket of waiting) {
+    agents.sort((a,b)=>Number(a.load)-Number(b.load)||String(a.user_id).localeCompare(String(b.user_id)));
+    const agent=agents[0];
+    await sql`UPDATE support_tickets SET assignee_id=${agent.user_id},updated_at=now() WHERE id=${ticket.id}`;
+    await supportEvent(sql,'system',String(ticket.id),'auto_assigned',{agentId:agent.user_id});
+    agent.load=Number(agent.load)+1;
+  }
+}
 export async function ticketAccess(
   sql: TransactionSql,
   id: string,
@@ -62,6 +75,7 @@ export async function refreshAgents() {
         continue;
       await sql`INSERT INTO support_agents(user_id,email,name,role) VALUES(${u.id},${u.email || ""},${u.user_metadata.name || u.email || ""},${role}) ON CONFLICT(user_id) DO UPDATE SET email=EXCLUDED.email,name=EXCLUDED.name,role=EXCLUDED.role`;
     }
+    await assignWaitingTickets(sql);
   });
 }
 export async function supportData(
@@ -132,6 +146,7 @@ export async function mutateSupport(
       if (!manager(u) && String(b.agentId) !== u.id)
         throw new HttpError(403, "Manager access required");
       await sql`UPDATE support_agents SET available=${b.available === true} WHERE user_id=${String(b.agentId)}`;
+      if (b.available === true) await assignWaitingTickets(sql);
       return { ok: true };
     }
     if (b.action === "create") {

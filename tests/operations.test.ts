@@ -220,7 +220,7 @@ test("operations integration: receipts, conversions, concurrency, recipes, sales
 test("receipt reversal removes received stock and reopens a fully reversed PO", async () => {
   const component = randomUUID(), vendor = randomUUID(), po = randomUUID();
   await mutateInventory({ action: "component", id: component, name: "Reversal material", sku: component, unit: "g" }, admin);
-  await mutateInventory({ action: "vendor", id: vendor, name: "Reversal vendor", address: "Test address", bankDetails: "Test bank" }, admin);
+  await mutateInventory({ action: "vendor", id: vendor, name: `Reversal vendor ${vendor}`, address: "Test address", bankDetails: "Test bank" }, admin);
   await mutateInventory({ action: "po", id: po, number: po, vendorId: vendor, lines: [{ componentId: component, quantity: 1, unit: "kg", cost: 10 }] }, admin);
   const [line] = await sql`SELECT id FROM purchase_order_lines WHERE purchase_order_id=${po}`;
   const invoice = randomUUID();

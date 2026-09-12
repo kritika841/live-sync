@@ -98,6 +98,9 @@ export async function supportData(
   const db = await operationsDb();
   return db.transaction(async (sql) => {
     const agents = await sql`SELECT * FROM support_agents ORDER BY name`;
+    const availableAgents = agents.filter(
+      (agent) => agent.role === "support_agent" && agent.available,
+    ).length;
     const page = Number.isFinite(filters.page) ? Math.max(1, Math.min(100000,Math.floor(filters.page || 1))) : 1;
     const queue = filters.queue || "all";
     const search = "%" + (filters.search || "") + "%";
@@ -141,6 +144,7 @@ export async function supportData(
       total: Number(total.count),
       summary,
       agents,
+      availableAgents,
       messages,
       events,
       orders,

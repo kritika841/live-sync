@@ -42,6 +42,7 @@ const empty = {
   total: 0,
   summary: { open: 0, unassigned: 0, escalated: 0, resolved: 0 },
   agents: [],
+  availableAgents: 0,
   messages: [],
   events: [],
   orders: [],
@@ -195,6 +196,11 @@ export default function SupportPanel({
       {notice && (
         <div className="inventory-notice" role="status">
           {notice}
+        </div>
+      )}
+      {loaded && data.summary.unassigned > 0 && data.availableAgents === 0 && (
+        <div className="ops-preview support-assignment-warning" role="status">
+          {data.summary.unassigned} ticket{data.summary.unassigned === 1 ? " is" : "s are"} waiting because no available Support agent is registered. Add a user with the Support agent role in Manage users, then refresh the team.
         </div>
       )}
       <Modal title="Mailbox & team" open={settings} onClose={()=>setSettings(false)} wide>

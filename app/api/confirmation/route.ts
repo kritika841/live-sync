@@ -29,20 +29,28 @@ const candidateColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer
   o.customer_phone AS customerPhone, o.order_date AS orderDate, o.payment_method AS paymentMethod,
   o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus, c.id AS campaignId, c.name AS campaignName`;
 
-function serializeOrder(row: Record<string, unknown>, attempts: Record<string, unknown>[] = []) {
+function sourcePhone(row: Record<string, unknown>) {
   let raw: Record<string, unknown> = {};
   try { raw = JSON.parse(String(row.rawJson || "{}")); } catch { /* Keep malformed legacy payloads usable. */ }
   const others = raw.others && typeof raw.others === "object" ? raw.others as Record<string, unknown> : {};
+  const values = [row.customerPhone, raw.customer_phone_unmasked, raw.billing_phone, raw.shipping_phone, raw.billing_phone_number, raw.shipping_phone_number, raw.phone, others.billing_phone_number, others.shipping_phone_number, others.billing_phone, others.shipping_phone, others.phone].map(value => String(value || "").trim()).filter(Boolean);
+  const phone = completePhone(...values);
+  return {phone: phone || values[0] || "", phoneMasked: !phone && values.length > 0, raw};
+}
+
+function serializeOrder(row: Record<string, unknown>, attempts: Record<string, unknown>[] = []) {
+  const contact = sourcePhone(row);
   return {
     ...row,
     // Shiprocket has used both top-level and `others` contact fields across
     // report versions. Keep the stored value first, then accept every known
     // unmasked source; completePhone still rejects redacted values.
-    customerPhone: completePhone(row.customerPhone, raw.customer_phone_unmasked, raw.billing_phone, raw.shipping_phone, raw.billing_phone_number, raw.shipping_phone_number, raw.phone, others.billing_phone_number, others.shipping_phone_number, others.billing_phone, others.shipping_phone, others.phone),
+    customerPhone: contact.phone,
+    phoneMasked: contact.phoneMasked,
     products: JSON.parse(String(row.productsJson || "[]")),
     productsJson: undefined,
     rawJson: undefined,
-    tags: extractOrderTags(raw),
+    tags: extractOrderTags(contact.raw),
     attempts,
   };
 }
@@ -155,6 +163,22 @@ async function handlePOST(request: Request) {
       });
       if(updates.length) await runtime.DB.batch(updates);
       return Response.json({ok:true, updated:updates.length, next:rows.results.length===50 ? rows.results.at(-1)?.id : null});
+    }
+    if (action === "reveal_phone") {
+      const orderId = Number(body.orderId);
+      if (!Number.isSafeInteger(orderId) || orderId <= 0) throw new Error("Order is required");
+      const order = await runtime.DB.prepare(`SELECT id,channel_order_id AS "channelOrderId",customer_phone AS "customerPhone",raw_json AS "rawJson",channel_name AS "channelName" FROM orders WHERE id=?`).bind(orderId).first<Record<string, unknown>>();
+      if (!order) return Response.json({error:"Order not found"},{status:404});
+      let phone = sourcePhone(order).phone;
+      if (String(order.channelName || "").toLowerCase().includes("shopify")) {
+        const contact = (await shopifyOrderContacts(runtime, [String(order.channelOrderId)])).get(String(order.channelOrderId).replace(/^#/, ""));
+        const resolved = contact && completePhone(contact.shippingAddress?.phone, contact.phone, contact.billingAddress?.phone);
+        if (resolved) {
+          phone = resolved;
+          await runtime.DB.prepare("UPDATE orders SET customer_phone=?,raw_json=(raw_json::jsonb || jsonb_build_object('shopify_tags',?::jsonb))::text WHERE id=?").bind(phone, JSON.stringify(contact.tags), orderId).run();
+        }
+      }
+      return Response.json({customerPhone:phone,phoneMasked:!completePhone(phone) && Boolean(phone)});
     }
     if (action === "create_campaign") {
       const name = String(body.name || "").trim();

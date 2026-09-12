@@ -763,13 +763,14 @@ tbody tr:hover,.report-table tbody tr:hover,.report-table tbody tr.active { back
 .confirmation-order .confirmed-badge,.confirmation-order .manual-cancel-badge {position:sticky;right:0;z-index:2;background:var(--surface);padding:14px}
 .confirmation-actions button.confirmation-accept:hover {background:#527f71}.confirmation-actions button.confirmation-reject:hover {background:#a76f6f}
 /* Keep the call controls at the far edge while the order details scroll. */
-.confirmation-order {grid-template-columns:280px 320px 220px minmax(260px,1fr)}
+.confirmation-order {grid-template-columns:280px 240px 180px 220px minmax(260px,1fr)}
 .confirmation-actions {justify-content:flex-end;background:var(--surface);border-left:1px solid var(--line);box-shadow:-12px 0 18px -15px #02070d}
 .confirmation-actions button.confirmation-accept {background:#079b76;border-color:#08b98b;color:#fff;font-weight:750}
 .confirmation-actions button.confirmation-reject {background:#c93f48;border-color:#e95a63;color:#fff;font-weight:750}
 .confirmation-actions .confirmation-icon {border-color:#287f73;background:#124f49;color:#e2fff7}
 .confirmation-actions button.confirmation-accept:hover {background:#08b98b}.confirmation-actions button.confirmation-reject:hover {background:#e04b55}.confirmation-actions .confirmation-icon:hover {background:#196a60}
-@media(max-width:1150px){.confirmation-order{grid-template-columns:280px 320px 220px minmax(260px,1fr)}.confirmation-actions{justify-content:flex-end;border-top:0;padding-top:12px}}
+@media(max-width:1150px){.confirmation-order{grid-template-columns:280px 240px 180px 220px minmax(260px,1fr)}.confirmation-actions{justify-content:flex-end;border-top:0;padding-top:12px}}
+.confirmation-customer small{max-width:230px}.confirmation-phone{display:grid;align-content:center;gap:6px}.confirmation-phone>small{margin:0;color:var(--muted);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}.confirmation-phone>a,.confirmation-phone>button{margin:0;width:max-content;max-width:100%;padding:0;border:0;background:transparent;color:#6de0b5;font-size:12px;font-weight:750;text-align:left;overflow-wrap:anywhere}.confirmation-phone>button{cursor:pointer}.confirmation-phone>button span{display:block;margin-top:4px;color:var(--muted);font-size:9px;font-weight:650}.confirmation-phone>button:hover{color:#9cf4d3}.confirmation-phone>button:disabled{opacity:.6;cursor:wait}
 @media(prefers-reduced-motion:reduce){.campaign-row{transition:none}}
 .po-entry-table{overflow-x:auto;margin:18px 0}.po-entry-table table{min-width:950px}.po-entry-table td:first-child{min-width:180px}.po-entry-table td:nth-child(2){min-width:220px}.po-entry-table td input{max-width:none;width:100%;min-width:70px}
 

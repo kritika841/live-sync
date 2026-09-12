@@ -11,7 +11,7 @@ type ConfirmationOrder = {
   id: number; channelOrderId: string; customerName: string; customerPhone: string; customerCity: string;
   customerState: string; customerAddress: string; customerPincode: string; orderDate: string; status: string;
   paymentMethod: string; total: number; products: Array<{ name?: string; quantity?: number; sku?: string }>;
-  confirmationStatus: string; campaignName?: string; confirmedAt?: string; rejectedAt?: string; tags: string[]; attempts: Attempt[];
+  confirmationStatus: string; campaignName?: string; confirmedAt?: string; rejectedAt?: string; phoneMasked?: boolean; tags: string[]; attempts: Attempt[];
 };
 type Campaign = {
   id: string; name: string; description: string; position: number; isActive: boolean; autoAssign: boolean;
@@ -148,6 +148,22 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
     } catch(cause) {setError(cause instanceof Error ? cause.message : "Contact refresh failed");}
     finally {setBusy(false);}
   }
+  async function revealPhone(order: ConfirmationOrder) {
+    if (preview || busy) return;
+    setBusy(true); setError("");
+    try {
+      const result = await readJson<{customerPhone:string;phoneMasked:boolean}>(await fetch("/api/confirmation", {method:"POST",headers:{"content-type":"application/json","x-requested-with":"satmi-orders-dashboard"},body:JSON.stringify({action:"reveal_phone",orderId:order.id})}));
+      setData(current => {
+        const update = (orders: ConfirmationOrder[]) => orders.map(item => item.id === order.id ? {...item,customerPhone:result.customerPhone,phoneMasked:result.phoneMasked} : item);
+        return {...current,queue:update(current.queue),confirmed:update(current.confirmed),rejected:update(current.rejected),candidates:update(current.candidates)};
+      });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not look up the phone number"); }
+    finally {setBusy(false);}
+  }
+  function phoneColumn(order: ConfirmationOrder) {
+    const dialable = completePhone(order.customerPhone);
+    return <div className="confirmation-phone"><small>Phone</small>{dialable ? <a href={`tel:${dialable}`}>{dialable}</a> : order.customerPhone ? <button type="button" disabled={busy || preview} onClick={()=>void revealPhone(order)} title="Look up the full number in Shopify">{order.customerPhone}<span>Reveal</span></button> : <button type="button" disabled={busy || preview} onClick={()=>void revealPhone(order)}>Look up phone<span>Reveal</span></button>}</div>;
+  }
   function openAction(order: ConfirmationOrder, action: OrderAction) {
     setSelectedOrder(order); setOrderAction(action); setNote(""); setCallbackAt(""); setRejectionReason("customer_cancelled");
   }
@@ -232,7 +248,8 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMATION QUEUE</p><h2>High-RTO customer calls</h2><p>Orders are automatically assigned. Scheduled callbacks return when they are due.</p></div><span>{data.counts.approved} approved</span></header>
         {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => <div className="confirmation-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>{when(order.orderDate)} · {order.paymentMethod || "Payment unknown"} · ₹{Number(order.total || 0).toLocaleString("en-IN")}</small><p>{productSummary(order.products)}</p></div>
-          <div><strong>{order.customerName || "Customer"}</strong>{completePhone(order.customerPhone) ? <a href={`tel:${order.customerPhone}`}>{order.customerPhone}</a> : <small>Phone unavailable from source</small>}<small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
+          <div className="confirmation-customer"><strong>{order.customerName || "Customer"}</strong><small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
+          {phoneColumn(order)}
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{order.attempts.length}/3 recall attempts</small>{order.attempts.at(-1) && <small>Last: {order.attempts.at(-1)?.outcome} · {when(order.attempts.at(-1)?.createdAt)}</small>}</div>
           <div className="confirmation-actions">
             <div className="confirmation-primary-actions">
@@ -249,7 +266,8 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMED ORDERS</p><h2>Customer-approved orders</h2><p>Every order confirmed from the call queue is retained here.</p></div><span>{data.confirmed.length} approved</span></header>
         {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = [...order.attempts].reverse().find((attempt) => attempt.outcome === "confirmed"); return <div className="confirmation-order confirmed-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Confirmed {when(order.confirmedAt)}</small><p>{productSummary(order.products)}</p></div>
-          <div><strong>{order.customerName || "Customer"}</strong>{completePhone(order.customerPhone) ? <a href={`tel:${order.customerPhone}`}>{order.customerPhone}</a> : <small>Phone unavailable from source</small>}<small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
+          <div className="confirmation-customer"><strong>{order.customerName || "Customer"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
+          {phoneColumn(order)}
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{latest?.note || "No confirmation note"}</small></div>
           <div className="confirmed-badge">✓ Customer confirmed</div>
         </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No confirmed orders yet</h3><p>Approved orders will appear here as soon as a call is completed.</p></div>}
@@ -259,7 +277,8 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <header className="confirmation-header"><div><p className="eyebrow">REJECTED ORDERS</p><h2>Manual cancellation list</h2><p>These records are stored only in this dashboard. Shiprocket is never cancelled automatically.</p></div><span>{data.rejected.length} to review</span></header>
         {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order rejected-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Rejected {when(order.rejectedAt)}</small><p>{productSummary(order.products)}</p></div>
-          <div><strong>{order.customerName || "Customer"}</strong>{completePhone(order.customerPhone) ? <a href={`tel:${order.customerPhone}`}>{order.customerPhone}</a> : <small>Phone unavailable from source</small>}<small>{order.customerCity}, {order.customerState}</small></div>
+          <div className="confirmation-customer"><strong>{order.customerName || "Customer"}</strong><small>{order.customerCity}, {order.customerState}</small></div>
+          {phoneColumn(order)}
           <div className="confirmation-meta"><span>{latest?.rejectionReason?.replaceAll("_", " ") || "Rejected"}</span><small>{latest?.note || "No note"}</small></div>
           <div className="manual-cancel-badge">Cancel manually in Shiprocket</div>
         </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No rejected orders</h3><p>Customer cancellations and rejected confirmations will be retained here.</p></div>}

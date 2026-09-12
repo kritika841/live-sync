@@ -24,4 +24,5 @@ try{
  const recent=await db.prepare("SELECT value FROM sync_state WHERE key='fast_sync_checked_at'").first<{value:string}>();
  if(!recent?.value || Date.now()-Date.parse(recent.value)>600000)console.log('Recent order import:',JSON.stringify(await syncRecentOrders(getRuntimeEnv())));
  else console.log('Recent orders already imported; scheduled reconciliation will continue');
+ if(process.env.VALIDATE_SHIPROCKET_ON_DEPLOY==='true')await import('./validate-shiprocket');
 }catch(error){console.error('Production initialization failed:',error instanceof Error?error.message:'Unknown error');process.exitCode=1;}

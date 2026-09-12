@@ -1,3 +1,5 @@
+import {completePhone} from "../../../lib/contact";
+import {shopifyOrderContacts} from "../../../lib/shopify";
 import { errorResponse } from "../../../lib/http";
 import { ACTIONABLE_STATUS_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
@@ -32,6 +34,7 @@ function serializeOrder(row: Record<string, unknown>, attempts: Record<string, u
   try { raw = JSON.parse(String(row.rawJson || "{}")); } catch { /* Keep malformed legacy payloads usable. */ }
   return {
     ...row,
+    customerPhone: completePhone(row.customerPhone, raw.customer_phone_unmasked, raw.billing_phone, raw.shipping_phone),
     products: JSON.parse(String(row.productsJson || "[]")),
     productsJson: undefined,
     rawJson: undefined,
@@ -63,18 +66,17 @@ async function handleGET(request: Request) {
         c.is_active AS isActive, c.auto_assign AS autoAssign, COUNT(ca.order_id) AS orderCount
         FROM campaigns c LEFT JOIN campaign_assignments ca ON ca.campaign_id=c.id
         GROUP BY c.id ORDER BY c.position, c.created_at`).all<Record<string, unknown>>(),
-      runtime.DB.prepare(`SELECT ${candidateColumns}
+      url.searchParams.get("candidates") === "true" ? runtime.DB.prepare(`SELECT ${candidateColumns}
         FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
         WHERE ${ACTIONABLE_STATUS_SQL} AND o.confirmation_status NOT IN ('confirmed','rejected')
-        ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC`).all<Record<string, unknown>>(),
+        ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC`).all<Record<string, unknown>>() : Promise.resolve({results:[] as Record<string,unknown>[]}),
     ]);
     const serializedCandidates = candidates.results.map((row) => serializeCandidate(row));
     const availableTags = [...new Map(serializedCandidates.flatMap((order) => order.tags).map((tag) => [tag.trim().toLowerCase(), tag.trim()])).values()]
       .filter(Boolean).sort((left, right) => left.localeCompare(right));
     return Response.json({
       campaigns: campaigns.results.map((row) => ({ ...row, criteria: JSON.parse(String(row.criteriaJson || "{}")), criteriaJson: undefined })),
-      candidates: serializedCandidates,
-      availableTags,
+      ...(url.searchParams.get("candidates") === "true" ? {candidates: serializedCandidates,availableTags} : {}),
     });
   }
 
@@ -137,6 +139,19 @@ async function handlePOST(request: Request) {
   const action = String(body.action || "");
   const now = new Date().toISOString();
   try {
+    if (action === "refresh_contacts") {
+      const after = Math.max(0, Number(body.after) || 0);
+      const rows = await runtime.DB.prepare(`SELECT id,channel_order_id AS "channelOrderId",customer_phone AS "customerPhone" FROM orders WHERE id>? AND LOWER(channel_name) LIKE '%shopify%' ORDER BY id LIMIT 50`).bind(after).all<{id:number;channelOrderId:string;customerPhone:string}>();
+      const contacts = await shopifyOrderContacts(runtime, rows.results.map(row => row.channelOrderId));
+      const updates = rows.results.flatMap(row => {
+        const contact = contacts.get(row.channelOrderId.replace(/^#/, ""));
+        if (!contact) return [];
+        const phone = completePhone(contact.shippingAddress?.phone, contact.phone, contact.billingAddress?.phone, row.customerPhone);
+        return [runtime.DB.prepare(`UPDATE orders SET customer_phone=?, raw_json=(raw_json::jsonb || jsonb_build_object('shopify_tags',?::jsonb))::text WHERE id=?`).bind(phone,JSON.stringify(contact.tags),row.id)];
+      });
+      if(updates.length) await runtime.DB.batch(updates);
+      return Response.json({ok:true, updated:updates.length, next:rows.results.length===50 ? rows.results.at(-1)?.id : null});
+    }
     if (action === "create_campaign") {
       const name = String(body.name || "").trim();
       const description = String(body.description || "").trim();

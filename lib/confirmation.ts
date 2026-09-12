@@ -26,7 +26,7 @@ type RoutingOrder = {
 const normalized = (value: unknown) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replaceAll("-", " ");
 
 export function extractOrderTags(raw: Record<string, unknown>) {
-  const values = [raw.order_tag, raw.sr_tags, raw.tags].flatMap((value) => Array.isArray(value) ? value : String(value ?? "").split(","));
+  const values = [raw.shopify_tags, raw.order_tag, raw.sr_tags, raw.tags].flatMap((value) => Array.isArray(value) ? value : String(value ?? "").split(","));
   const tags = values.map((value) => String(value ?? "").trim()).filter(Boolean);
   return [...new Map(tags.map((tag) => [normalized(tag), tag])).values()];
 }

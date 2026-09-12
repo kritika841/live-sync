@@ -35,7 +35,7 @@ export async function inventoryData() {
   const db = await operationsDb();
   return db.transaction(async (sql) => {
     const components =
-      await sql`SELECT c.*,COALESCE((SELECT SUM(quantity_delta) FROM component_ledger WHERE component_id=c.id),0) physical, COALESCE((SELECT SUM(required) FROM inventory_order_allocations WHERE component_id=c.id AND state='reserved'),0)+COALESCE((SELECT SUM(allocated_quantity-consumed_quantity) FROM order_requirements WHERE component_id=c.id),0) reserved, COALESCE((SELECT SUM((l.ordered_quantity-l.received_quantity-l.rejected_quantity)*l.conversion_factor) FROM purchase_order_lines l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.component_id=c.id AND p.status IN ('ordered','partially_received')),0) incoming FROM inventory_components c ORDER BY c.name`;
+      await sql`SELECT c.*,COALESCE((SELECT SUM(quantity_delta) FROM component_ledger WHERE component_id=c.id),0) physical, COALESCE((SELECT SUM(required) FROM inventory_order_allocations WHERE component_id=c.id AND state='reserved'),0)+COALESCE((SELECT SUM(allocated_quantity-consumed_quantity) FROM order_requirements WHERE component_id=c.id),0) reserved, COALESCE((SELECT SUM((l.ordered_quantity-l.received_quantity)*l.conversion_factor) FROM purchase_order_lines l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.component_id=c.id AND p.status IN ('ordered','partially_received')),0) incoming FROM inventory_components c ORDER BY c.name`;
     const products =
       await sql`SELECT p.*, (SELECT id FROM recipe_versions WHERE product_id=p.id AND active ORDER BY version DESC LIMIT 1) recipe_id FROM inventory_products p ORDER BY title`;
     const recipes =
@@ -108,6 +108,7 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
       if (!c) throw new HttpError(404, "Component not found");
       const [r] =
         await sql`SELECT COALESCE(SUM(quantity_delta),0) qty FROM component_ledger WHERE component_id=${component}`;
+      if (target > Number(r.qty)) throw new HttpError(400,"To add stock, create a PO and receive it against an uploaded invoice. Adjustments can only reduce stock.");
       if (target < Number(r.qty) - (await available(sql, component)))
         throw new HttpError(409, "Cannot reduce stock below reserved quantity");
       await ledger(
@@ -121,15 +122,19 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         reason,
       );
     } else if (action === "vendor") {
-      await sql`INSERT INTO suppliers(id,name,email,phone,tax_id,created_at,updated_at) VALUES(${id},${required(b.name, "Vendor")},${String(b.email || "")},${String(b.phone || "")},${String(b.taxId || "")},${now},${now}) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,phone=EXCLUDED.phone,tax_id=EXCLUDED.tax_id,updated_at=EXCLUDED.updated_at`;
+      await sql`INSERT INTO suppliers(id,name,email,phone,tax_id,address,bank_details,created_at,updated_at) VALUES(${id},${required(b.name, "Vendor")},${String(b.email || "")},${String(b.phone || "")},${String(b.taxId || "")},${required(b.address, "Address")},${required(b.bankDetails, "Bank details")},${now},${now}) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,phone=EXCLUDED.phone,tax_id=EXCLUDED.tax_id,address=EXCLUDED.address,bank_details=EXCLUDED.bank_details,updated_at=EXCLUDED.updated_at`;
     } else if (action === "po") {
-      await sql`INSERT INTO purchase_orders(id,po_number,supplier_id,status,order_date,expected_date,vendor_order_number,notes,created_by,created_at,updated_at) VALUES(${id},${required(b.number, "PO number")},${required(b.vendorId, "Vendor")},'ordered',${now.slice(0, 10)},${String(b.expected || "")},${String(b.vendorNumber || "")},${String(b.notes || "")},${u.email},${now},${now})`;
+      const details = b.details && typeof b.details === "object" ? b.details as Record<string,unknown> : {};
+      for(const value of Object.values(details)) if(typeof value!=="string" || value.length>8000) throw new HttpError(400,"PO fields must be text up to 8000 characters");
+
+      await sql`INSERT INTO purchase_orders(id,po_number,supplier_id,status,order_date,expected_date,vendor_order_number,notes,created_by,created_at,updated_at) VALUES(${id},${required(b.number, "PO number")},${required(b.vendorId, "Vendor")},'ordered',${String(b.date || now.slice(0, 10))},${String(b.expected || "")},${String(b.vendorNumber || "")},${String(b.notes || "")},${u.email},${now},${now})`;
+      await sql`UPDATE purchase_orders SET document_json=${JSON.stringify(details)} WHERE id=${id}`;
       for (const l of itemList(b.lines)) {
         const [c] =
           await sql`SELECT * FROM inventory_components WHERE id=${required(l.componentId, "Component")}`;
         if (!c) throw new HttpError(404, "Component not found");
         const factor = conversion(String(l.unit), c.unit);
-        await sql`INSERT INTO purchase_order_lines(id,purchase_order_id,component_id,description,ordered_quantity,unit_cost,purchase_unit,conversion_factor,created_at) VALUES(${randomUUID()},${id},${c.id},${c.name},${quantity(l.quantity)},${quantity(l.cost, "Cost", true)},${String(l.unit)},${factor},${now})`;
+        await sql`INSERT INTO purchase_order_lines(id,purchase_order_id,component_id,description,ordered_quantity,unit_cost,tax_rate,purchase_unit,conversion_factor,created_at) VALUES(${randomUUID()},${id},${c.id},${String(l.description || c.name)},${quantity(l.quantity)},${quantity(l.cost, "Cost", true)},${quantity(l.gst || 0,"GST",true)},${String(l.unit)},${factor},${now})`;
       }
     } else if (action === "receive") {
       const key = required(b.requestKey, "Receipt request key");
@@ -140,7 +145,10 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         await sql`SELECT * FROM purchase_orders WHERE id=${required(b.poId, "PO")} FOR UPDATE`;
       if (!p || !["ordered", "partially_received"].includes(p.status))
         throw new HttpError(409, "This PO is not open for receiving");
-      await sql`INSERT INTO goods_receipts(id,receipt_number,purchase_order_id,received_at,status,notes,created_by,created_at,posted_at,request_key) VALUES(${id},${"GR-" + id.slice(0, 8).toUpperCase()},${p.id},${now},'posted',${String(b.notes || "")},${u.email},${now},${now},${key})`;
+      const invoiceId = required(b.invoiceId, "Invoice — upload and link an invoice before receiving stock");
+      const [invoice] = await sql`SELECT * FROM supplier_invoices WHERE id=${invoiceId} AND purchase_order_id=${p.id} AND status<>'rejected' AND storage_key<>'' FOR UPDATE`;
+      if (!invoice) throw new HttpError(400, "Select an uploaded invoice belonging to this PO");
+      await sql`INSERT INTO goods_receipts(id,receipt_number,purchase_order_id,received_at,status,notes,created_by,created_at,posted_at,request_key,supplier_invoice_id) VALUES(${id},${"GR-" + id.slice(0, 8).toUpperCase()},${p.id},${now},'posted',${String(b.notes || "")},${u.email},${now},${now},${key},${invoiceId})`;
       let count = 0;
       const seen = new Set();
       for (const l of itemList(b.lines)) {
@@ -157,11 +165,13 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
           !line ||
           a + r >
             Number(line.ordered_quantity) -
-              Number(line.received_quantity) -
-              Number(line.rejected_quantity) +
+              Number(line.received_quantity) +
               1e-9
         )
           throw new HttpError(409, "Receipt exceeds the remaining PO quantity");
+        const [invoiced] = await sql`SELECT COALESCE(SUM(quantity),0) quantity FROM supplier_invoice_lines WHERE supplier_invoice_id=${invoiceId} AND purchase_order_line_id=${line.id}`;
+        const [posted] = await sql`SELECT COALESCE(SUM(l.accepted_quantity+l.rejected_quantity),0) quantity FROM goods_receipt_lines l JOIN goods_receipts r ON r.id=l.goods_receipt_id WHERE r.supplier_invoice_id=${invoiceId} AND l.purchase_order_line_id=${line.id} AND r.status='posted'`;
+        if (a+r > Number(invoiced.quantity)-Number(posted.quantity)+1e-6) throw new HttpError(409, "Receipt exceeds this invoice's unreceived quantity. Review and link its line items first.");
         await sql`INSERT INTO goods_receipt_lines(id,goods_receipt_id,purchase_order_line_id,component_id,accepted_quantity,rejected_quantity,conversion_factor) VALUES(${randomUUID()},${id},${line.id},${line.component_id},${a},${r},${line.conversion_factor})`;
         await sql`UPDATE purchase_order_lines SET received_quantity=received_quantity+${a},rejected_quantity=rejected_quantity+${r} WHERE id=${line.id}`;
         if (a)
@@ -176,7 +186,8 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
           );
       }
       if (!count) throw new HttpError(400, "Enter a received quantity");
-      await sql`UPDATE purchase_orders SET status=CASE WHEN EXISTS(SELECT 1 FROM purchase_order_lines WHERE purchase_order_id=${p.id} AND ordered_quantity>received_quantity+rejected_quantity+0.000001) THEN 'partially_received' ELSE 'received' END,updated_at=${now} WHERE id=${p.id}`;
+      await recheckInvoice(sql,invoiceId);
+      await sql`UPDATE purchase_orders SET status=CASE WHEN EXISTS(SELECT 1 FROM purchase_order_lines WHERE purchase_order_id=${p.id} AND ordered_quantity>received_quantity+0.000001) THEN 'partially_received' ELSE 'received' END,updated_at=${now} WHERE id=${p.id}`;
     } else if (action === "reverse_receipt") {
       const reason = required(b.reason, "Reversal reason");
       const [r] =
@@ -373,7 +384,15 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         if(result.status!=='matched')throw new HttpError(409,'This invoice still has quantity, receiving or price differences. Recheck it to see the current comparison.');
       }else await sql`UPDATE supplier_invoices SET status=${String(b.status)},updated_at=${now} WHERE id=${id}`;
     } else throw new HttpError(400, "Unknown inventory action");
-    await audit(sql, u, action, id, b);
+    const auditDetails = {...b};
+    if (Array.isArray(b.lines)) auditDetails.lines = await Promise.all(b.lines.map(async (line: Record<string,unknown>) => {
+      const [component] = line.lineId
+        ? await sql`SELECT c.name,c.unit FROM purchase_order_lines l JOIN inventory_components c ON c.id=l.component_id WHERE l.id=${String(line.lineId)}`
+        : await sql`SELECT name,unit FROM inventory_components WHERE id=${String(line.componentId || "")}`;
+      return {...line, componentName: component?.name || "", stockUnit: component?.unit || ""};
+    }));
+    if (action === "vendor") delete auditDetails.bankDetails;
+    await audit(sql, u, action, id, auditDetails);
     return { id, ok: true };
   });
 }

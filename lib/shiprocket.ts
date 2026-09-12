@@ -1,3 +1,4 @@
+import {completePhone} from "./contact";
 import { reconcileInventorySafely } from "./operations/reconcile";
 import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type RuntimeEnv } from "./database";
 import { routeConfirmationOrders } from "./confirmation";
@@ -165,7 +166,7 @@ function orderSnapshot(order: ShiprocketOrder) {
   return {
     id: numberValue(order.id), channelOrderId: stringValue(order.channel_order_id), channelId: numberValue(order.channel_id),
     channelName: stringValue(order.channel_name), customerName: stringValue(order.customer_name),
-    customerEmail: stringValue(order.customer_email), customerPhone: stringValue(order.customer_phone_unmasked || others.billing_phone_number || order.customer_phone || others.billing_phone),
+    customerEmail: stringValue(order.customer_email), customerPhone: completePhone(order.customer_phone_unmasked, others.billing_phone_number, order.customer_phone, others.billing_phone, order.shipping_phone, order.billing_phone),
     customerCity: stringValue(order.customer_city || order.billing_city || order.shipping_city),
     customerState: stringValue(order.customer_state || order.billing_state || order.shipping_state),
     orderDate: normalizeShiprocketDate(order.channel_created_at || order.order_date || order.created_at),
@@ -363,7 +364,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         ON CONFLICT(id) DO UPDATE SET
           channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
           channel_name=excluded.channel_name, customer_name=excluded.customer_name,
-          customer_email=excluded.customer_email, customer_phone=excluded.customer_phone,
+          customer_email=excluded.customer_email, customer_phone=CASE WHEN excluded.customer_phone<>'' THEN excluded.customer_phone ELSE orders.customer_phone END,
           customer_city=excluded.customer_city, customer_state=excluded.customer_state,
           order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
           delivered_at=COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
@@ -387,7 +388,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
           total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
           pickup_location=excluded.pickup_location, awb=excluded.awb,
           courier=excluded.courier, shipment_id=excluded.shipment_id,
-          products_json=excluded.products_json, raw_json=excluded.raw_json, synced_at=excluded.synced_at
+          products_json=excluded.products_json, raw_json=(excluded.raw_json::jsonb || CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text, synced_at=excluded.synced_at
       `).bind(
         value.id, value.channelOrderId, value.channelId, value.channelName, value.customerName,
         value.customerEmail, value.customerPhone, value.customerCity, value.customerState,

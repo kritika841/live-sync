@@ -6,18 +6,7 @@ import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 
 export const dynamic = "force-dynamic";
 
-const deliveredSql = "UPPER(TRIM(status)) IN ('DELIVERED', 'DELIVERED TO CUSTOMER')";
-const rtoSql = "(UPPER(TRIM(status)) LIKE 'RTO%' OR UPPER(TRIM(status)) LIKE '%RETURN TO ORIGIN%')";
-const ndrSql = "(UPPER(TRIM(status)) IN ('UNDELIVERED', 'NDR', 'NDR PENDING') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%')";
-const cancelledSql = "UPPER(TRIM(status)) IN ('CANCELED', 'CANCELLED', 'ORDER CANCELED', 'ORDER CANCELLED')";
-const nonShippedSql = `UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED', 'PICKUP SCHEDULED', 'MANIFEST GENERATED', 'OUT FOR PICKUP', 'PICKUP EXCEPTION')`;
-const inTransitSql = `UPPER(TRIM(status)) IN ('SHIPPED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'IN TRANSIT-AT DESTINATION HUB', 'REACHED AT DESTINATION HUB', 'PICKED UP', 'MISROUTED', 'UNTRACEABLE', 'OUT FOR DELIVERY')`;
-const riskValueSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' '))";
-const highRiskSql = `${riskValueSql} IN ('high', 'very high')`;
-const lowRiskSql = `${riskValueSql} = 'low'`;
-const closedSql = `(${deliveredSql} OR ${rtoSql} OR ${ndrSql})`;
-const openPopulationSql = `(${deliveredSql} OR ${inTransitSql})`;
-const shippedHistorySql = `(shipped_at != '' OR ${closedSql} OR ${inTransitSql})`;
+import {deliveredSql,rtoSql,ndrSql,cancelledSql,nonShippedSql,inTransitSql,highRiskSql,lowRiskSql,closedSql,openPopulationSql,shippedHistorySql} from "../../../lib/analytics-status";
 const isoDate = /^\d{4}-\d{2}-\d{2}$/;
 const indiaDateSql = (column: string) => `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
 const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), created_at)");
@@ -193,7 +182,9 @@ async function handleGET(request: Request) {
   ]);
   const syncState = Object.fromEntries(options[2].results.map((row) => [String(row.key), String(row.value || "")]));
 
+  const statuses = await runtime.DB.prepare(`SELECT UPPER(TRIM(status)) AS status,COUNT(*) AS count, ${closedSql} AS attempted, ${openPopulationSql} AS shipped FROM orders WHERE ${where} GROUP BY UPPER(TRIM(status)) ORDER BY COUNT(*) DESC`).bind(...values).all<{status:string;count:number;attempted:boolean;shipped:boolean}>();
   return Response.json({
+    statusBreakdown: statuses.results,
     metrics: {
       total: metric(total, total), prepaid: metric(summary?.prepaid, total), cod: metric(summary?.cod, total),
       delivered: metric(summary?.delivered, total), deliveryRate: metric(summary?.delivered, closed),

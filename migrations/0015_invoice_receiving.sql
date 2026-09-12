@@ -1,0 +1,3 @@
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT '';
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bank_details TEXT NOT NULL DEFAULT '';
+ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS supplier_invoice_id TEXT REFERENCES supplier_invoices(id);

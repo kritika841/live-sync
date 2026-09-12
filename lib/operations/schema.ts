@@ -24,7 +24,7 @@ export async function operationsDb() {
   await ensureSchema(db);
   ready ??= (async()=>{
     const exists = await db.prepare("SELECT to_regclass('public.operations_schema_versions') name").first<{name:string}>();
-    if(exists?.name && await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0014_documents_security'").first())return;
+    if(exists?.name && await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0016_po_documents_performance'").first())return;
     await db.transaction(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(421995)`;
       await sql`CREATE TABLE IF NOT EXISTS operations_schema_versions (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
@@ -46,6 +46,13 @@ export async function operationsDb() {
         await sql.unsafe(DOCUMENTS_MIGRATION);
         await sql`INSERT INTO operations_schema_versions(version) VALUES('0014_documents_security')`;
       }
+      const [receivingVersion] = await sql`SELECT version FROM operations_schema_versions WHERE version='0015_invoice_receiving'`;
+      if (!receivingVersion) {
+        await sql.unsafe(RECEIVING_MIGRATION);
+        await sql`INSERT INTO operations_schema_versions(version) VALUES('0015_invoice_receiving')`;
+      }
+      const [performanceVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0016_po_documents_performance'`;
+      if(!performanceVersion){await sql.unsafe(PO_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0016_po_documents_performance')`;}
     });
   })()
     .catch((e) => {
@@ -57,3 +64,15 @@ export async function operationsDb() {
 }
 
 const DOCUMENTS_MIGRATION = "CREATE TABLE IF NOT EXISTS procurement_documents (\n id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('po','invoice')), entity_id TEXT NOT NULL,\n storage_key TEXT NOT NULL, file_hash TEXT NOT NULL UNIQUE, filename TEXT NOT NULL,\n extracted_text TEXT NOT NULL, review_json JSONB NOT NULL, created_by TEXT NOT NULL,\n created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\nALTER TABLE procurement_documents ENABLE ROW LEVEL SECURITY;\nDO $$ DECLARE t TEXT; r TEXT; BEGIN\n FOREACH t IN ARRAY ARRAY['procurement_documents','operations_schema_versions','orders','sync_state','webhook_events','activity_logs','sync_reports','sync_report_items','campaigns','campaign_assignments','confirmation_attempts'] LOOP\n  IF to_regclass('public.' || t) IS NOT NULL THEN\n   EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',t);\n   FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP\n    IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname=r) THEN EXECUTE format('REVOKE ALL ON TABLE public.%I FROM %I',t,r); END IF;\n   END LOOP;\n  END IF;\n END LOOP;\nEND $$;\n";
+
+const RECEIVING_MIGRATION = `ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT '';
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bank_details TEXT NOT NULL DEFAULT '';
+ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS supplier_invoice_id TEXT REFERENCES supplier_invoices(id);
+`;
+
+const PO_PERFORMANCE_MIGRATION = `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS document_json TEXT NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders (UPPER(TRIM(status)), (COALESCE(NULLIF(order_date,''),created_at)) DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_confirmation_date ON orders (confirmation_status,confirmed_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_confirmation_attempt_order ON confirmation_attempts (order_id,attempt_number,id);
+CREATE INDEX IF NOT EXISTS idx_assignments_campaign ON campaign_assignments (campaign_id,position,order_id);
+`;

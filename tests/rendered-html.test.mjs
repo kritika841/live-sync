@@ -55,9 +55,9 @@ test("includes live analytics and today's out-for-delivery tracking", async () =
   assert.match(dashboard, />Analytics</);
   assert.match(dashboard, />Today’s OFD</);
   assert.match(analytics, /Delivery % by courier/);
-  assert.match(analytics, /Delivered ÷ \(Delivered \+ RTO \+ Undelivered\) × 100/);
-  assert.match(analytics, /Delivered ÷ \(Delivered \+ In transit\) × 100/);
-  assert.match(analytics, /Undelivered attempts excluded/);
+  assert.match(analytics, /Delivered ÷ \(Delivered \+ RTO \+ Undelivered \+ OFD\) × 100/);
+  assert.match(analytics, /Delivered ÷ \(All shipped statuses\) × 100/);
+  assert.match(analytics, /Includes RTO, undelivered and lost/);
   assert.match(analytics, /NDR reasons/);
   assert.match(analytics, /Previously undelivered/);
   assert.match(analytics, /1st recorded OFD day/);
@@ -133,7 +133,7 @@ test("includes the auditable inventory foundation without embedded Shopify secre
   ]);
   assert.match(dashboard, />Inventory</);
   assert.match(panel, /Physical/);
-  assert.match(panel, /reason is required/i);
+  assert.match(panel, /require a reason/i);
   assert.match(panel, /Sync Shopify products/);
   assert.match(api, /mutateInventory/);
   assert.match(api, /errorResponse/);

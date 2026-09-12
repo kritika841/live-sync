@@ -1,8 +1,9 @@
 "use client";
 
+import {completePhone} from "../lib/contact";
 import { Modal } from "./Modal";
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, GripVertical, MoreHorizontal, Search, UsersRound } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { PhoneCall, PhoneMissed, CheckCircle2, GripVertical, MoreHorizontal, Search, UsersRound } from "lucide-react";
 import { readJson } from "../lib/http";
 
 type Attempt = { attemptNumber: number; outcome: string; note: string; rejectionReason?: string; nextActionAt?: string; createdAt: string };
@@ -56,30 +57,44 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
   const [autoAssign, setAutoAssign] = useState(false);
   const [candidateSearch, setCandidateSearch] = useState("");
   const [selectedCandidates, setSelectedCandidates] = useState<Set<number>>(new Set());
+  const campaignElements = useRef(new Map<string, HTMLDivElement>());
+  const campaignPositions = useRef(new Map<string, number>());
+  const dragOriginal = useRef<Campaign[]>([]);
   const [draggedCampaignId, setDraggedCampaignId] = useState("");
   const [openCampaignMenu, setOpenCampaignMenu] = useState("");
-  const [openOrderMenu, setOpenOrderMenu] = useState<number | null>(null);
   const [confirmationSearch, setConfirmationSearch] = useState("");
   const loadAbort = useRef<AbortController | null>(null);
+  useLayoutEffect(() => {
+    const next = new Map<string, number>();
+    campaignElements.current.forEach((element,id) => {
+      const top=element.offsetTop; next.set(id,top);
+      const previous=campaignPositions.current.get(id);
+      if(previous !== undefined && previous !== top && id !== draggedCampaignId && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) element.animate([{transform:`translateY(${previous-top}px)`},{transform:"translateY(0)"}],{duration:180,easing:"ease-out"});
+    });
+    campaignPositions.current=next;
+  },[data.campaigns,draggedCampaignId]);
+
 
   const load = useCallback(async (quiet = false) => {
-    if (loadAbort.current) return;
+    if (loadAbort.current || (quiet && document.hidden)) return;
     const controller = new AbortController();
     loadAbort.current = controller;
     if (!quiet) setLoading(true);
     try {
       const params = new URLSearchParams({ section, mode });
-      const response = await fetch(`/api/confirmation?${params}`, { cache: "no-store", signal: controller.signal });
+      if (section === "campaigns" && createOpen) params.set("candidates","true");
+      const response = await fetch(`/api/confirmation?${params}`, { cache: "no-store", signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]) });
       const payload = await readJson<Partial<ConfirmationData>>(response);
+      if(controller.signal.aborted) return;
       setData((current) => ({ ...current, ...payload, counts: payload.counts ? { ...current.counts, ...payload.counts } : current.counts }));
       setError("");
     } catch (cause) {
       if (!controller.signal.aborted && !quiet) setError(cause instanceof Error ? cause.message : "Could not load confirmations");
     } finally {
       if (loadAbort.current === controller) loadAbort.current = null;
-      if (!quiet) setLoading(false);
+      if (!controller.signal.aborted && !quiet) setLoading(false);
     }
-  }, [mode, section]);
+  }, [mode, section, createOpen]);
 
   useEffect(() => {
     if (!active || preview) return;
@@ -120,6 +135,19 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
     }
   }
 
+  async function refreshContacts() {
+    setBusy(true); setError("");
+    try {
+      let after=0;
+      do {
+        const payload=await readJson<{next:number|null}>(await fetch("/api/confirmation",{method:"POST",headers:{"content-type":"application/json","x-requested-with":"satmi-orders-dashboard"},body:JSON.stringify({action:"refresh_contacts",after})}));
+        if(!payload.next) break;
+        after=payload.next;
+      } while(after > 0);
+      await load(true);
+    } catch(cause) {setError(cause instanceof Error ? cause.message : "Contact refresh failed");}
+    finally {setBusy(false);}
+  }
   function openAction(order: ConfirmationOrder, action: OrderAction) {
     setSelectedOrder(order); setOrderAction(action); setNote(""); setCallbackAt(""); setRejectionReason("customer_cancelled");
   }
@@ -127,7 +155,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
   async function submitOrderAction(event: FormEvent) {
     event.preventDefault();
     if (!selectedOrder) return;
-    const complete = await post({ action: orderAction, orderId: selectedOrder.id, note, callbackAt, rejectionReason });
+    const complete = await post({ action: orderAction, orderId: selectedOrder.id, note, callbackAt: callbackAt ? new Date(callbackAt).toISOString() : "", rejectionReason });
     if (complete) setSelectedOrder(null);
   }
 
@@ -146,17 +174,24 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
     await post({ action: "reorder_campaigns", campaignIds: next.map((campaign) => campaign.id) });
   }
 
-  async function dropCampaign(targetCampaignId: string) {
-    if (!draggedCampaignId || draggedCampaignId === targetCampaignId) return setDraggedCampaignId("");
-    const next = [...data.campaigns];
-    const from = next.findIndex((campaign) => campaign.id === draggedCampaignId);
-    const to = next.findIndex((campaign) => campaign.id === targetCampaignId);
-    if (from < 0 || to < 0) return setDraggedCampaignId("");
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setData((current) => ({ ...current, campaigns: next }));
+  function previewCampaign(targetId: string) {
+    if (!draggedCampaignId || draggedCampaignId === targetId) return;
+    setData(current => {
+      const next = [...current.campaigns];
+      const from = next.findIndex(c => c.id === draggedCampaignId), to = next.findIndex(c => c.id === targetId);
+      if (from < 0 || to < 0) return current;
+      const [moved] = next.splice(from, 1); next.splice(to, 0, moved);
+      return {...current, campaigns: next};
+    });
+  }
+  async function dropCampaign() {
+    if (!draggedCampaignId) return;
+    const original = dragOriginal.current;
+    dragOriginal.current = [];
     setDraggedCampaignId("");
-    await post({ action: "reorder_campaigns", campaignIds: next.map((campaign) => campaign.id) });
+    if (!await post({action: "reorder_campaigns", campaignIds: data.campaigns.map(c => c.id)})) {
+      setData(current => ({...current, campaigns: original}));
+    }
   }
 
   const candidates = (() => {
@@ -188,7 +223,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <button className={mode === "rejected" ? "active rejected" : ""} onClick={() => setMode("rejected")}><strong>Rejected <b>{data.counts.rejected}</b></strong></button>
       </div>}
 
-      {section === "confirmation" && <label className="confirmation-contact-filter"><Search size={16}/><input type="search" value={confirmationSearch} onChange={(event) => setConfirmationSearch(event.target.value)} placeholder="Filter by customer, contact number, order, city or state"/><span>{confirmationOrders.length} shown</span></label>}
+      {section === "confirmation" && <div className="confirmation-contact-toolbar"><button disabled={busy || preview} onClick={()=>void refreshContacts()}>{busy ? "Working…" : "Refresh Shopify phones & tags"}</button><label className="confirmation-contact-filter"><Search size={16}/><input type="search" value={confirmationSearch} onChange={(event) => setConfirmationSearch(event.target.value)} placeholder="Filter by customer, contact number, order, city or state"/><span>{confirmationOrders.length} shown</span></label></div>}
 
       {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}
       {loading ? <div className="confirmation-card confirmation-loading"><i className="loader"/><span>Loading confirmation workspace…</span></div> : null}
@@ -197,29 +232,24 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMATION QUEUE</p><h2>High-RTO customer calls</h2><p>Orders are automatically assigned. Scheduled callbacks return when they are due.</p></div><span>{data.counts.approved} approved</span></header>
         {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => <div className="confirmation-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>{when(order.orderDate)} · {order.paymentMethod || "Payment unknown"} · ₹{Number(order.total || 0).toLocaleString("en-IN")}</small><p>{productSummary(order.products)}</p></div>
-          <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
+          <div><strong>{order.customerName || "Customer"}</strong>{completePhone(order.customerPhone) ? <a href={`tel:${order.customerPhone}`}>{order.customerPhone}</a> : <small>Phone unavailable from source</small>}<small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{order.attempts.length}/3 recall attempts</small>{order.attempts.at(-1) && <small>Last: {order.attempts.at(-1)?.outcome} · {when(order.attempts.at(-1)?.createdAt)}</small>}</div>
           <div className="confirmation-actions">
             <div className="confirmation-primary-actions">
               <button className="confirmation-accept" onClick={() => openAction(order, "confirm")}>Accept</button>
               <button className="confirmation-reject" onClick={() => openAction(order, "reject")}>Reject</button>
             </div>
-            <div className="confirmation-more-wrap">
-              <button className="confirmation-more" type="button" aria-label={`More actions for order ${order.channelOrderId}`} aria-expanded={openOrderMenu === order.id} onClick={() => setOpenOrderMenu((current) => current === order.id ? null : order.id)}><MoreHorizontal size={18}/></button>
-              {openOrderMenu === order.id && <div className="confirmation-action-menu">
-                <button type="button" onClick={() => { setOpenOrderMenu(null); openAction(order, "callback"); }}>Callback</button>
-                <button type="button" onClick={() => { setOpenOrderMenu(null); openAction(order, "unreachable"); }}>No answer</button>
-              </div>}
-            </div>
+            <button className="confirmation-icon" title="Schedule callback" aria-label={`Schedule callback for ${order.channelOrderId}`} onClick={() => openAction(order, "callback")}><PhoneCall size={17}/></button>
+            <button className="confirmation-icon" title="No answer" aria-label={`Record no answer for ${order.channelOrderId}`} onClick={() => openAction(order, "unreachable")}><PhoneMissed size={17}/></button>
           </div>
         </div>)}</div> : <div className="confirmation-empty"><span>✓</span><h3>Queue is clear</h3><p>New high-RTO orders will appear here automatically.</p></div>}
       </article>}
 
       {!loading && section === "confirmation" && mode === "confirmed" && <article className="confirmation-card confirmed-card">
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMED ORDERS</p><h2>Customer-approved orders</h2><p>Every order confirmed from the call queue is retained here.</p></div><span>{data.confirmed.length} approved</span></header>
-        {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order confirmed-order" key={order.id}>
+        {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = [...order.attempts].reverse().find((attempt) => attempt.outcome === "confirmed"); return <div className="confirmation-order confirmed-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Confirmed {when(order.confirmedAt)}</small><p>{productSummary(order.products)}</p></div>
-          <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
+          <div><strong>{order.customerName || "Customer"}</strong>{completePhone(order.customerPhone) ? <a href={`tel:${order.customerPhone}`}>{order.customerPhone}</a> : <small>Phone unavailable from source</small>}<small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{latest?.note || "No confirmation note"}</small></div>
           <div className="confirmed-badge">✓ Customer confirmed</div>
         </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No confirmed orders yet</h3><p>Approved orders will appear here as soon as a call is completed.</p></div>}
@@ -229,19 +259,19 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <header className="confirmation-header"><div><p className="eyebrow">REJECTED ORDERS</p><h2>Manual cancellation list</h2><p>These records are stored only in this dashboard. Shiprocket is never cancelled automatically.</p></div><span>{data.rejected.length} to review</span></header>
         {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = order.attempts.at(-1); return <div className="confirmation-order rejected-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Rejected {when(order.rejectedAt)}</small><p>{productSummary(order.products)}</p></div>
-          <div><strong>{order.customerName || "Customer"}</strong><a href={`tel:${order.customerPhone}`}>{order.customerPhone || "No phone"}</a><small>{order.customerCity}, {order.customerState}</small></div>
+          <div><strong>{order.customerName || "Customer"}</strong>{completePhone(order.customerPhone) ? <a href={`tel:${order.customerPhone}`}>{order.customerPhone}</a> : <small>Phone unavailable from source</small>}<small>{order.customerCity}, {order.customerState}</small></div>
           <div className="confirmation-meta"><span>{latest?.rejectionReason?.replaceAll("_", " ") || "Rejected"}</span><small>{latest?.note || "No note"}</small></div>
           <div className="manual-cancel-badge">Cancel manually in Shiprocket</div>
         </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No rejected orders</h3><p>Customer cancellations and rejected confirmations will be retained here.</p></div>}
       </article>}
 
       {!loading && section === "campaigns" && <div className="campaign-layout"><article className="confirmation-card campaign-panel">
-        <header className="confirmation-header campaign-panel-header"><div><p className="eyebrow">CAMPAIGN PRIORITY</p><h2>Campaign assignment</h2></div><button className="campaign-create" onClick={() => setCreateOpen(true)}>New campaign</button></header>
-        <div className="campaign-list">{data.campaigns.map((campaign, index) => <div className={`campaign-row ${campaign.isActive ? "" : "inactive"} ${draggedCampaignId === campaign.id ? "dragging" : ""}`} key={campaign.id} onDragOver={(event) => event.preventDefault()} onDrop={() => void dropCampaign(campaign.id)}>
-          <div className="campaign-drag-handle" role="button" tabIndex={0} draggable={!busy} aria-label={`Move ${campaign.name}. Priority ${index + 1}`} title="Drag to change priority" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggedCampaignId(campaign.id); }} onDragEnd={() => setDraggedCampaignId("")} onKeyDown={(event) => { if (event.key === "ArrowUp") void moveCampaign(index, -1); if (event.key === "ArrowDown") void moveCampaign(index, 1); }}><GripVertical size={18}/></div>
-          <div className="campaign-copy"><div className="campaign-title"><strong>{campaign.name}</strong>{campaign.id === "cmp_default_high_rto" && <em>Permanent</em>}</div><p>{campaign.description || "No description"}</p>{(campaign.criteria.tags?.length || campaign.criteria.dateFrom || campaign.criteria.dateTo) && <small>{campaign.criteria.tags?.length ? `Tags: ${campaign.criteria.tags.join(", ")}` : ""}{campaign.criteria.tags?.length && (campaign.criteria.dateFrom || campaign.criteria.dateTo) ? " · " : ""}{campaign.criteria.dateFrom || campaign.criteria.dateTo ? `${campaign.criteria.dateFrom || "Any date"} to ${campaign.criteria.dateTo || "Any date"}` : ""}</small>}</div>
+        <header className="confirmation-header campaign-panel-header"><div><p className="eyebrow">CAMPAIGN PRIORITY</p><h2>Campaign assignment</h2><p>Automatic routing adds matching orders. Pausing it keeps existing assignments; create a manual campaign to select orders yourself.</p></div><button className="campaign-create" onClick={() => setCreateOpen(true)}>New campaign</button></header>
+        <div className="campaign-list">{data.campaigns.map((campaign, index) => <div className={`campaign-row ${campaign.isActive ? "" : "inactive"} ${draggedCampaignId === campaign.id ? "dragging" : ""}`} key={campaign.id} ref={element=>{if(element)campaignElements.current.set(campaign.id,element);else campaignElements.current.delete(campaign.id);}} onDragOver={(event) => { event.preventDefault(); }} onDragEnter={() => previewCampaign(campaign.id)} onDrop={() => void dropCampaign()}>
+          <div className="campaign-drag-handle" role="button" tabIndex={0} draggable={!busy} aria-label={`Move ${campaign.name}. Priority ${index + 1}`} title="Drag to change priority" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", campaign.id); dragOriginal.current = [...data.campaigns]; const card = event.currentTarget.closest(".campaign-row"); if (card) event.dataTransfer.setDragImage(card, 30, 30); setDraggedCampaignId(campaign.id); }} onDragEnd={() => { if (dragOriginal.current.length) setData(current => ({...current, campaigns: dragOriginal.current})); setDraggedCampaignId(""); }} onKeyDown={(event) => { if (busy) return; if (["ArrowUp","ArrowDown"].includes(event.key)) event.preventDefault(); if (event.key === "ArrowUp") void moveCampaign(index, -1); if (event.key === "ArrowDown") void moveCampaign(index, 1); }}><GripVertical size={18}/></div>
+          <div className="campaign-copy"><div className="campaign-title"><strong>{campaign.name}</strong></div><p>{campaign.description || "No description"}</p>{(campaign.criteria.tags?.length || campaign.criteria.dateFrom || campaign.criteria.dateTo) && <small>{campaign.criteria.tags?.length ? `Tags: ${campaign.criteria.tags.join(", ")}` : ""}{campaign.criteria.tags?.length && (campaign.criteria.dateFrom || campaign.criteria.dateTo) ? " · " : ""}{campaign.criteria.dateFrom || campaign.criteria.dateTo ? `${campaign.criteria.dateFrom || "Any date"} to ${campaign.criteria.dateTo || "Any date"}` : ""}</small>}</div>
           <div className="campaign-row-meta"><span className="priority-badge">Priority {index + 1}</span><span>{Number(campaign.orderCount)} orders</span><span className="campaign-agent"><UsersRound size={15}/>{campaign.autoAssign ? "Automatic routing" : "Manual selection"}</span></div>
-          <div className="campaign-more-wrap"><button className="campaign-more" type="button" aria-label={`Actions for ${campaign.name}`} onClick={() => setOpenCampaignMenu((current) => current === campaign.id ? "" : campaign.id)}><MoreHorizontal size={18}/></button>{openCampaignMenu === campaign.id && <div className="campaign-menu">{!campaign.isActive ? <span>Campaign inactive</span> : <>{campaign.id === "cmp_default_high_rto" && <button disabled={busy} type="button" onClick={() => { setOpenCampaignMenu(""); void post({ action: "set_campaign_routing", campaignId: campaign.id, autoAssign: !campaign.autoAssign }); }}>{campaign.autoAssign ? "Manual override" : "Resume automatic"}</button>}<button disabled={busy} type="button" onClick={() => { setOpenCampaignMenu(""); void post({ action: "deactivate_campaign", campaignId: campaign.id }); }}>Deactivate</button></>}</div>}</div>
+          <div className="campaign-more-wrap"><button className="campaign-more" type="button" aria-label={`Actions for ${campaign.name}`} onClick={() => setOpenCampaignMenu((current) => current === campaign.id ? "" : campaign.id)}><MoreHorizontal size={18}/></button>{openCampaignMenu === campaign.id && <div className="campaign-menu">{!campaign.isActive ? <span>Campaign inactive</span> : <>{campaign.id === "cmp_default_high_rto" && <button disabled={busy} type="button" onClick={() => { setOpenCampaignMenu(""); void post({ action: "set_campaign_routing", campaignId: campaign.id, autoAssign: !campaign.autoAssign }); }}>{campaign.autoAssign ? "Pause automatic routing" : "Resume automatic routing"}</button>}<button disabled={busy} type="button" onClick={() => { setOpenCampaignMenu(""); void post({ action: "deactivate_campaign", campaignId: campaign.id }); }}>Deactivate</button></>}</div>}</div>
         </div>)}</div>
       </article></div>}
 
@@ -256,8 +286,8 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <footer className="workflow-panel workflow-submit"><div><CheckCircle2 size={18}/><span><strong>{selectedCandidates.size} orders selected</strong><small>{autoAssign ? "Future matching orders will be added automatically." : "Only selected current orders will be assigned."}</small></span></div><div><button type="button" onClick={() => setCreateOpen(false)}>Cancel</button><button className="workflow-submit-button" disabled={busy} type="submit">{busy ? "Creating…" : "Create campaign"}</button></div></footer>
       </form></Modal>
 
-      <Modal title="Order confirmation" open={!!selectedOrder} onClose={()=>setSelectedOrder(null)} busy={busy}>{selectedOrder && <form className="confirmation-modal" onSubmit={submitOrderAction}>
-        <header><div><p className="eyebrow">ORDER #{selectedOrder.channelOrderId}</p><h2>{orderAction === "confirm" ? "Confirm customer order" : orderAction === "reject" ? "Reject confirmation" : orderAction === "callback" ? "Schedule callback" : "Record no answer"}</h2></div><button type="button" onClick={() => setSelectedOrder(null)}>×</button></header>
+      <Modal title="Order confirmation" open={!!selectedOrder} onClose={()=>setSelectedOrder(null)} busy={busy}>{selectedOrder && <form className="confirmation-action-form" onSubmit={submitOrderAction}>
+        <header><div><p className="eyebrow">ORDER #{selectedOrder.channelOrderId}</p><h2>{orderAction === "confirm" ? "Confirm customer order" : orderAction === "reject" ? "Reject confirmation" : orderAction === "callback" ? "Schedule callback" : "Record no answer"}</h2></div></header>
         {orderAction === "reject" && <div className="manual-warning"><strong>Dashboard record only</strong><span>You must cancel this order manually in Shiprocket.</span></div>}
         {orderAction === "callback" && <label>Callback time<input required type="datetime-local" value={callbackAt} onChange={(event) => setCallbackAt(event.target.value)}/></label>}
         {orderAction === "reject" && <label>Reason<select value={rejectionReason} onChange={(event) => setRejectionReason(event.target.value)}><option value="customer_cancelled">Customer cancelled</option><option value="duplicate_order">Duplicate order</option><option value="incorrect_details">Incorrect details</option><option value="customer_unreachable">Customer unreachable</option><option value="other">Other</option></select></label>}

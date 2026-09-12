@@ -134,6 +134,22 @@ export async function mutateSupport(
       await sql`UPDATE support_agents SET available=${b.available === true} WHERE user_id=${String(b.agentId)}`;
       return { ok: true };
     }
+    if (b.action === "create") {
+      const email = required(b.email, "Customer email");
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400,"Enter a valid customer email");
+      await sql`SELECT pg_advisory_xact_lock(421994)`;
+      const requestKey = required(b.requestKey,"Request key");
+      const [existing] = await sql`SELECT id FROM support_tickets WHERE mailbox=${mailbox()} AND gmail_thread_id=${"manual:"+requestKey}`;
+      if(existing) return {id:existing.id};
+      await sql`INSERT INTO support_mailboxes(email,connected_by) VALUES(${mailbox()},${u.id}) ON CONFLICT(email) DO NOTHING`;
+      const [agent] = await sql`SELECT a.user_id FROM support_agents a LEFT JOIN support_tickets t ON t.assignee_id=a.user_id AND t.status<>'resolved' WHERE a.available AND a.role='support_agent' GROUP BY a.user_id ORDER BY COUNT(t.id),a.user_id LIMIT 1`;
+      if(!agent) throw new HttpError(409,"No available support agent. Register an agent before creating a ticket.");
+      const id=randomUUID();
+      await sql`INSERT INTO support_tickets(id,mailbox,gmail_thread_id,subject,customer_email,assignee_id) VALUES(${id},${mailbox()},${"manual:"+requestKey},${required(b.subject,"Subject")},${email},${agent.user_id})`;
+      await sql`INSERT INTO support_messages(id,ticket_id,direction,sender,recipients,body,delivery_status,created_by) VALUES(${randomUUID()},${id},'inbound',${email},${mailbox()},${required(b.query,"Customer query")},'received',${u.id})`;
+      await supportEvent(sql,u.id,id,"created_manually",{assigned:agent.user_id});
+      return {id};
+    }
     const id = required(b.ticketId, "Ticket");
     const t = await ticketAccess(sql, id, u);
     if (["reply", "note"].includes(String(b.action)) && b.requestKey) {

@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import { access } from "../../../../lib/operations/access";
 import { operationsDb } from "../../../../lib/operations/schema";
+import { recheckInvoice } from "../../../../lib/operations/invoice-match";
 import { audit } from "../../../../lib/operations/inventory";
 import {
   putFile,
@@ -59,10 +60,23 @@ export async function POST(r: Request) {
     await putFile(key, bytes, type);
     await db.transaction(async (sql) => {
       await sql`INSERT INTO supplier_invoices(id,supplier_id,purchase_order_id,invoice_number,invoice_date,storage_key,original_filename,file_hash,status,grand_total,created_by,created_at,updated_at) VALUES(${id},${po.supplier_id},${po.id},${number},${String(f.get("date") || "")},${key},${file.name.slice(0, 200)},${createHash("sha256").update(bytes).digest("hex")},'review_required',${amount},${u.email},${new Date().toISOString()},${new Date().toISOString()})`;
+      await sql`SELECT id FROM purchase_orders WHERE id=${po.id} FOR UPDATE`;
+      const lines=await sql`SELECT * FROM purchase_order_lines WHERE purchase_order_id=${po.id}`;
+      const supplied=[];
+      for(const line of lines) {
+        const qty=quantity(f.get(`quantity:${line.id}`) || 0,"Invoice quantity",true);
+        if(!qty) continue;
+        const cost=quantity(f.get(`cost:${line.id}`),"Unit price",true);
+        await sql`INSERT INTO supplier_invoice_lines(id,supplier_invoice_id,purchase_order_line_id,component_id,description,quantity,unit_cost,match_confidence) VALUES(${randomUUID()},${id},${line.id},${line.component_id},${line.description},${qty},${cost},1)`;
+        supplied.push({description:line.description,quantity:qty,unit:line.purchase_unit,unitCost:cost});
+      }
+      if(!supplied.length) throw new HttpError(400,"Enter at least one invoice quantity");
+      await recheckInvoice(sql,id);
       await audit(sql, u, "invoice_uploaded", id, {
         poId: po.id,
         number,
         amount,
+        lines:supplied,
       });
     });
     key = "";

@@ -98,3 +98,19 @@ export async function syncShopifyCatalog(runtime: RuntimeEnv, actorEmail: string
   await logActivity(runtime.DB, "Shopify", "catalog.synced", `Imported ${variantCount} Shopify variants`, { productCount, variantCount, actorEmail });
   return { productCount, variantCount, completedAt };
 }
+
+type ContactOrder = {name: string; phone?: string; tags: string[]; shippingAddress?: {phone?: string}; billingAddress?: {phone?: string}};
+/** Exact Shopify order-name match, with bounded batches; no customer-name matching. */
+export async function shopifyOrderContacts(runtime: RuntimeEnv, names: string[]) {
+  const unique = [...new Set(names.map(name => name.replace(/^#/, "")))];
+  const result = new Map<string, ContactOrder>();
+  for (let start=0; start<unique.length; start+=20) {
+    const query = unique.slice(start,start+20).map(name => `name:${JSON.stringify("#"+name)}`).join(" OR ");
+    const data = await shopifyGraphql<{orders:{nodes:ContactOrder[]}}>(runtime, `query Contacts($query:String!) { orders(first:100, query:$query) { nodes { name phone tags shippingAddress { phone } billingAddress { phone } } } }`, {query});
+    for (const order of data.orders.nodes) {
+      const name=order.name.replace(/^#/, "");
+      if(unique.includes(name)) result.set(name,order);
+    }
+  }
+  return result;
+}

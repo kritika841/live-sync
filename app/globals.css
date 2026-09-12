@@ -714,3 +714,57 @@ tbody tr:hover,.report-table tbody tr:hover,.report-table tbody tr.active { back
 .app-dialog .ops-two>.ops-card{flex:1;min-width:260px}
 .analytics-perspective button span {display:none}
 .app-dialog .ops-form input[type=checkbox]{width:16px;height:16px;min-width:16px;margin:0 7px 0 0;vertical-align:middle;accent-color:#22b79c}.app-dialog .ops-form fieldset{min-width:0}.app-dialog .ops-form details{margin:12px 0}.app-dialog .ops-form summary{cursor:pointer;color:#78d7bd}.app-dialog .ops-form fieldset>label{display:inline-flex;align-items:center;margin:10px 12px 10px 0}.app-dialog .ops-form fieldset>button{margin-top:8px}
+
+/* Final operations workspace refinements */
+.confirmation-contact-toolbar {display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.confirmation-contact-toolbar .confirmation-contact-filter {flex:1;margin:0}
+.confirmation-orders {overflow-x:auto;position:relative}
+.confirmation-order {min-width:1100px;grid-template-columns:280px 320px 220px 260px}
+.confirmation-actions {position:sticky;right:0;align-self:stretch;background:var(--surface,#fff);box-shadow:-10px 0 15px -12px #334155;display:flex;align-items:center;justify-content:center;gap:8px;z-index:2;padding:12px}
+.confirmation-primary-actions {display:flex;gap:6px}
+.confirmation-actions button.confirmation-accept {background:#457366;color:white;border-color:#457366;font-size:12px;padding:8px 12px}
+.confirmation-actions button.confirmation-reject {background:#9a6262;color:white;border-color:#9a6262;font-size:12px;padding:8px 12px}
+.confirmation-icon {width:34px;height:34px;display:grid;place-items:center;border:1px solid #dbe1de;border-radius:7px;background:#f6f8f7;color:#53655d}
+.confirmation-action-form {display:grid;gap:18px;width:100%}
+.confirmation-action-form header h2 {font-size:18px;margin:4px 0}
+.confirmation-action-form label {display:grid;gap:7px}
+.confirmation-action-form textarea,.confirmation-action-form input,.confirmation-action-form select {border:1px solid var(--line);border-radius:8px;padding:10px;width:100%}
+.confirmation-action-form footer {display:flex;justify-content:flex-end;gap:10px}
+.campaign-row {transition:box-shadow .18s,transform .18s;position:relative}
+.campaign-row.dragging {opacity:.85;transform:scale(1.015);box-shadow:0 14px 32px #243b332b;z-index:3;border:1px solid #779d8e}
+.campaign-drag-handle {display:flex!important;align-items:center!important;justify-content:center!important;align-self:stretch;height:auto!important;min-height:60px;width:32px;padding:0;cursor:grab}
+.campaign-drag-handle:active {cursor:grabbing}
+.date-range-control {display:grid;gap:7px;font-size:12px}
+.date-range-control>button {display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink);white-space:nowrap}
+.range-picker {display:grid;gap:14px}.range-picker p {font-size:13px;color:var(--muted)}
+.range-month {display:flex;align-items:center;justify-content:space-between}.range-month button {display:grid;place-items:center;padding:8px}
+.range-grid {display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center}
+.range-grid>span {font-size:12px;color:#738179;padding:6px}
+.range-grid>button {border:0;border-radius:7px;background:transparent;min-height:38px;color:var(--ink)}
+.range-grid>button.endpoint {background:#426b59;color:white}.range-grid>button.in-range {background:var(--green-soft)}.range-grid>button:disabled {opacity:.25}.range-picker footer {display:flex;justify-content:flex-end;gap:10px}
+.inventory-tabs {display:flex;overflow-x:auto;gap:22px;border-bottom:1px solid var(--line);padding:0 4px;margin-bottom:22px;background:transparent}
+.inventory-tabs button {border:0!important;border-radius:0!important;background:transparent!important;padding:14px 2px!important;white-space:nowrap;box-shadow:none!important;color:var(--muted)}
+.inventory-tabs button.active {border-bottom:3px solid #466b58!important;color:var(--green)!important}
+.inventory-view .ops-two {margin:0 0 16px;display:flex;gap:12px}
+.inventory-log-details {flex:1;font-size:13px;line-height:1.6;padding:0 18px}
+.support-thread {display:flex;flex-direction:column;gap:18px;background:var(--bg);padding:20px}
+.support-message {max-width:88%;align-self:flex-start;border-radius:4px 16px 16px 16px;background:var(--surface);border:1px solid var(--line)}
+.support-message.outbound {align-self:flex-end;background:var(--green-soft);border-radius:16px 4px 16px 16px}
+.support-message.note {align-self:stretch;max-width:100%;background:#332c1d}
+.support-message p {white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
+
+.range-picker footer button,.confirmation-action-form footer button{padding:9px 14px;border-radius:7px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink)}
+.confirmation-action-form textarea,.confirmation-action-form input,.confirmation-action-form select{background:var(--input);color:var(--ink)}
+.campaign-panel .confirmation-header>div>p:not(.eyebrow){display:block;max-width:580px;line-height:1.6}
+.analytics-status-audit {padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);margin:16px 0;overflow:auto;font-size:12px}
+.analytics-status-audit summary {cursor:pointer;color:var(--ink);font-weight:650}.analytics-status-audit p {color:var(--muted)}
+.confirmation-contact-toolbar>button {padding:10px 12px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink);border-radius:8px;font-size:11px}
+.confirmation-orders {min-width:0;max-width:100%;grid-template-columns:minmax(0,1fr)}
+.confirmation-order .confirmed-badge,.confirmation-order .manual-cancel-badge {position:sticky;right:0;z-index:2;background:var(--surface);padding:14px}
+.confirmation-actions button.confirmation-accept:hover {background:#527f71}.confirmation-actions button.confirmation-reject:hover {background:#a76f6f}
+@media(prefers-reduced-motion:reduce){.campaign-row{transition:none}}
+.po-entry-table{overflow-x:auto;margin:18px 0}.po-entry-table table{min-width:950px}.po-entry-table td:first-child{min-width:180px}.po-entry-table td:nth-child(2){min-width:220px}.po-entry-table td input{max-width:none;width:100%;min-width:70px}
+
+.support-inbox{grid-template-columns:260px minmax(350px,1fr) 240px;grid-template-rows:auto 1fr}.support-queues{grid-column:1/-1;display:flex;gap:4px;overflow-x:auto;padding:8px;border-right:0;border-bottom:1px solid var(--line)}.support-queues .eyebrow{display:none}.support-queues button{width:auto;white-space:nowrap}.support-context{padding:20px;border-left:1px solid var(--line);overflow-wrap:anywhere;max-height:900px;overflow:auto;background:var(--surface-2);font-size:11px}.support-context p{padding-bottom:12px;border-bottom:1px solid var(--line)}
+@media(max-width:1200px){.support-inbox{grid-template-columns:240px minmax(300px,1fr)}.support-context{grid-column:1/-1;border-left:0;border-top:1px solid var(--line);max-height:300px}}
+@media(max-width:800px){.support-inbox{grid-template-columns:1fr}.support-context{grid-column:auto}}

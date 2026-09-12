@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test,after} from 'node:test';
 import postgres from 'postgres';
-process.env.SUPABASE_DB_URL='postgres://satmi_test@127.0.0.1:55439/postgres';
+process.env.SUPABASE_DB_URL=`postgres://satmi_test@127.0.0.1:${process.env.SATMI_TEST_PORT || "55439"}/postgres`;
 const {getRuntimeEnv,ensureSchema}=await import('../lib/database');
 const {loadOfdRecords}=await import('../lib/ofd');
 const {syncRecentOrders}=await import('../lib/shiprocket');

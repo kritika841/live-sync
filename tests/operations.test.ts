@@ -3,7 +3,7 @@ import { test, after } from "node:test";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 // Explicit local-only test target. Never fall back to a deployment URL.
-process.env.SUPABASE_DB_URL = "postgres://satmi_test@127.0.0.1:55439/postgres";
+process.env.SUPABASE_DB_URL = `postgres://satmi_test@127.0.0.1:${process.env.SATMI_TEST_PORT || "55439"}/postgres`;
 process.env.SUPPORT_TOKEN_KEY = Buffer.alloc(32, 7).toString("base64");
 const { operationsDb } = await import("../lib/operations/schema");
 const { mutateInventory, inventoryData, conversion } = await import(
@@ -49,7 +49,7 @@ test("operations integration: receipts, conversions, concurrency, recipes, sales
     },
     admin,
   );
-  await mutateInventory({ action: "vendor", id: v, name: v }, admin);
+  await mutateInventory({ action: "vendor", id: v, name: v, address: "Test address", bankDetails: "Test bank" }, admin);
   await mutateInventory(
     {
       action: "po",
@@ -63,10 +63,14 @@ test("operations integration: receipts, conversions, concurrency, recipes, sales
   );
   const [line] =
     await sql`SELECT * FROM purchase_order_lines WHERE purchase_order_id=${p}`;
+  const invoiceId = randomUUID();
+  await sql`INSERT INTO supplier_invoices(id,supplier_id,purchase_order_id,invoice_number,storage_key,file_hash,created_at,updated_at) VALUES(${invoiceId},${v},${p},${invoiceId},'test-invoice',${invoiceId},'test','test')`;
+  await sql`INSERT INTO supplier_invoice_lines(id,supplier_invoice_id,purchase_order_line_id,component_id,quantity) VALUES(${randomUUID()},${invoiceId},${line.id},${c},2)`;
   const key = randomUUID();
   const receipt = {
     action: "receive",
     poId: p,
+    invoiceId,
     requestKey: key,
     lines: [{ lineId: line.id, accepted: 1, rejected: 0 }],
   };
@@ -145,7 +149,7 @@ test("operations integration: receipts, conversions, concurrency, recipes, sales
     await sql`SELECT rowsecurity FROM pg_tables WHERE schemaname='public' AND tablename='support_messages'`;
   assert.equal(rls[0].rowsecurity, true);
   await sql`INSERT INTO support_mailboxes(email,encrypted_refresh_token,connected_by) VALUES('kritika@satmi.in',${encrypt("test-refresh")},'test') ON CONFLICT(email) DO UPDATE SET encrypted_refresh_token=EXCLUDED.encrypted_refresh_token`;
-  await sql`INSERT INTO support_agents(user_id,email,name,role) VALUES('test-agent','agent@example.test','Agent','support_agent'),('test-manager','manager@example.test','Manager','support_manager') ON CONFLICT(user_id) DO NOTHING`;
+  await sql`INSERT INTO support_agents(user_id,email,name,role) VALUES('test-agent','agent@example.test','Agent','support_agent'),('test-manager','manager@example.test','Manager','support_manager') ON CONFLICT(user_id) DO UPDATE SET available=true`;
   const t = randomUUID();
   await sql`INSERT INTO support_tickets(id,mailbox,gmail_thread_id,subject,customer_email,assignee_id) VALUES(${t},'kritika@satmi.in',${t},'Test query','customer@example.test','test-agent')`;
   await assert.rejects(supportData(other, t), /not assigned/);
@@ -247,15 +251,9 @@ test("verified fulfilment consumes once and RTO QC restores only accepted recove
     { action: "component", id: c, name: "QC material", sku: c, unit: "g" },
     admin,
   );
-  await mutateInventory(
-    {
-      action: "adjust",
-      componentId: c,
-      quantity: 1000,
-      reason: "Test opening",
-    },
-    admin,
-  );
+  // Fixture represents stock already received with its purchasing paperwork.
+  await sql`INSERT INTO component_ledger(component_id,quantity_delta,entry_type,reason,reference_type,reference_id,idempotency_key,actor_email,created_at) VALUES(${c},1000,'adjustment','Opening fixture','adjustment',${c},${c},'test','test')`;
+
   await sql`INSERT INTO inventory_products(id,shopify_product_id,shopify_variant_id,sku,title,synced_at) VALUES(${product},${product},${product},${product},'QC product',${new Date().toISOString()})`;
   await mutateInventory(
     {

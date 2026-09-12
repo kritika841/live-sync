@@ -400,10 +400,11 @@ export async function flushOutbox() {
       );
       const sent = await gmail("messages/send", token, {
         raw: Buffer.from(raw).toString("base64url"),
-        threadId: m.gmail_thread_id,
+        ...(String(m.gmail_thread_id).startsWith("manual:") ? {} : {threadId: m.gmail_thread_id}),
       });
       await db.transaction(async (sql) => {
         await sql`UPDATE support_messages SET delivery_status='sent',gmail_message_id=${sent.id},last_error='' WHERE id=${m.id}`;
+        if (String(m.gmail_thread_id).startsWith("manual:") && sent.threadId) await sql`UPDATE support_tickets SET gmail_thread_id=${sent.threadId} WHERE id=${m.ticket_id}`;
         await sql`UPDATE support_tickets SET status=${m.resolve_after_send ? "resolved" : "waiting"},version=version+1,updated_at=now() WHERE id=${m.ticket_id}`;
         await supportEvent(sql, m.created_by, m.ticket_id, "reply_sent", {
           messageId: m.id,

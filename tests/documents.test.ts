@@ -2,7 +2,7 @@ import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import postgres from 'postgres';
-process.env.SUPABASE_DB_URL='postgres://satmi_test@127.0.0.1:55439/postgres';
+process.env.SUPABASE_DB_URL=`postgres://satmi_test@127.0.0.1:${process.env.SATMI_TEST_PORT || "55439"}/postgres`;
 const {commitDocument}=await import('../lib/operations/documents');
 const {mutateInventory}=await import('../lib/operations/inventory');
 const {parseRows,extractPdf}=await import('../lib/operations/pdf');
@@ -23,7 +23,7 @@ test('PDF text extraction from a real PDF stream',async()=>{
  const r=await extractPdf(new File([pdf],'po.pdf'));assert.match(r.text,/Incense/);assert.equal(r.lines[0]?.quantity,'2');
 });
 test('PDF PO and invoice transactions enforce review, matching, duplicate safety and no implicit stock receipt',async()=>{
- const c=randomUUID(),v=randomUUID();await mutateInventory({action:'component',id:c,name:'PDF incense',sku:c,unit:'g'},u);await mutateInventory({action:'vendor',id:v,name:'PDF vendor '+v},u);
+ const c=randomUUID(),v=randomUUID();await mutateInventory({action:'component',id:c,name:'PDF incense',sku:c,unit:'g'},u);await mutateInventory({action:'vendor',id:v,name:'PDF vendor '+v,address:'Test address',bankDetails:'Test bank'},u);
  const file=()=>({key:'test/'+randomUUID(),hash:randomUUID(),name:'test.pdf',text:'test'});
  const po=await commitDocument({kind:'po',vendorId:v,number:randomUUID(),date:'2026-09-11',lines:[{description:'Incense',componentId:c,unit:'kg',quantity:'2',cost:'300',checked:true}]},file(),u);
  const [line]=await sql`SELECT * FROM purchase_order_lines WHERE purchase_order_id=${po.id}`;assert.equal(Number(line.conversion_factor),1000);
@@ -33,8 +33,10 @@ test('PDF PO and invoice transactions enforce review, matching, duplicate safety
  assert.equal((await sql`SELECT * FROM component_ledger WHERE component_id=${c}`).length,0);
  await assert.rejects(()=>commitDocument(invoice,uploaded,u));assert.equal((await sql`SELECT * FROM supplier_invoices WHERE purchase_order_id=${po.id}`).length,1);
  await assert.rejects(()=>commitDocument({...invoice,number:randomUUID(),lines:invoice.lines.map(l=>({...l,lineId:'wrong'}))},file(),u),/does not belong/);
- await mutateInventory({action:'receive',poId:po.id,requestKey:randomUUID(),lines:[{lineId:line.id,accepted:2,rejected:0}]},u);
+ await assert.rejects(()=>mutateInventory({action:'receive',poId:po.id,requestKey:randomUUID(),lines:[{lineId:line.id,accepted:1,rejected:0}]},u),/Invoice/);
+ await mutateInventory({action:'receive',poId:po.id,invoiceId:result.id,requestKey:randomUUID(),lines:[{lineId:line.id,accepted:1,rejected:0}]},u);
  const rechecked=await mutateInventory({action:'invoice_recheck',id:result.id},u);assert.ok('status' in rechecked);assert.equal(rechecked.status,'matched');
- const matched=await commitDocument({...invoice,number:randomUUID()},file(),u);assert.equal(matched.status,'matched');
+ const matched=await commitDocument({...invoice,number:randomUUID()},file(),u);assert.equal(matched.status,'review_required');
+ await mutateInventory({action:'receive',poId:po.id,invoiceId:matched.id,requestKey:randomUUID(),lines:[{lineId:line.id,accepted:1,rejected:0}]},u);
  const over=await commitDocument({...invoice,number:randomUUID()},file(),u);assert.ok(over.comparisons[0].flags.includes('Exceeds ordered quantity'));
 });

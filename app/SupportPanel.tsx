@@ -82,7 +82,6 @@ export default function SupportPanel({
     [settings, setSettings] = useState(false),
     [requestKey, setRequestKey] = useState("");
   const {requestEntry,dialog}=useEntryDialog();
-  const [composeOpen,setComposeOpen]=useState(false);
   const [loaded,setLoaded]=useState(false);
   const loadController = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
@@ -162,7 +161,7 @@ export default function SupportPanel({
     const key = requestKey || crypto.randomUUID();
     setRequestKey(key);
     if (await act(mode, { body, requestKey: key, resolve })) {
-      setBody("");setComposeOpen(false);
+      setBody("");
       setRequestKey("");
     }
   }
@@ -343,6 +342,7 @@ export default function SupportPanel({
           ))}
         </aside>
         <div className="support-list">
+          <button disabled={busy} onClick={async()=>{const entry=await requestEntry("Create support ticket",[{name:"subject",label:"Subject"},{name:"email",label:"Customer email",type:"email"},{name:"query",label:"Customer query"}]); if(entry) await act("create",{...entry,requestKey:crypto.randomUUID()});}}>New ticket</button>
           <label className="ops-search">
             <Search size={15} />
             <input
@@ -430,7 +430,7 @@ export default function SupportPanel({
                   SUP-{String(ticket.ticket_number).padStart(6, "0")}
                 </p>
                 <h2>{ticket.subject}</h2>
-                <p>{ticket.customer_email}</p>
+                <p>{ticket.customer_email} · Assigned to {data.agents.find(a => a.user_id===ticket.assignee_id)?.name || "Awaiting available agent"}</p>
                 <div className="ops-actions">
                   <button disabled={busy} onClick={async()=>{const result=await requestEntry("Ticket status",[{name:"value",label:"Ticket status",value:ticket.status,options:["open","in_progress","waiting","resolved"].map(s=>({value:s,label:s.replaceAll("_"," ")}))}]);if(result)void act("status",{status:result.value});}}>Ticket status</button>
                   <button disabled={busy} onClick={async()=>{const result=await requestEntry("Priority",[{name:"value",label:"Priority",value:ticket.priority,options:["low","normal","high","urgent"].map(s=>({value:s,label:s}))}]);if(result)void act("priority",{priority:result.value});}}>Priority</button>
@@ -500,7 +500,7 @@ export default function SupportPanel({
                   </article>
                 ))}
               </div>
-              <div className="support-compose-actions"><button className="ops-primary" onClick={()=>{setMode("reply");setComposeOpen(true);}}>Reply</button><button onClick={()=>{setMode("note");setComposeOpen(true);}}>Internal note</button></div><Modal title={mode==="reply"?"Reply to customer":"Internal note"} open={composeOpen} onClose={()=>setComposeOpen(false)} busy={busy}>
+
               <div className="support-composer">
                 <div className="ops-actions">
                   <button
@@ -552,28 +552,7 @@ export default function SupportPanel({
                   )}
                 </div>
               </div>
-</Modal>
-              <details className="ops-card">
-                <summary>Customer orders & ticket history</summary>
-                {(
-                  data.orders as {
-                    id: number;
-                    channel_order_id: string;
-                    status: string;
-                    awb: string;
-                  }[]
-                ).map((o) => (
-                  <p key={o.id}>
-                    {o.channel_order_id} · {o.status} · AWB {o.awb || "—"}
-                  </p>
-                ))}
-                {(data.events as Event[]).map((e) => (
-                  <p key={e.id}>
-                    {date(e.created_at)} · {e.action.replaceAll("_", " ")}{" "}
-                    <small>{JSON.stringify(e.details)}</small>
-                  </p>
-                ))}
-              </details>
+
             </>
           ) : (
             <div className="support-welcome">
@@ -595,6 +574,27 @@ export default function SupportPanel({
             </div>
           )}
         </div>
+        {ticket && (              <aside className="support-context">
+                <h3>Customer context</h3><p>{ticket.customer_email}</p><h3>Orders & ticket history</h3>
+                {(
+                  data.orders as {
+                    id: number;
+                    channel_order_id: string;
+                    status: string;
+                    awb: string;
+                  }[]
+                ).map((o) => (
+                  <p key={o.id}>
+                    {o.channel_order_id} · {o.status} · AWB {o.awb || "—"}
+                  </p>
+                ))}
+                {(data.events as Event[]).map((e) => (
+                  <p key={e.id}>
+                    {date(e.created_at)} · {e.action.replaceAll("_", " ")}{" "}
+                    <small>{JSON.stringify(e.details)}</small>
+                  </p>
+                ))}
+              </aside>)}
       </div>
     </section>
   );

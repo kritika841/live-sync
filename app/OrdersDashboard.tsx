@@ -1,11 +1,12 @@
 "use client";
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { readJson } from "../lib/http";
 import Image from "next/image";
 import Link from "next/link";
 import { Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound, Warehouse } from "lucide-react";
 import { statusTab } from "../lib/order-status";
+import DateRangePicker from "./DateRangePicker";
 import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
 import ReportsPanel from "./ReportsPanel";
@@ -15,14 +16,14 @@ import SupportPanel from "./SupportPanel";
 import LiveStatus from "./LiveStatus";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
-type RiskKey = "all" | "low" | "high" | "approved";
+type RiskKey = "all" | "low" | "high" | "approved" | "low_approved";
 type Order = {
   id: number; channelOrderId: string; channelName: string; customerName: string;
   customerEmail: string; customerPhone: string; customerCity: string; customerState: string;
   orderDate: string; deliveredAt: string; status: string; paymentMethod: string; paymentStatus: string;
   total: number; pickupLocation: string; awb: string; courier: string;
   products: Array<{ name?: string; sku?: string; quantity?: number }>; syncedAt: string;
-  confirmationStatus?: string; confirmationUpdatedAt?: string; confirmedAt?: string; rejectedAt?: string;
+  confirmationNote?: string; confirmationStatus?: string; confirmationUpdatedAt?: string; confirmedAt?: string; rejectedAt?: string;
 };
 type OrdersResponse = {
   orders: Order[];
@@ -30,7 +31,7 @@ type OrdersResponse = {
   riskCounts: Record<RiskKey, number>;
   total: number; page: number; perPage: number; totalPages: number;
   sync: Record<string, string>;
-  filterOptions: { couriers: string[]; pickups: string[] };
+  filterOptions: { couriers: string[]; pickups: string[]; tags: string[] };
 };
 type ActivityLog = {
   id: number; source: string; eventType: string; level: string;
@@ -46,9 +47,9 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 
 const emptyData: OrdersResponse = {
   orders: [], counts: { new: 0, ready: 0, shipped: 0, out_for_delivery: 0, undelivered: 0, delivered: 0, rto: 0, all: 0 },
-  riskCounts: { all: 0, low: 0, high: 0, approved: 0 },
+  riskCounts: { all: 0, low: 0, high: 0, approved: 0, low_approved: 0 },
   total: 0, page: 1, perPage: 50, totalPages: 1, sync: {},
-  filterOptions: { couriers: [], pickups: [] },
+  filterOptions: { couriers: [], pickups: [], tags: [] },
 };
 
 function formatDate(value: string) {
@@ -76,9 +77,11 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   const [risk, setRisk] = useState<RiskKey>("all");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
-  const deferredSearch = useDeferredValue(search);
+  const [deferredSearch, setDeferredSearch] = useState(search);
+  useEffect(() => { const timer=setTimeout(()=>setDeferredSearch(search),300);return ()=>clearTimeout(timer); },[search]);
   const [payment, setPayment] = useState("");
   const [courier, setCourier] = useState("");
+  const [tag, setTag] = useState("");
   const [pickup, setPickup] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -96,17 +99,17 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   const [logsLoading, setLogsLoading] = useState(true);
 
   const query = useMemo(() => {
-    if (risk === "approved") return new URLSearchParams({ risk, page: String(page) }).toString();
     const params = new URLSearchParams({ tab, risk, page: String(page), sort });
     if (deferredSearch) params.set("search", deferredSearch);
     if (payment) params.set("payment", payment);
     if (courier) params.set("courier", courier);
+    if (tag) params.set("tag", tag);
     if (pickup) params.set("pickup", pickup);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     if (tab === "delivered" && deliveredDate) params.set("delivered_date", deliveredDate);
     return params.toString();
-  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, from, to, deliveredDate]);
+  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, tag, from, to, deliveredDate]);
 
   const currentQuery=useRef(query);
   useEffect(()=>{currentQuery.current=query;},[query]);
@@ -117,7 +120,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     if (preview) return;
     setError("");
     try {
-      const response = await fetch(`/api/orders?${query}`, { cache: "no-store" });
+      const response = await fetch(`/api/orders?${query}`, { cache: "no-store", signal: AbortSignal.timeout(25000) });
       const payload = await readJson(response) as OrdersResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not load orders");
       if(currentQuery.current!==query)return;
@@ -129,9 +132,9 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   }
 
   useEffect(() => {
-    if (preview) return;
+    if (preview || view !== "orders") return;
     const controller = new AbortController();
-    fetch(`/api/orders?${query}`, { signal: controller.signal, cache: "no-store" })
+    fetch(`/api/orders?${query}`, { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]), cache: "no-store" })
       .then(async (response) => {
         const payload = await readJson(response) as OrdersResponse & { error?: string };
         if (!response.ok) throw new Error(payload.error || "Could not load orders");
@@ -148,18 +151,18 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         if (loadError.name !== "AbortError") setError(loadError.message || "Could not load orders");
       });
     return () => controller.abort();
-  }, [query, preview]);
+  }, [query, preview, view]);
 
   useEffect(() => {
-    if (preview) return;
+    if (preview || view !== "logs") return;
     const controller = new AbortController();
-    fetch("/api/logs", { signal: controller.signal, cache: "no-store" })
+    fetch("/api/logs", { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]), cache: "no-store" })
       .then((response) => readJson<LogsResponse>(response))
       .then((payload: LogsResponse) => setLogsData(payload))
       .catch((logsError: Error) => { if (logsError.name !== "AbortError") setError(logsError.message); })
       .finally(() => setLogsLoading(false));
     return () => controller.abort();
-  }, [preview]);
+  }, [preview, view]);
 
   useEffect(() => {
     if (preview) return;
@@ -179,9 +182,9 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     const controller=new AbortController();
     let running=false;
     const refresh=async()=>{
-      if(running)return;running=true;
+      if(running || document.hidden)return;running=true;
       try{
-        const response=await fetch(`/api/orders?${query}`,{cache:"no-store",signal:controller.signal});
+        const response=await fetch(`/api/orders?${query}`,{cache:"no-store",signal:AbortSignal.any([controller.signal,AbortSignal.timeout(25000)])});
         const payload=await readJson<OrdersResponse>(response);
         if(!controller.signal.aborted && currentQuery.current===query){setData(payload);setLoadedQuery(query);}
       }catch{/* Preserve the visible snapshot during a background failure. */}
@@ -195,7 +198,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     if (preview) return;
     setLogsLoading(true);
     try {
-      const response = await fetch("/api/logs", { cache: "no-store" });
+      const response = await fetch("/api/logs", { cache: "no-store", signal: AbortSignal.timeout(25000) });
       const payload = await readJson(response) as LogsResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not load activity logs");
       setLogsData(payload);
@@ -235,7 +238,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   }
 
   function clearFilters() {
-    setPayment(""); setCourier(""); setPickup(""); setFrom(""); setTo(""); setDeliveredDate(""); setPage(1);
+    setPayment(""); setCourier(""); setPickup(""); setTag(""); setFrom(""); setTo(""); setDeliveredDate(""); setPage(1);
   }
 
   function applyRecentDays(days: number) {
@@ -290,7 +293,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
       const params = new URLSearchParams(query);
       params.delete("page");
       params.set("selection", "all");
-      const response = await fetch(`/api/orders?${params.toString()}`, { cache: "no-store" });
+      const response = await fetch(`/api/orders?${params.toString()}`, { cache: "no-store", signal: AbortSignal.timeout(25000) });
       const payload = await readJson(response) as { orders?: Array<{ id: number; channelOrderId: string }>; error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not select all orders");
       setSelectedOrders(new Map((payload.orders || []).map((order) => [order.id, String(order.channelOrderId || order.id)])));
@@ -316,7 +319,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     }
   }
 
-  const appliedFilters = [payment, courier, pickup, from, to, tab === "delivered" ? deliveredDate : ""].filter(Boolean).length;
+  const appliedFilters = [payment, courier, pickup, tag, from, to, tab === "delivered" ? deliveredDate : ""].filter(Boolean).length;
   const visibleIds = data.orders.map((order) => order.id);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrders.has(id));
   const someVisibleSelected = visibleIds.some((id) => selectedOrders.has(id));
@@ -367,7 +370,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         <section className={`orders-card ${view !== "orders" ? "view-hidden" : ""}`}>
           <nav className="tabs" aria-label="Order status">
             {tabs.map((item) => (
-              <button key={item.key} className={tab === item.key && risk !== "approved" ? "active" : ""} onClick={() => { setTab(item.key); if (risk === "approved") setRisk("all"); setPage(1); }}>
+              <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => { setTab(item.key); if (["approved", "low_approved"].includes(risk)) setRisk("all"); setPage(1); }}>
                 {item.label}<span>{data.counts[item.key]}</span>
               </button>
             ))}
@@ -386,6 +389,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
             {tab === "new" && <button className={risk === "approved" ? "active approved" : "approved"} onClick={() => { setRisk("approved"); setFilterOpen(false); setPage(1); }}>
               <i />Approved <span>{data.riskCounts.approved}</span>
             </button>}
+            {tab === "new" && <button className={risk === "low_approved" ? "active" : ""} onClick={() => {setRisk("low_approved"); setPage(1);}}>Low risk + approved <span>{data.riskCounts.low_approved}</span></button>}
           </nav>
 
           {risk !== "approved" && tab === "delivered" && (
@@ -395,7 +399,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
             </div>
           )}
 
-          {risk !== "approved" && <div className="toolbar">
+          {<div className="toolbar">
             <div className="toolbar-actions">
               <label className="sort-control"><span>Sort</span><select value={sort} onChange={(event) => { setSort(event.target.value as "newest" | "oldest"); setPage(1); }} aria-label="Sort orders by order date"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
               <button className={`filter-button ${filterOpen ? "active" : ""}`} onClick={() => setFilterOpen((value) => !value)}>
@@ -404,13 +408,13 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
             </div>
           </div>}
 
-          {risk !== "approved" && filterOpen && (
+          {filterOpen && (
             <div className="filter-panel">
               <label>Payment<select value={payment} onChange={(event) => { setPayment(event.target.value); setPage(1); }}><option value="">All payments</option><option value="prepaid">Prepaid</option><option value="cod">COD</option></select></label>
               <label>Courier<select value={courier} onChange={(event) => { setCourier(event.target.value); setPage(1); }}><option value="">All couriers</option>{data.filterOptions.couriers.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
               <label>Pickup location<select value={pickup} onChange={(event) => { setPickup(event.target.value); setPage(1); }}><option value="">All locations</option>{data.filterOptions.pickups.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-              <label>From<input type="date" value={from} max={to || todayValue} onChange={(event) => { const value = event.target.value; setFrom(value); if (to && value > to) setTo(value); setPage(1); }} /></label>
-              <label>To<input type="date" value={to} min={from || undefined} max={todayValue} onChange={(event) => { const value = event.target.value; setTo(value); if (from && value < from) setFrom(value); setPage(1); }} /></label>
+              <label>Shopify tag<select value={tag} onChange={e => {setTag(e.target.value); setPage(1);}}><option value="">All tags</option>{data.filterOptions.tags?.map(value => <option key={value}>{value}</option>)}</select></label>
+              <DateRangePicker from={from} to={to} max={todayValue} onApply={(start,end) => {setFrom(start); setTo(end); setPage(1);}}/>
               <button className="clear-button" onClick={clearFilters} disabled={!appliedFilters}>Clear filters</button>
               <div className="date-presets"><span>Quick date</span><button onClick={() => applyRecentDays(1)}>Today</button><button onClick={applyYesterday}>Yesterday</button><button onClick={() => applyRecentDays(7)}>Last 7 days</button><button onClick={() => applyRecentDays(30)}>Last 30 days</button></div>
             </div>
@@ -443,7 +447,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
                       <td data-label="Order date">{formatDate(order.orderDate)}{risk === "approved" && order.confirmedAt ? <small>Confirmed {formatDate(order.confirmedAt)}</small> : order.deliveredAt && <small>Delivered {formatDate(order.deliveredAt)}</small>}</td>
                       <td data-label="Payment"><span className={`payment ${order.paymentMethod.toLowerCase()}`}>{order.paymentMethod || "—"}</span></td>
                       <td data-label="Amount"><strong>{formatCurrency(order.total)}</strong></td>
-                      <td data-label="Status"><span className={`status ${statusClass(order.status)}`}><i />{order.status || "New"}</span></td>
+                      <td data-label="Status"><span className={`status ${statusClass(order.status)}`}><i />{order.status || "New"}</span>{order.confirmationStatus === "confirmed" && <small>Confirmation: {order.confirmationNote || "No saved note"}</small>}</td>
                       <td data-label="AWB / Courier"><strong>{order.awb || "—"}</strong><small>{order.courier || "Not assigned"}</small></td>
                     </tr>
                   );

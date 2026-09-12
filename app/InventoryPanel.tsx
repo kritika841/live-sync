@@ -12,6 +12,7 @@ import {
 import { Modal, useEntryDialog } from "./Modal";
 import { readJson } from "../lib/http";
 import type { inventoryData } from "../lib/operations/inventory";
+import PurchaseOrderForm from "./PurchaseOrderForm";
 import ProcurementPdf from "./ProcurementPdf";
 import OperationsForm, { type Field } from "./OperationsForm";
 type Data = Awaited<ReturnType<typeof inventoryData>>;
@@ -37,7 +38,7 @@ const tabs = [
   ["invoices", "Invoices"],
   ["sales", "Manual sales"],
   ["orders", "Order insights"],
-  ["activity", "Activity"],
+  ["activity", "Inventory log"],
 ] as const;
 const n = (v: unknown) =>
   Number(v || 0).toLocaleString("en-IN", { maximumFractionDigits: 3 });
@@ -71,6 +72,7 @@ export default function InventoryPanel({
       { componentId: "", quantity: "", unit: "unit", cost: "0" },
     ]);
   const {requestEntry,dialog} = useEntryDialog();
+  const [invoicePo,setInvoicePo] = useState("");
   const [invoiceOpen,setInvoiceOpen]=useState(false);
   const [receiveOpen,setReceiveOpen]=useState(false);
   async function ask(label:string,value?:string){const r=await requestEntry(value===undefined?"Add reason":"QC quantity",[{name:"value",label,type:value===undefined?"text":"number",value}]);return r?.value ?? null;}
@@ -360,6 +362,47 @@ export default function InventoryPanel({
               />
             </label>
           </div>
+          {isAdmin && (
+            <div className="ops-two">
+              <OperationsForm
+                title="Add component"
+                fields={[
+                  field("name", "Component name"),
+                  field("sku", "SKU"),
+                  {
+                    name: "unit",
+                    label: "Stock unit",
+                    options: ["unit", "g", "kg", "pack"].map((v) => ({
+                      value: v,
+                      label: v,
+                    })),
+                  },
+                  field("reorder", "Reorder level", "number", false),
+                  field(
+                    "gramsPerPack",
+                    "Grams per pack (optional)",
+                    "number",
+                    false,
+                  ),
+                ]}
+                onSave={(b) => save("component", b)}
+                busy={busy}
+              />
+              <OperationsForm
+                title="Set opening stock / adjustment"
+                description="To add opening or purchased stock, receive a PO against an invoice. Adjustments reduce physical stock and require a reason."
+                fields={[
+                  componentSelect,
+                  field("quantity", "Physical quantity", "number"),
+                  field("reason", "Reason"),
+                ]}
+                onSave={(b) =>
+                  save("adjust", { ...b, id: crypto.randomUUID() })
+                }
+                busy={busy}
+              />
+            </div>
+          )}
           <div className="inventory-table-wrap">
             <table className="inventory-table">
               <thead>
@@ -418,47 +461,7 @@ export default function InventoryPanel({
             {!data.components.length &&
               emptyState("Start with your components")}
           </div>
-          {isAdmin && (
-            <div className="ops-two">
-              <OperationsForm
-                title="Add component"
-                fields={[
-                  field("name", "Component name"),
-                  field("sku", "SKU"),
-                  {
-                    name: "unit",
-                    label: "Stock unit",
-                    options: ["unit", "g", "kg", "pack"].map((v) => ({
-                      value: v,
-                      label: v,
-                    })),
-                  },
-                  field("reorder", "Reorder level", "number", false),
-                  field(
-                    "gramsPerPack",
-                    "Grams per pack (optional)",
-                    "number",
-                    false,
-                  ),
-                ]}
-                onSave={(b) => save("component", b)}
-                busy={busy}
-              />
-              <OperationsForm
-                title="Set opening stock / adjustment"
-                description="A reason is required. Reserved stock is protected."
-                fields={[
-                  componentSelect,
-                  field("quantity", "Physical quantity", "number"),
-                  field("reason", "Reason"),
-                ]}
-                onSave={(b) =>
-                  save("adjust", { ...b, id: crypto.randomUUID() })
-                }
-                busy={busy}
-              />
-            </div>
-          )}
+
         </>
       )}
       {tab === "vendors" && (
@@ -483,6 +486,8 @@ export default function InventoryPanel({
                 field("email", "Email", "email", false),
                 field("phone", "Phone", "text", false),
                 field("taxId", "GST / tax ID", "text", false),
+                field("address", "Registered address"),
+                field("bankDetails", "Bank name, account holder, account number and IFSC"),
               ]}
               onSave={(b) => save("vendor", b)}
               busy={busy}
@@ -534,6 +539,7 @@ export default function InventoryPanel({
                     poId: po,
                     requestKey: crypto.randomUUID(),
                     notes: f.get("notes"),
+                    invoiceId: f.get("invoiceId"),
                     lines: poLines.map((l) => ({
                       lineId: l.id,
                       accepted: f.get("a" + l.id) || 0,
@@ -549,7 +555,7 @@ export default function InventoryPanel({
                         <th>Component</th>
                         <th>Ordered</th>
                         <th>Accepted</th>
-                        <th>Rejected</th>
+                        <th>Rejected</th><th>Pending</th>
                         <th>Receive now</th>
                         <th>Reject now</th>
                       </tr>
@@ -568,7 +574,7 @@ export default function InventoryPanel({
                             {n(l.ordered_quantity)} {l.purchase_unit}
                           </td>
                           <td>{n(l.received_quantity)}</td>
-                          <td>{n(l.rejected_quantity)}</td>
+                          <td>{n(l.rejected_quantity)}</td><td>{n(Math.max(0,Number(l.ordered_quantity)-Number(l.received_quantity)))}</td>
                           <td>
                             <input
                               aria-label={"Receive " + l.component_name}
@@ -594,6 +600,8 @@ export default function InventoryPanel({
                     </tbody>
                   </table>
                 </div>
+                <label>Invoice (required)<select name="invoiceId" required><option value="">Select uploaded invoice</option>{data.invoices.filter(i => i.purchase_order_id===po && i.status!=="rejected").map(i => <option key={i.id} value={i.id}>{i.invoice_number}</option>)}</select></label>
+                <p className="ops-muted">Upload the invoice and review its line items in Invoices before posting. Each receipt consumes only that invoice’s remaining quantity.</p>
                 <input name="notes" placeholder="Receiving notes" />
                 {isAdmin && (
                   <button
@@ -609,7 +617,7 @@ export default function InventoryPanel({
                   </button>
                 )}
               </form>
-              <h3>Receipt history</h3>
+              <a className="action-launch" href={`/api/inventory/po?id=${encodeURIComponent(po)}`} target="_blank" rel="noreferrer">Download PDF</a><h3>Receipt history</h3>
               {data.receipts
                 .filter((r) => r.purchase_order_id === po)
                 .map((r) => (
@@ -653,29 +661,8 @@ export default function InventoryPanel({
             </article></Modal>
           )}
           {isAdmin && <ProcurementPdf kind="po" components={data.components.map(c=>({id:c.id,name:c.name,sku:c.sku,unit:c.unit}))} vendors={data.vendors.map(v=>({id:v.id,name:v.name}))} pos={data.pos.map(p=>({id:p.id,po_number:p.po_number,supplier_name:p.supplier_name}))} poLines={data.lines.map(l=>({id:l.id,purchase_order_id:l.purchase_order_id,component_id:l.component_id,component_name:l.component_name,purchase_unit:l.purchase_unit,ordered_quantity:Number(l.ordered_quantity),received_quantity:Number(l.received_quantity),unit_cost:Number(l.unit_cost),invoiced_quantity:Number(l.invoiced_quantity)}))} onSaved={load} preview={preview}/>}
-          {isAdmin && (
-            <OperationsForm
-              title="Create purchase order"
-              fields={[
-                {
-                  name: "vendorId",
-                  label: "Vendor",
-                  options: data.vendors.map((v) => ({
-                    value: v.id,
-                    label: v.name,
-                  })),
-                },
-                field("number", "Internal PO number"),
-                field("vendorNumber", "Vendor order number", "text", false),
-                field("expected", "Expected delivery", "date", false),
-              ]}
-              onSave={(b) => save("po", { ...b, lines })}
-              button="Create PO"
-              busy={busy}
-            >
-              {lineEditor()}
-            </OperationsForm>
-          )}
+          {isAdmin && <PurchaseOrderForm vendors={data.vendors as unknown as Array<{id:string;name:string;phone:string;tax_id:string;address:string}>} components={data.components as unknown as Array<{id:string;name:string;unit:string}>} onSave={b=>save("po",b)} busy={busy}/>}
+
         </>
       )}
       {tab === "products" && (
@@ -826,7 +813,7 @@ export default function InventoryPanel({
               emptyState("Invoice records")}
           </div>
           {isAdmin && (
-            <><ProcurementPdf kind="invoice" components={data.components.map(c=>({id:c.id,name:c.name,sku:c.sku,unit:c.unit}))} vendors={data.vendors.map(v=>({id:v.id,name:v.name}))} pos={data.pos.map(p=>({id:p.id,po_number:p.po_number,supplier_name:p.supplier_name}))} poLines={data.lines.map(l=>({id:l.id,purchase_order_id:l.purchase_order_id,component_id:l.component_id,component_name:l.component_name,purchase_unit:l.purchase_unit,ordered_quantity:Number(l.ordered_quantity),received_quantity:Number(l.received_quantity),unit_cost:Number(l.unit_cost),invoiced_quantity:Number(l.invoiced_quantity)}))} onSaved={load} preview={preview}/><button className="action-launch" onClick={()=>setInvoiceOpen(true)}>+ Upload attachment only</button><Modal title="Upload invoice" open={invoiceOpen} onClose={()=>setInvoiceOpen(false)} busy={busy}>
+            <><ProcurementPdf kind="invoice" components={data.components.map(c=>({id:c.id,name:c.name,sku:c.sku,unit:c.unit}))} vendors={data.vendors.map(v=>({id:v.id,name:v.name}))} pos={data.pos.map(p=>({id:p.id,po_number:p.po_number,supplier_name:p.supplier_name}))} poLines={data.lines.map(l=>({id:l.id,purchase_order_id:l.purchase_order_id,component_id:l.component_id,component_name:l.component_name,purchase_unit:l.purchase_unit,ordered_quantity:Number(l.ordered_quantity),received_quantity:Number(l.received_quantity),unit_cost:Number(l.unit_cost),invoiced_quantity:Number(l.invoiced_quantity)}))} onSaved={load} preview={preview}/><button className="action-launch" onClick={()=>setInvoiceOpen(true)}>+ Upload invoice manually</button><Modal title="Upload invoice" open={invoiceOpen} onClose={()=>setInvoiceOpen(false)} busy={busy}>
             <form
               className="ops-form"
               onSubmit={async (e) => {
@@ -861,7 +848,7 @@ export default function InventoryPanel({
               <div className="ops-fields">
                 <label>
                   Purchase order
-                  <select name="poId" required>
+                  <select name="poId" required value={invoicePo} onChange={e=>setInvoicePo(e.target.value)}>
                     <option value="">Select PO</option>
                     {data.pos.map((p) => (
                       <option key={p.id} value={p.id}>
@@ -898,6 +885,7 @@ export default function InventoryPanel({
                   />
                 </label>
               </div>
+              <fieldset><legend>Invoice quantities in PO units</legend><p>Enter quantities exactly as shown on the invoice. Leave items not supplied at zero.</p>{data.lines.filter(l=>l.purchase_order_id===invoicePo).map(l=><label key={l.id}>{l.component_name} ({l.purchase_unit})<input name={`quantity:${l.id}`} type="number" min="0" step="any" defaultValue="0"/><span>Unit price</span><input name={`cost:${l.id}`} type="number" min="0" step="any" defaultValue={Number(l.unit_cost)}/></label>)}</fieldset>
               <button className="ops-primary" disabled={busy}>
                 Upload & link invoice
               </button>
@@ -1080,7 +1068,7 @@ export default function InventoryPanel({
       {tab === "activity" && (
         <>
           <div className="ops-toolbar">
-            <h2>Inventory audit trail</h2>
+            <h2>Inventory log</h2>
             <span className="ops-muted">Latest 300 events</span>
           </div>
           {data.activity.map((a) => (
@@ -1091,8 +1079,9 @@ export default function InventoryPanel({
                   {a.actor_email} · {date(a.created_at)}
                 </small>
               </span>
+              <div className="inventory-log-details">{(() => {const details=JSON.parse(a.after_json || "{}"); return <><span>{details.number || details.invoiceId || details.reason || ""}</span>{(details.lines || details.comparisons || []).map((line: Record<string,unknown>, index:number) => <p key={index}>{String(line.componentName || line.description || line.componentId || "Item")} · {line.accepted !== undefined ? `Accepted ${line.accepted}; rejected ${line.rejected || 0}` : `Quantity ${line.quantity || 0}`} {String(line.stockUnit || line.unit || "")}</p>)}</>;})()}</div>
               <details>
-                <summary>View details</summary>
+                <summary>Full event details</summary>
                 <pre>
                   {JSON.stringify(JSON.parse(a.after_json || "{}"), null, 2)}
                 </pre>

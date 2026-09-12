@@ -3,6 +3,10 @@ import postgres, { type Sql } from "postgres";
 type Row = Record<string, unknown>;
 
 const resultKeyAliases: Record<string, string> = {
+  orderid: "orderId",
+  rejectionreason: "rejectionReason",
+  confirmationnote: "confirmationNote",
+  lowapproved: "lowApproved",
   channelorderid: "channelOrderId",
   channelname: "channelName",
   customername: "customerName",

@@ -14,7 +14,8 @@ import {
   Users,
 } from "lucide-react";
 import { Modal, useEntryDialog } from "./Modal";
-import { readJson } from "../lib/http";
+import { isTransientRequestError, readJson } from "../lib/http";
+import { visibleEmailBody } from "../lib/email-body";
 import type { supportData } from "../lib/operations/support";
 type Data = Awaited<ReturnType<typeof supportData>>;
 type Message = {
@@ -86,6 +87,8 @@ export default function SupportPanel({
   const {requestEntry,dialog}=useEntryDialog();
   const [loaded,setLoaded]=useState(false);
   const loadController = useRef<AbortController | null>(null);
+  const retryTimer = useRef<number | undefined>(undefined);
+  const retryLoad = useRef<() => void>(()=>{});
   const load = useCallback(async () => {
     if (preview) return;
     loadController.current?.abort();
@@ -102,17 +105,23 @@ export default function SupportPanel({
                 queue,
                 q: search,
               }),
-            { cache: "no-store", signal: controller.signal },
+            { cache: "no-store", signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]) },
           ),
         ),
       );
       setLoaded(true);
       setError("");
     } catch (e) {
-      if (!controller.signal.aborted)
-        setError(e instanceof Error ? e.message : "Could not load support");
+      if (!controller.signal.aborted) {
+        if (isTransientRequestError(e)) {
+          setError("");
+          window.clearTimeout(retryTimer.current);
+          retryTimer.current=window.setTimeout(()=>retryLoad.current(),3000);
+        } else setError(e instanceof Error ? e.message : "Could not load support");
+      }
     }
   }, [preview, selected, page, queue, search]);
+  useEffect(()=>{retryLoad.current=()=>void load()},[load]);
   useEffect(() => {
     if (!active) return;
     const initial = setTimeout(() => void load(), 0);
@@ -120,6 +129,7 @@ export default function SupportPanel({
     return () => {
       clearTimeout(initial);
       clearInterval(timer);
+      window.clearTimeout(retryTimer.current);
       loadController.current?.abort();
     };
   }, [active, load]);
@@ -397,7 +407,7 @@ export default function SupportPanel({
               }}
             >
               <div>
-                <span>SUP-{String(t.ticket_number).padStart(6, "0")}</span>
+                <span>CASE SUP-{String(t.ticket_number).padStart(6, "0")}</span>
                 <time>{date(t.updated_at)}</time>
               </div>
               <strong>{t.subject}</strong>
@@ -484,12 +494,10 @@ export default function SupportPanel({
           {ticket ? (
             <>
               <header>
-                <p className="eyebrow">
-                  SUP-{String(ticket.ticket_number).padStart(6, "0")}
-                </p>
+                <div className="support-case-line"><p className="eyebrow">CASE SUP-{String(ticket.ticket_number).padStart(6, "0")}</p><span className={`support-priority ${ticket.priority}`}>{ticket.priority}</span><span className="inventory-status">{ticket.status.replaceAll("_"," ")}</span></div>
                 <h2>{ticket.subject}</h2>
                 <p>{ticket.customer_email} · Assigned to {data.agents.find(a => a.user_id===ticket.assignee_id)?.name || "Awaiting available agent"}</p>
-                <span className="support-channel">Email conversation</span>
+                <span className="support-channel"><Mail size={12}/> Email via {data.connection.email}</span>
               </header>
               <div className="support-thread">
                 {(data.messages as Message[]).map((m) => (
@@ -503,12 +511,11 @@ export default function SupportPanel({
                           <>
                             <LockKeyhole size={12} /> Private note ·{" "}
                           </>
-                        ) : null}
-                        {m.sender}
+                        ) : null}{m.direction === "inbound" ? data.customer.name || "Customer" : m.direction === "outbound" ? "Support agent" : m.sender}
                       </strong>
                       <time>{date(m.created_at)}</time>
                     </div>
-                    <p>{m.body}</p>
+                    <p>{visibleEmailBody(m.body)}</p>
                     {m.attachments?.map((a) => (
                       <a
                         key={a.attachmentId}
@@ -523,11 +530,7 @@ export default function SupportPanel({
                         <Paperclip size={13} /> {a.name}
                       </a>
                     ))}
-                    <small>
-                      {m.delivery_status === "sent"
-                        ? "Sent via Gmail"
-                        : m.delivery_status}
-                    </small>
+                    {m.direction !== "inbound" && <small>{m.delivery_status === "sent" ? `Sent from ${data.connection.email}` : m.delivery_status}</small>}
                     {m.last_error && (
                       <p className="ops-error">{m.last_error}</p>
                     )}
@@ -558,9 +561,9 @@ export default function SupportPanel({
                     <LockKeyhole size={14} /> Internal note
                   </button>
                 </div>
-                <p className="ops-muted">
+                <p className="support-delivery-line">
                   {mode === "reply"
-                    ? `To ${ticket.customer_email} · From kritika@satmi.in`
+                    ? `To ${ticket.customer_email} · From ${data.connection.email}`
                     : "Visible only to your support team"}
                 </p>
                 <textarea
@@ -636,10 +639,7 @@ export default function SupportPanel({
                     {o.channel_order_id} · {o.status} · AWB {o.awb || "—"}
                   </p>
                 ))}
-                <h3>Interactions</h3>
-                {(data.events as Event[]).map((event) => (
-                  <p key={event.id}>{date(event.created_at)} · {event.action.replaceAll("_", " ")}</p>
-                ))}
+                <details className="support-interactions" open><summary>Case activity · {(data.events as Event[]).length}</summary>{(data.events as Event[]).map((event) => (<p key={event.id}>{date(event.created_at)} · {event.action.replaceAll("_", " ")}</p>))}</details>
               </aside>
         )}
       </div>

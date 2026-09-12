@@ -24,7 +24,7 @@ export async function operationsDb() {
   await ensureSchema(db);
   ready ??= (async()=>{
     const exists = await db.prepare("SELECT to_regclass('public.operations_schema_versions') name").first<{name:string}>();
-    if(exists?.name && await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0016_po_documents_performance'").first())return;
+    if(exists?.name && await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0018_support_read_performance'").first())return;
     await db.transaction(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(421995)`;
       await sql`CREATE TABLE IF NOT EXISTS operations_schema_versions (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
@@ -55,6 +55,8 @@ export async function operationsDb() {
       if(!performanceVersion){await sql.unsafe(PO_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0016_po_documents_performance')`;}
       const [inventoryReadVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0017_inventory_read_performance'`;
       if(!inventoryReadVersion){await sql.unsafe(INVENTORY_READ_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0017_inventory_read_performance')`;}
+      const [supportReadVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0018_support_read_performance'`;
+      if(!supportReadVersion){await sql.unsafe(SUPPORT_READ_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0018_support_read_performance')`;}
     });
   })()
     .catch((e) => {
@@ -84,4 +86,11 @@ CREATE INDEX IF NOT EXISTS idx_purchase_order_lines_po ON purchase_order_lines (
 CREATE INDEX IF NOT EXISTS idx_component_ledger_component ON component_ledger (component_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_allocations_component_state ON inventory_order_allocations (component_id,state);
 CREATE INDEX IF NOT EXISTS idx_inventory_audit_events_id ON inventory_audit_events (id DESC);
+`;
+const SUPPORT_READ_PERFORMANCE_MIGRATION = `
+CREATE INDEX IF NOT EXISTS idx_support_tickets_updated ON support_tickets (updated_at DESC,id);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_assignee_status ON support_tickets (assignee_id,status,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_customer_email ON support_tickets (LOWER(customer_email));
+CREATE INDEX IF NOT EXISTS idx_orders_customer_email ON orders (LOWER(customer_email),created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_support_events_ticket_created ON support_events (ticket_id,created_at);
 `;

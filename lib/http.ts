@@ -6,6 +6,15 @@ export class HttpError extends Error {
     super(message);
   }
 }
+export function isTransientRequestError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "TimeoutError" ||
+    /signal timed out|temporarily busy|did not return a usable response|failed to fetch|networkerror/i.test(
+      error.message,
+    )
+  );
+}
 export function errorResponse(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof HttpError)

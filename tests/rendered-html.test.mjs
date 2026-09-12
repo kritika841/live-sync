@@ -103,11 +103,12 @@ test("shows confirmation contact numbers by default and supports contact filteri
     readFile(new URL("../app/ConfirmationPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/confirmation/route.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(confirmation, /href={`tel:\${order\.customerPhone}`}/);
+  assert.match(confirmation, /href={`tel:\${dialable}`}/);
   assert.match(confirmation, /Filter by customer, contact number, order, city or state/);
   assert.match(confirmation, /customerPhone\?\.replace/);
   assert.match(api, /customer_phone AS customerPhone/);
-  assert.doesNotMatch(confirmation, /reveal|masked/i);
+  assert.match(confirmation, /Look up phone/);
+  assert.match(confirmation, /Reveal/);
 });
 
 test("keeps the sign-in action high contrast", async () => {

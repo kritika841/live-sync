@@ -5,6 +5,7 @@ import postgres from 'postgres';
 import {closedSql,openPopulationSql} from '../lib/analytics-status';
 import {tagRowsSql} from '../lib/order-tags-sql';
 import {completePhone} from '../lib/contact';
+import {visibleEmailBody} from '../lib/email-body';
 process.env.SUPABASE_DB_URL=`postgres://satmi_test@127.0.0.1:${process.env.SATMI_TEST_PORT || "55439"}/postgres`;
 const {operationsDb}=await import('../lib/operations/schema');
 const {mutateInventory}=await import('../lib/operations/inventory');
@@ -29,6 +30,10 @@ test('tag filtering accepts exact array and comma-separated values without subst
 test('phone fallback skips masked sources and preserves complete numbers',()=>{
  assert.equal(completePhone('98XXXX1234','+91 98765 43210'),'+91 98765 43210');
  assert.equal(completePhone('***1234',null),'');
+});
+test('support conversation shows the newest email body without quoted history',()=>{
+ assert.equal(visibleEmailBody('Thanks, that fixed it.\n\nOn Fri, Support wrote:\n> Please try again.'),'Thanks, that fixed it.');
+ assert.equal(visibleEmailBody('Current response\n\n-----Original Message-----\nOld response'),'Current response');
 });
 test('50 kg PO remains pending after 25 and 23 kg, completes after final 2 kg with distinct invoices',async()=>{
  await operationsDb();const component=randomUUID(),vendor=randomUUID(),po=randomUUID();

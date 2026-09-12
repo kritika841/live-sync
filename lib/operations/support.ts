@@ -6,6 +6,17 @@ import { getSupabaseAdmin } from "../supabase/admin";
 import { HttpError, required } from "../http";
 import { operationsDb } from "./schema";
 import { manager } from "./access";
+// Support records combine ticket, mailbox and user tables. Mutation inputs are
+// validated below; the workspace reads the selected row's dynamic columns.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SupportRow = { [key: string]: any };
+export type SupportSnapshot = {
+  tickets: SupportRow[]; selectedTicket: SupportRow | null; page: number;
+  totalPages: number; total: number; summary: SupportRow; agents: SupportRow[];
+  availableAgents: number; messages: SupportRow[]; events: SupportRow[];
+  orders: SupportRow[]; customer: {name:string;email:string;phone:string;tags:string[]};
+  connection: SupportRow; canManage: boolean; userId: string; configured: boolean; pushConfigured: boolean;
+};
 export const mailbox = () => process.env.SUPPORT_MAILBOX || "kritika@satmi.in";
 function customerTags(raw: unknown) {
   try {
@@ -94,73 +105,52 @@ export async function supportData(
   u: DashboardUser,
   id?: string,
   filters: { page?: number; queue?: string; search?: string } = {},
-) {
+): Promise<SupportSnapshot> {
   const db = await operationsDb();
-  return db.transaction(async (sql) => {
-    const agents = await sql`SELECT * FROM support_agents ORDER BY name`;
-    const availableAgents = agents.filter(
-      (agent) => agent.role === "support_agent" && agent.available,
-    ).length;
-    const page = Number.isFinite(filters.page) ? Math.max(1, Math.min(100000,Math.floor(filters.page || 1))) : 1;
-    const queue = filters.queue || "all";
-    const search = "%" + (filters.search || "") + "%";
-    const where = sql`(${manager(u)} OR assignee_id=${u.id}) AND (${queue}='all' OR (${queue}='mine' AND assignee_id=${u.id}) OR (${queue}='unassigned' AND assignee_id IS NULL) OR status=${queue}) AND (subject ILIKE ${search} OR customer_email ILIKE ${search} OR ticket_number::text ILIKE ${search})`;
-    const tickets =
-      await sql`SELECT * FROM support_tickets WHERE ${where} ORDER BY updated_at DESC,id LIMIT 50 OFFSET ${(page - 1) * 50}`;
-    const [total] =
-      await sql`SELECT COUNT(*) count FROM support_tickets WHERE ${where}`;
-    const [summary] =
-      await sql`SELECT COUNT(*) FILTER(WHERE status<>'resolved') open, COUNT(*) FILTER(WHERE status<>'resolved' AND assignee_id IS NULL) unassigned, COUNT(*) FILTER(WHERE status='escalated') escalated, COUNT(*) FILTER(WHERE status='resolved') resolved FROM support_tickets WHERE ${manager(u)} OR assignee_id=${u.id}`;
-    let selectedTicket = null;
-    let messages: readonly unknown[] = [];
-    let events: readonly unknown[] = [];
-    let orders: readonly unknown[] = [];
-    let customer = { name: "", email: "", phone: "", tags: [] as string[] };
-    if (id) {
-      const t = await ticketAccess(sql, id, u);
-      selectedTicket = t;
-      messages =
-        await sql`SELECT * FROM support_messages WHERE ticket_id=${id} ORDER BY created_at,id`;
-      events =
-        await sql`SELECT * FROM support_events WHERE ticket_id=${id} ORDER BY created_at`;
-      orders =
-        await sql`SELECT id,channel_order_id,status,awb,courier FROM orders WHERE LOWER(customer_email)=LOWER(${t.customer_email}) ORDER BY created_at DESC LIMIT 20`;
-      const [customerOrder] =
-        await sql`SELECT customer_name,customer_phone,raw_json FROM orders WHERE LOWER(customer_email)=LOWER(${t.customer_email}) ORDER BY created_at DESC LIMIT 1`;
-      customer = {
-        name: String(customerOrder?.customer_name || t.customer_name || ""),
-        email: t.customer_email,
-        phone: String(customerOrder?.customer_phone || ""),
-        tags: customerTags(customerOrder?.raw_json),
-      };
-    }
-    const [connection] =
-      await sql`SELECT email,last_sync_at,last_error,watch_expiration,import_complete,encrypted_refresh_token<>'' connected FROM support_mailboxes WHERE email=${mailbox()}`;
-    return {
-      tickets,
-      selectedTicket,
-      page,
-      totalPages: Math.max(1, Math.ceil(Number(total.count) / 50)),
-      total: Number(total.count),
-      summary,
-      agents,
-      availableAgents,
-      messages,
-      events,
-      orders,
-      customer,
-      connection: connection || { email: mailbox(), connected: false },
-      canManage: manager(u),
-      userId: u.id,
-      configured: Boolean(
-        process.env.GOOGLE_CLIENT_ID &&
-          process.env.GOOGLE_CLIENT_SECRET &&
-          process.env.SUPPORT_TOKEN_KEY &&
-          process.env.GOOGLE_REDIRECT_URI,
-      ),
-      pushConfigured: Boolean(process.env.GMAIL_PUBSUB_TOPIC && process.env.GMAIL_PUSH_AUDIENCE && process.env.GMAIL_PUSH_SERVICE_ACCOUNT),
-    };
-  });
+  const canManage = manager(u);
+  const page = Number.isFinite(filters.page) ? Math.max(1, Math.min(100000,Math.floor(filters.page || 1))) : 1;
+  const allowedQueues = new Set(["all","mine","unassigned","open","in_progress","waiting","escalated","resolved"]);
+  const queue = allowedQueues.has(filters.queue || "") ? String(filters.queue) : "all";
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  if (!canManage) { clauses.push("assignee_id=?"); values.push(u.id); }
+  if (queue === "mine") { clauses.push("assignee_id=?"); values.push(u.id); }
+  else if (queue === "unassigned") clauses.push("assignee_id IS NULL");
+  else if (queue !== "all") { clauses.push("status=?"); values.push(queue); }
+  clauses.push("(subject ILIKE ? OR customer_email ILIKE ? OR ticket_number::text ILIKE ?)");
+  const search = `%${filters.search || ""}%`;
+  values.push(search,search,search);
+  const where = clauses.join(" AND ");
+  const summaryWhere = canManage ? "TRUE" : "assignee_id=?";
+  const summaryValues = canManage ? [] : [u.id];
+  const [ticketRows,totalRow,summaryRow,agentRows,connection] = await Promise.all([
+    db.prepare(`SELECT * FROM support_tickets WHERE ${where} ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?`).bind(...values,(page-1)*50).all<Record<string,unknown>>(),
+    db.prepare(`SELECT COUNT(*) count FROM support_tickets WHERE ${where}`).bind(...values).first<{count:number}>(),
+    db.prepare(`SELECT COUNT(*) FILTER(WHERE status<>'resolved') open, COUNT(*) FILTER(WHERE status<>'resolved' AND assignee_id IS NULL) unassigned, COUNT(*) FILTER(WHERE status='escalated') escalated, COUNT(*) FILTER(WHERE status='resolved') resolved FROM support_tickets WHERE ${summaryWhere}`).bind(...summaryValues).first<Record<string,number>>(),
+    db.prepare("SELECT * FROM support_agents ORDER BY name").all<Record<string,unknown>>(),
+    db.prepare("SELECT email,last_sync_at,last_error,watch_expiration,import_complete,encrypted_refresh_token<>'' connected FROM support_mailboxes WHERE email=?").bind(mailbox()).first<Record<string,unknown>>(),
+  ]);
+  const agents = agentRows.results as SupportRow[];
+  let selectedTicket: SupportRow | null = null;
+  let messages: SupportRow[] = [];
+  let events: SupportRow[] = [];
+  let orders: SupportRow[] = [];
+  let customer = { name: "", email: "", phone: "", tags: [] as string[] };
+  if (id) {
+    selectedTicket = await db.prepare(`SELECT * FROM support_tickets WHERE id=?${canManage ? "" : " AND assignee_id=?"}`).bind(...(canManage ? [id] : [id,u.id])).first<SupportRow>();
+    if (!selectedTicket) throw new HttpError(404,"Ticket not found or not assigned to you");
+    const customerEmail = String(selectedTicket.customer_email || "");
+    const [messageRows,eventRows,orderRows,customerOrder] = await Promise.all([
+      db.prepare("SELECT * FROM support_messages WHERE ticket_id=? ORDER BY created_at,id").bind(id).all<Record<string,unknown>>(),
+      db.prepare("SELECT * FROM support_events WHERE ticket_id=? ORDER BY created_at").bind(id).all<Record<string,unknown>>(),
+      db.prepare("SELECT id,channel_order_id,status,awb,courier FROM orders WHERE LOWER(customer_email)=LOWER(?) ORDER BY created_at DESC LIMIT 20").bind(customerEmail).all<Record<string,unknown>>(),
+      db.prepare("SELECT customer_name,customer_phone,raw_json FROM orders WHERE LOWER(customer_email)=LOWER(?) ORDER BY created_at DESC LIMIT 1").bind(customerEmail).first<Record<string,unknown>>(),
+    ]);
+    messages=messageRows.results as SupportRow[];events=eventRows.results as SupportRow[];orders=orderRows.results as SupportRow[];
+    customer={name:String(customerOrder?.customer_name||selectedTicket.customer_name||""),email:customerEmail,phone:String(customerOrder?.customer_phone||""),tags:customerTags(customerOrder?.raw_json)};
+  }
+  const summary=summaryRow||{open:0,unassigned:0,escalated:0,resolved:0};
+  return {tickets:ticketRows.results as SupportRow[],selectedTicket,page,totalPages:Math.max(1,Math.ceil(Number(totalRow?.count||0)/50)),total:Number(totalRow?.count||0),summary,agents,availableAgents:agents.filter(agent=>agent.role==="support_agent"&&agent.available).length,messages,events,orders,customer,connection:(connection||{email:mailbox(),connected:false}) as SupportRow,canManage,userId:u.id,configured:Boolean(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET&&process.env.SUPPORT_TOKEN_KEY&&process.env.GOOGLE_REDIRECT_URI),pushConfigured:Boolean(process.env.GMAIL_PUBSUB_TOPIC&&process.env.GMAIL_PUSH_AUDIENCE&&process.env.GMAIL_PUSH_SERVICE_ACCOUNT)};
 }
 export async function mutateSupport(
   b: Record<string, unknown>,

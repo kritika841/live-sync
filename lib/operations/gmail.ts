@@ -9,6 +9,7 @@ import { operationsDb } from "./schema";
 import { mailbox, supportEvent, refreshAgents } from "./support";
 import { HttpError } from "../http";
 import { randomUUID } from "node:crypto";
+import { visibleEmailBody } from "../email-body";
 function key() {
   const k = Buffer.from(process.env.SUPPORT_TOKEN_KEY || "", "base64");
   if (k.length !== 32)
@@ -199,7 +200,7 @@ async function importThread(threadId: string, token: string) {
         }
       }
       const inserted =
-        await sql`INSERT INTO support_messages(id,ticket_id,gmail_message_id,message_id,direction,sender,recipients,body,attachments,delivery_status,created_at) VALUES(${randomUUID()},${ticket.id},${m.id},${mid},${outbound ? "outbound" : "inbound"},${headers.get("from") || from},${headers.get("to") || mailbox()},${messageText(m.payload || {}) || m.snippet || ""},${sql.json(attachments(m.payload || {}))},${outbound ? "sent" : "received"},${new Date(Number(m.internalDate)).toISOString()}) ON CONFLICT(gmail_message_id) DO NOTHING RETURNING id`;
+        await sql`INSERT INTO support_messages(id,ticket_id,gmail_message_id,message_id,direction,sender,recipients,body,attachments,delivery_status,created_at) VALUES(${randomUUID()},${ticket.id},${m.id},${mid},${outbound ? "outbound" : "inbound"},${headers.get("from") || from},${headers.get("to") || mailbox()},${visibleEmailBody(messageText(m.payload || {}) || m.snippet || "")},${sql.json(attachments(m.payload || {}))},${outbound ? "sent" : "received"},${new Date(Number(m.internalDate)).toISOString()}) ON CONFLICT(gmail_message_id) DO NOTHING RETURNING id`;
       if (inserted.length)
         await sql`UPDATE support_tickets SET updated_at=GREATEST(updated_at,${new Date(Number(m.internalDate)).toISOString()}::timestamptz),status=CASE WHEN ${!outbound} AND status IN ('resolved','waiting') THEN 'open' ELSE status END,version=version+1 WHERE id=${ticket.id}`;
     }

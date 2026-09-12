@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { readJson } from "../lib/http";
+import { isTransientRequestError, readJson } from "../lib/http";
 import Image from "next/image";
 import Link from "next/link";
 import { Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound, Warehouse } from "lucide-react";
@@ -127,7 +127,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
       setData(payload);
       setLoadedQuery(query);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load orders");
+      if (!isTransientRequestError(loadError)) setError(loadError instanceof Error ? loadError.message : "Could not load orders");
     }
   }
 
@@ -148,7 +148,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         setError("");
       })
       .catch((loadError: Error) => {
-        if (loadError.name !== "AbortError") setError(loadError.message || "Could not load orders");
+        if (loadError.name !== "AbortError" && !isTransientRequestError(loadError)) setError(loadError.message || "Could not load orders");
       });
     return () => controller.abort();
   }, [query, preview, view]);
@@ -159,7 +159,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     fetch("/api/logs", { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]), cache: "no-store" })
       .then((response) => readJson<LogsResponse>(response))
       .then((payload: LogsResponse) => setLogsData(payload))
-      .catch((logsError: Error) => { if (logsError.name !== "AbortError") setError(logsError.message); })
+      .catch((logsError: Error) => { if (logsError.name !== "AbortError" && !isTransientRequestError(logsError)) setError(logsError.message); })
       .finally(() => setLogsLoading(false));
     return () => controller.abort();
   }, [preview, view]);
@@ -203,7 +203,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
       if (!response.ok) throw new Error(payload.error || "Could not load activity logs");
       setLogsData(payload);
     } catch (logsError) {
-      setError(logsError instanceof Error ? logsError.message : "Could not load activity logs");
+      if (!isTransientRequestError(logsError)) setError(logsError instanceof Error ? logsError.message : "Could not load activity logs");
     } finally {
       setLogsLoading(false);
     }

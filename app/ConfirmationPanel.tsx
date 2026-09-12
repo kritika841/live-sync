@@ -4,7 +4,7 @@ import {completePhone} from "../lib/contact";
 import { Modal } from "./Modal";
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PhoneCall, PhoneMissed, CheckCircle2, GripVertical, MoreHorizontal, Search, UsersRound } from "lucide-react";
-import { readJson } from "../lib/http";
+import { isTransientRequestError, readJson } from "../lib/http";
 
 type Attempt = { attemptNumber: number; outcome: string; note: string; rejectionReason?: string; nextActionAt?: string; createdAt: string };
 type ConfirmationOrder = {
@@ -89,7 +89,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
       setData((current) => ({ ...current, ...payload, counts: payload.counts ? { ...current.counts, ...payload.counts } : current.counts }));
       setError("");
     } catch (cause) {
-      if (!controller.signal.aborted && !quiet) setError(cause instanceof Error ? cause.message : "Could not load confirmations");
+      if (!controller.signal.aborted && !quiet && !isTransientRequestError(cause)) setError(cause instanceof Error ? cause.message : "Could not load confirmations");
     } finally {
       if (loadAbort.current === controller) loadAbort.current = null;
       if (!controller.signal.aborted && !quiet) setLoading(false);

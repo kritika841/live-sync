@@ -132,16 +132,26 @@ export class PreparedStatement {
 }
 
 export class PostgresDatabase {
-  private readonly query: (text: string, values: unknown[]) => Promise<Row[]>;
-  private readonly sql: Sql;
+  private query!: (text: string, values: unknown[]) => Promise<Row[]>;
+  private sql!: Sql;
+  private liveCheck: Promise<void> | undefined;
+  private lastLiveCheck = 0;
 
-  constructor(connectionString: string) {
-    this.sql = postgres(connectionString, {
+  constructor(private readonly connectionString: string) {
+    this.connect();
+  }
+
+  private connect() {
+    this.sql = postgres(this.connectionString, {
       prepare: false,
       onnotice: () => {},
-      max: 3,
-      idle_timeout: 20,
-      connect_timeout: 15,
+      // Supabase transaction pooling + Vercel functions: one client
+      // connection per warm function instance avoids exhausting the pool.
+      max: 1,
+      idle_timeout: 5,
+      max_lifetime: 60,
+      keep_alive: 10,
+      connect_timeout: 5,
       // A slow or exhausted database must fail a dashboard request promptly.
       // Without these server-side limits, Vercel keeps requests alive for up
       // to five minutes and browser polling multiplies the backlog.
@@ -152,6 +162,36 @@ export class PostgresDatabase {
       },
     });
     this.query = async (text, values) => normalizeRows((await this.sql.unsafe(postgresPlaceholders(text), values as never[])) as Row[]);
+  }
+
+  private async checkClient() {
+    const active = this.sql;
+    const preflight = () => Promise.race([
+      active.unsafe("SELECT 1"),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Database connection preflight timed out")), 3000)),
+    ]);
+    try {
+      await preflight();
+    } catch {
+      // A frozen serverless instance can retain a socket that Supabase's
+      // pooler has already dropped. Recycle it before serving the request.
+      await active.end({ timeout: 0 }).catch(() => undefined);
+      this.connect();
+      await Promise.race([
+        this.sql.unsafe("SELECT 1"),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Database connection is unavailable")), 5000)),
+      ]);
+    }
+  }
+
+  async ensureLive() {
+    if (Date.now() - this.lastLiveCheck < 5000) return;
+    this.liveCheck ??= this.checkClient().then(() => {
+      this.lastLiveCheck = Date.now();
+    }).finally(() => {
+      this.liveCheck = undefined;
+    });
+    await this.liveCheck;
   }
 
   prepare(text: string) {
@@ -214,6 +254,7 @@ export function getRuntimeEnv(): RuntimeEnv {
 }
 
 export async function ensureSchema(db: PostgresDatabase) {
+  await db.ensureLive();
   schemaReady ??= initializeSchema(db).catch((error) => {
     schemaReady = undefined;
     throw error;

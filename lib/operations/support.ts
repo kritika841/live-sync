@@ -175,6 +175,19 @@ export async function mutateSupport(
       }
       return { ok: true };
     }
+    if (b.action === "bulk_assign") {
+      if (!manager(u)) throw new HttpError(403, "Manager access required");
+      const ids = Array.isArray(b.ticketIds)
+        ? [...new Set(b.ticketIds.map(String).filter((id) => /^[a-z0-9-]{8,}$/i.test(id)))].slice(0, 50)
+        : [];
+      if (!ids.length) throw new HttpError(400, "Select at least one ticket");
+      const target = required(b.agentId, "Support agent");
+      const [agent] = await sql`SELECT user_id FROM support_agents WHERE user_id=${target} AND available`;
+      if (!agent) throw new HttpError(400, "Select an available support agent");
+      const updated = await sql`UPDATE support_tickets SET assignee_id=${target},version=version+1,updated_at=now() WHERE id IN ${sql(ids)} RETURNING id`;
+      for (const row of updated) await supportEvent(sql, u.id, String(row.id), "bulk_assigned", { agentId: target });
+      return { ok: true, updated: updated.length };
+    }
     if (b.action === "availability") {
       if (!manager(u) && String(b.agentId) !== u.id)
         throw new HttpError(403, "Manager access required");

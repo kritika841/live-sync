@@ -142,6 +142,14 @@ export class PostgresDatabase {
       max: 3,
       idle_timeout: 20,
       connect_timeout: 15,
+      // A slow or exhausted database must fail a dashboard request promptly.
+      // Without these server-side limits, Vercel keeps requests alive for up
+      // to five minutes and browser polling multiplies the backlog.
+      connection: {
+        statement_timeout: 20000,
+        lock_timeout: 5000,
+        idle_in_transaction_session_timeout: 25000,
+      },
     });
     this.query = async (text, values) => normalizeRows((await this.sql.unsafe(postgresPlaceholders(text), values as never[])) as Row[]);
   }

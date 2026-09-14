@@ -16,6 +16,8 @@ import {
   SlidersHorizontal,
   Plus,
   Trash2,
+  MoreHorizontal,
+  UserRoundCheck,
 } from "lucide-react";
 import { Modal, useEntryDialog } from "./Modal";
 import { isTransientRequestError, readJson } from "../lib/http";
@@ -88,17 +90,23 @@ export default function SupportPanel({
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
-    [supportTab, setSupportTab] = useState<"inbox" | "settings">("inbox"),
+    [settings, setSettings] = useState(false),
+    [caseMenuOpen, setCaseMenuOpen] = useState(false),
+    [selectedTickets, setSelectedTickets] = useState<string[]>([]),
+    [bulkAssignee, setBulkAssignee] = useState(""),
     [templatesOpen, setTemplatesOpen] = useState(false),
     [templateDraft, setTemplateDraft] = useState<ReplyTemplate | null>(null),
     [requestKey, setRequestKey] = useState("");
   const {requestEntry,dialog}=useEntryDialog();
   const [loaded,setLoaded]=useState(false);
   const loadController = useRef<AbortController | null>(null);
+  const loadInFlight = useRef(false);
   const retryTimer = useRef<number | undefined>(undefined);
   const retryLoad = useRef<() => void>(()=>{});
   const load = useCallback(async () => {
     if (preview) return;
+    if (loadInFlight.current) return;
+    loadInFlight.current = true;
     loadController.current?.abort();
     const controller = new AbortController();
     loadController.current = controller;
@@ -127,7 +135,7 @@ export default function SupportPanel({
           retryTimer.current=window.setTimeout(()=>retryLoad.current(),3000);
         } else setError(e instanceof Error ? e.message : "Could not load support");
       }
-    }
+    } finally { loadInFlight.current = false; }
   }, [preview, selected, page, queue, search]);
   useEffect(()=>{retryLoad.current=()=>void load()},[load]);
   useEffect(() => {
@@ -174,6 +182,7 @@ export default function SupportPanel({
             version: ticket?.version,
             ...b,
           }),
+          signal: AbortSignal.timeout(30000),
         }),
       );
       setNotice(result.notice || "Saved.");
@@ -198,10 +207,6 @@ export default function SupportPanel({
   if (!active) return null;
   return (
     <section className="ops-workspace support-workspace">{dialog}
-      <nav className="support-page-tabs" aria-label="Customer support sections">
-        <button className={supportTab === "inbox" ? "active" : ""} onClick={() => setSupportTab("inbox")}><Inbox size={15}/> Ticket inbox</button>
-        <button className={supportTab === "settings" ? "active" : ""} onClick={() => setSupportTab("settings")}><Settings size={15}/> Settings</button>
-      </nav>
       {error && (
         <div className="ops-error" role="alert">
           {error}
@@ -217,8 +222,8 @@ export default function SupportPanel({
           {data.summary.unassigned} ticket{data.summary.unassigned === 1 ? " is" : "s are"} waiting because no available Support agent is registered. Add a user with the Support agent role in Manage users, then refresh the team.
         </div>
       )}
-      {supportTab === "settings" ? <div className="support-settings-page">
-        <header><p className="eyebrow">Customer support settings</p><h2>Mailbox & team</h2><p>Connect and synchronize the shared inbox, then manage which team members can receive tickets.</p></header>
+      {settings ? <div className="support-settings-page">
+        <header><p className="eyebrow">Customer support settings</p><h2>Mailbox & team</h2><p>Connect and synchronize the shared inbox, then manage which team members can receive tickets.</p><button onClick={() => setSettings(false)}>Close settings</button></header>
         <div className="ops-two">
           <article className="ops-card">
             <Mail size={24} />
@@ -369,16 +374,22 @@ export default function SupportPanel({
             ["waiting", "Waiting for customer"],
             ["escalated", "Escalated"],
             ["resolved", "Resolved"],
+            ["settings", "Settings"],
           ].map(([key, label]) => (
             <button
               key={key}
-              className={queue === key ? "active" : ""}
+              className={(key === "settings" ? settings : queue === key && !settings) ? "active" : ""}
               onClick={async () => {
+                if (key === "settings") {
+                  setSettings(true);
+                  return;
+                }
+                setSettings(false);
                 setQueue(key);
                 setPage(1);
               }}
             >
-              <Inbox size={14} />
+              {key === "settings" ? <Settings size={14} /> : <Inbox size={14} />}
               {label}
             </button>
           ))}
@@ -402,6 +413,16 @@ export default function SupportPanel({
               <RefreshCw size={14} />
             </button>
           </div>
+          {isAdmin && selectedTickets.length > 0 && (
+            <div className="support-bulk-assign">
+              <span>{selectedTickets.length} selected</span>
+              <select value={bulkAssignee} onChange={(event) => setBulkAssignee(event.target.value)}>
+                <option value="">Assign to…</option>
+                {data.agents.filter((agent) => agent.available).map((agent) => <option key={agent.user_id} value={agent.user_id}>{agent.name}</option>)}
+              </select>
+              <button disabled={busy || !bulkAssignee} onClick={async () => { if (await act("bulk_assign", { ticketIds: selectedTickets, agentId: bulkAssignee })) { setSelectedTickets([]); setBulkAssignee(""); } }}><UserRoundCheck size={13}/> Assign</button>
+            </div>
+          )}
           <div className="ops-actions support-pagination">
             <button disabled={page <= 1} onClick={() => setPage(page - 1)}>
               Previous
@@ -417,8 +438,9 @@ export default function SupportPanel({
             </button>
           </div>
           {filtered.map((t) => (
-            <button
-              key={t.id}
+            <div className="support-ticket-row" key={t.id}>
+              {isAdmin && <span className="support-ticket-select" title={`Select ${t.subject}`}><input aria-label={`Select ${t.subject}`} type="checkbox" checked={selectedTickets.includes(t.id)} onChange={(event) => setSelectedTickets((current) => event.target.checked ? [...current, t.id] : current.filter((id) => id !== t.id))} /></span>}
+              <button
               className={`support-ticket ${selected === t.id ? "selected" : ""}`}
               onClick={async () => {
                 if (
@@ -429,6 +451,7 @@ export default function SupportPanel({
                 setSelected(t.id);
                 setBody("");
                 setRequestKey("");
+                setCaseMenuOpen(false);
               }}
             >
               <div>
@@ -446,7 +469,8 @@ export default function SupportPanel({
                     "Unassigned"}
                 </span>
               </div>
-            </button>
+              </button>
+            </div>
           ))}
           {!filtered.length && (
             <div className="ops-empty">
@@ -464,65 +488,20 @@ export default function SupportPanel({
             </div>
           )}
         </div>
-        {ticket && (
-          <aside className="support-ticket-fields">
-            <p className="eyebrow">Ticket controls</p>
-            <label>
-              Assignee
-              <select
-                disabled={busy || !canManage}
-                value={ticket.assignee_id || ""}
-                onChange={(event) => void act("assign", { agentId: event.target.value })}
-              >
-                <option value="">Unassigned</option>
-                {data.agents.filter((agent) => agent.available).map((agent) => (
-                  <option key={agent.user_id} value={agent.user_id}>{agent.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Status
-              <select
-                disabled={busy}
-                value={ticket.status}
-                onChange={(event) => void act("status", { status: event.target.value })}
-              >
-                {["open", "in_progress", "waiting", "resolved"].map((status) => (
-                  <option key={status} value={status}>{status.replaceAll("_", " ")}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Priority
-              <select
-                disabled={busy}
-                value={ticket.priority}
-                onChange={(event) => void act("priority", { priority: event.target.value })}
-              >
-                {["low", "normal", "high", "urgent"].map((priority) => (
-                  <option key={priority} value={priority}>{priority}</option>
-                ))}
-              </select>
-            </label>
-            <button
-              disabled={busy}
-              onClick={async () => {
-                const response = await requestEntry("Escalate ticket", [{ name: "reason", label: "Reason" }]);
-                if (response?.reason) void act("escalate", { reason: response.reason });
-              }}
-            >
-              <ArrowUpRight size={14} /> Escalate
-            </button>
-          </aside>
-        )}
         <div className="support-conversation">
           {ticket ? (
             <>
               <header>
-                <div className="support-case-line"><p className="eyebrow">CASE SUP-{String(ticket.ticket_number).padStart(6, "0")}</p><span className={`support-priority ${ticket.priority}`}>{ticket.priority}</span><span className="inventory-status">{ticket.status.replaceAll("_"," ")}</span></div>
+                <div className="support-case-line"><p className="eyebrow">CASE SUP-{String(ticket.ticket_number).padStart(6, "0")}</p><span className={`support-priority ${ticket.priority}`}>{ticket.priority}</span><span className="inventory-status">{ticket.status.replaceAll("_"," ")}</span><button className="support-case-menu-trigger" aria-label="Ticket controls" aria-expanded={caseMenuOpen} onClick={() => setCaseMenuOpen((open) => !open)}><MoreHorizontal size={18}/></button></div>
                 <h2>{ticket.subject}</h2>
                 <p>{ticket.customer_email} · Assigned to {data.agents.find(a => a.user_id===ticket.assignee_id)?.name || "Awaiting available agent"}</p>
                 <span className="support-channel"><Mail size={12}/> Email via {data.connection.email}</span>
+                {caseMenuOpen && <div className="support-case-menu">
+                  <label>Assignee<select disabled={busy || !canManage} value={ticket.assignee_id || ""} onChange={(event) => void act("assign", { agentId: event.target.value })}><option value="">Unassigned</option>{data.agents.filter((agent) => agent.available).map((agent) => <option key={agent.user_id} value={agent.user_id}>{agent.name}</option>)}</select></label>
+                  <label>Status<select disabled={busy} value={ticket.status} onChange={(event) => void act("status", { status: event.target.value })}>{["open", "in_progress", "waiting", "resolved"].map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label>
+                  <label>Priority<select disabled={busy} value={ticket.priority} onChange={(event) => void act("priority", { priority: event.target.value })}>{["low", "normal", "high", "urgent"].map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
+                  <button disabled={busy} onClick={async () => { const response = await requestEntry("Escalate ticket", [{ name: "reason", label: "Reason" }]); if (response?.reason) void act("escalate", { reason: response.reason }); }}><ArrowUpRight size={14}/> Escalate</button>
+                </div>}
               </header>
               <div className="support-thread">
                 {(data.messages as Message[]).map((m) => (

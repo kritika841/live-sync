@@ -15,6 +15,7 @@ export type SupportSnapshot = {
   totalPages: number; total: number; summary: SupportRow; agents: SupportRow[];
   availableAgents: number; messages: SupportRow[]; events: SupportRow[];
   orders: SupportRow[]; customer: {name:string;email:string;phone:string;tags:string[]};
+  templates: SupportRow[];
   connection: SupportRow; canManage: boolean; userId: string; configured: boolean; pushConfigured: boolean;
 };
 export const mailbox = () => process.env.SUPPORT_MAILBOX || "kritika@satmi.in";
@@ -123,12 +124,13 @@ export async function supportData(
   const where = clauses.join(" AND ");
   const summaryWhere = canManage ? "TRUE" : "assignee_id=?";
   const summaryValues = canManage ? [] : [u.id];
-  const [ticketRows,totalRow,summaryRow,agentRows,connection] = await Promise.all([
+  const [ticketRows,totalRow,summaryRow,agentRows,connection,templateRows] = await Promise.all([
     db.prepare(`SELECT * FROM support_tickets WHERE ${where} ORDER BY updated_at DESC,id LIMIT 50 OFFSET ?`).bind(...values,(page-1)*50).all<Record<string,unknown>>(),
     db.prepare(`SELECT COUNT(*) count FROM support_tickets WHERE ${where}`).bind(...values).first<{count:number}>(),
     db.prepare(`SELECT COUNT(*) FILTER(WHERE status<>'resolved') open, COUNT(*) FILTER(WHERE status<>'resolved' AND assignee_id IS NULL) unassigned, COUNT(*) FILTER(WHERE status='escalated') escalated, COUNT(*) FILTER(WHERE status='resolved') resolved FROM support_tickets WHERE ${summaryWhere}`).bind(...summaryValues).first<Record<string,number>>(),
     db.prepare("SELECT * FROM support_agents ORDER BY name").all<Record<string,unknown>>(),
     db.prepare("SELECT email,last_sync_at,last_error,watch_expiration,import_complete,encrypted_refresh_token<>'' connected FROM support_mailboxes WHERE email=?").bind(mailbox()).first<Record<string,unknown>>(),
+    db.prepare("SELECT id,name,body,updated_at FROM support_reply_templates ORDER BY name").all<Record<string,unknown>>(),
   ]);
   const agents = agentRows.results as SupportRow[];
   let selectedTicket: SupportRow | null = null;
@@ -150,7 +152,7 @@ export async function supportData(
     customer={name:String(customerOrder?.customer_name||selectedTicket.customer_name||""),email:customerEmail,phone:String(customerOrder?.customer_phone||""),tags:customerTags(customerOrder?.raw_json)};
   }
   const summary=summaryRow||{open:0,unassigned:0,escalated:0,resolved:0};
-  return {tickets:ticketRows.results as SupportRow[],selectedTicket,page,totalPages:Math.max(1,Math.ceil(Number(totalRow?.count||0)/50)),total:Number(totalRow?.count||0),summary,agents,availableAgents:agents.filter(agent=>agent.role==="support_agent"&&agent.available).length,messages,events,orders,customer,connection:(connection||{email:mailbox(),connected:false}) as SupportRow,canManage,userId:u.id,configured:Boolean(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET&&process.env.SUPPORT_TOKEN_KEY&&process.env.GOOGLE_REDIRECT_URI),pushConfigured:Boolean(process.env.GMAIL_PUBSUB_TOPIC&&process.env.GMAIL_PUSH_AUDIENCE&&process.env.GMAIL_PUSH_SERVICE_ACCOUNT)};
+  return {tickets:ticketRows.results as SupportRow[],selectedTicket,page,totalPages:Math.max(1,Math.ceil(Number(totalRow?.count||0)/50)),total:Number(totalRow?.count||0),summary,agents,availableAgents:agents.filter(agent=>agent.role==="support_agent"&&agent.available).length,messages,events,orders,customer,templates:templateRows.results as SupportRow[],connection:(connection||{email:mailbox(),connected:false}) as SupportRow,canManage,userId:u.id,configured:Boolean(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET&&process.env.SUPPORT_TOKEN_KEY&&process.env.GOOGLE_REDIRECT_URI),pushConfigured:Boolean(process.env.GMAIL_PUBSUB_TOPIC&&process.env.GMAIL_PUSH_SERVICE_ACCOUNT)};
 }
 export async function mutateSupport(
   b: Record<string, unknown>,
@@ -158,6 +160,21 @@ export async function mutateSupport(
 ) {
   const db = await operationsDb();
   return db.transaction(async (sql) => {
+    if (["template_create", "template_update", "template_delete"].includes(String(b.action))) {
+      if (!manager(u)) throw new HttpError(403, "Manager access required to manage shared templates");
+      if (b.action === "template_delete") {
+        await sql`DELETE FROM support_reply_templates WHERE id=${required(b.templateId, "Template")}`;
+        return { ok: true };
+      }
+      const name = required(b.name, "Template name").slice(0, 80);
+      const body = required(b.body, "Template message").slice(0, 10000);
+      if (b.action === "template_create") {
+        await sql`INSERT INTO support_reply_templates(id,name,body,created_by,updated_by) VALUES(${randomUUID()},${name},${body},${u.id},${u.id})`;
+      } else {
+        await sql`UPDATE support_reply_templates SET name=${name},body=${body},updated_by=${u.id},updated_at=now() WHERE id=${required(b.templateId, "Template")}`;
+      }
+      return { ok: true };
+    }
     if (b.action === "availability") {
       if (!manager(u) && String(b.agentId) !== u.id)
         throw new HttpError(403, "Manager access required");

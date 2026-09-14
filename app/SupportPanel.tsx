@@ -12,6 +12,10 @@ import {
   Paperclip,
   CheckCircle2,
   Users,
+  FileText,
+  SlidersHorizontal,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import { Modal, useEntryDialog } from "./Modal";
 import { isTransientRequestError, readJson } from "../lib/http";
@@ -35,6 +39,7 @@ type Event = {
   actor_id: string;
   details: unknown;
 };
+type ReplyTemplate = { id: string; name: string; body: string; updated_at: string };
 const empty = {
   tickets: [],
   selectedTicket: null,
@@ -47,6 +52,7 @@ const empty = {
   messages: [],
   events: [],
   orders: [],
+  templates: [],
   customer: { name: "", email: "", phone: "", tags: [] },
   connection: { email: "kritika@satmi.in", connected: false },
   canManage: false,
@@ -82,7 +88,9 @@ export default function SupportPanel({
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
-    [settings, setSettings] = useState(false),
+    [supportTab, setSupportTab] = useState<"inbox" | "settings">("inbox"),
+    [templatesOpen, setTemplatesOpen] = useState(false),
+    [templateDraft, setTemplateDraft] = useState<ReplyTemplate | null>(null),
     [requestKey, setRequestKey] = useState("");
   const {requestEntry,dialog}=useEntryDialog();
   const [loaded,setLoaded]=useState(false);
@@ -136,6 +144,15 @@ export default function SupportPanel({
   const ticket =
     data.selectedTicket?.id === selected ? data.selectedTicket : null;
   const canManage = isAdmin || data.canManage;
+  const applyTemplate = (template: ReplyTemplate) => {
+    const customerName = data.customer.name?.trim() || "there";
+    setBody(
+      template.body
+        .replaceAll("{{customer_name}}", customerName)
+        .replaceAll("{{customer_email}}", ticket?.customer_email || data.customer.email || ""),
+    );
+    setMode("reply");
+  };
   async function act(action: string, b: Record<string, unknown> = {}) {
     if (preview) {
       setError(
@@ -181,23 +198,10 @@ export default function SupportPanel({
   if (!active) return null;
   return (
     <section className="ops-workspace support-workspace">{dialog}
-      <div className="inventory-health">
-        <div>
-          <span>Customer support</span>
-          <strong>{data.connection.email}</strong>
-
-        </div>
-        <div className="ops-actions">
-          <span
-            className={`ops-connection ${data.connection.connected ? "connected" : ""}`}
-          >
-            {!loaded ? "Status unavailable" : data.connection.connected ? "Connected" : "Not connected"}
-          </span>
-          <button onClick={() => setSettings(!settings)}>
-            <Settings size={15} /> Mailbox & team
-          </button>
-        </div>
-      </div>
+      <nav className="support-page-tabs" aria-label="Customer support sections">
+        <button className={supportTab === "inbox" ? "active" : ""} onClick={() => setSupportTab("inbox")}><Inbox size={15}/> Ticket inbox</button>
+        <button className={supportTab === "settings" ? "active" : ""} onClick={() => setSupportTab("settings")}><Settings size={15}/> Settings</button>
+      </nav>
       {error && (
         <div className="ops-error" role="alert">
           {error}
@@ -213,7 +217,8 @@ export default function SupportPanel({
           {data.summary.unassigned} ticket{data.summary.unassigned === 1 ? " is" : "s are"} waiting because no available Support agent is registered. Add a user with the Support agent role in Manage users, then refresh the team.
         </div>
       )}
-      <Modal title="Mailbox & team" open={settings} onClose={()=>setSettings(false)} wide>
+      {supportTab === "settings" ? <div className="support-settings-page">
+        <header><p className="eyebrow">Customer support settings</p><h2>Mailbox & team</h2><p>Connect and synchronize the shared inbox, then manage which team members can receive tickets.</p></header>
         <div className="ops-two">
           <article className="ops-card">
             <Mail size={24} />
@@ -312,6 +317,26 @@ export default function SupportPanel({
               </p>
             )}
           </article>
+        </div>
+      </div> : <>
+      <Modal title="Shared reply templates" open={templatesOpen} onClose={()=>{setTemplatesOpen(false);setTemplateDraft(null);}} wide>
+        <div className="support-template-manager">
+          <div>
+            <p className="ops-muted">Templates are inserted into the reply box, where an agent can personalize them before sending. Use <code>{"{{customer_name}}"}</code> or <code>{"{{customer_email}}"}</code> for customer details.</p>
+            {((data.templates || []) as ReplyTemplate[]).map((template) => (
+              <button key={template.id} className={`support-template-row ${templateDraft?.id === template.id ? "selected" : ""}`} onClick={() => setTemplateDraft(template)}>
+                <FileText size={15} /><span><strong>{template.name}</strong><small>{template.body.slice(0, 90)}{template.body.length > 90 ? "…" : ""}</small></span>
+              </button>
+            ))}
+            <button className="support-new-template" onClick={() => setTemplateDraft({id:"",name:"",body:"",updated_at:""})}><Plus size={15}/> New template</button>
+          </div>
+          <form className="support-template-form" onSubmit={async (e) => {e.preventDefault();if (!templateDraft) return; const ok=await act(templateDraft.id ? "template_update" : "template_create", {templateId:templateDraft.id,name:templateDraft.name,body:templateDraft.body}); if(ok) setTemplateDraft(null);}}>
+            {templateDraft ? <>
+              <label>Name<input value={templateDraft.name} maxLength={80} onChange={(e)=>setTemplateDraft({...templateDraft,name:e.target.value})} placeholder="e.g. Delivery update" required /></label>
+              <label>Reply text<textarea value={templateDraft.body} onChange={(e)=>setTemplateDraft({...templateDraft,body:e.target.value})} placeholder="Write a reusable response…" required /></label>
+              <div className="ops-actions"><button className="ops-primary" disabled={busy}>Save template</button>{templateDraft.id && <button type="button" disabled={busy} onClick={async()=>{if(confirm(`Delete ${templateDraft.name}?`)){if(await act("template_delete",{templateId:templateDraft.id}))setTemplateDraft(null)}}}><Trash2 size={14}/> Delete</button>}</div>
+            </> : <div className="ops-empty"><FileText size={28}/><h3>Select a template</h3><p>Choose one to edit it, or create a new shared response.</p></div>}
+          </form>
         </div>
       </Modal>
       <div className="inventory-metrics support-metrics">
@@ -561,6 +586,15 @@ export default function SupportPanel({
                     <LockKeyhole size={14} /> Internal note
                   </button>
                 </div>
+                <div className="support-template-bar">
+                  <span><FileText size={13}/> Quick replies</span>
+                  {((data.templates || []) as ReplyTemplate[]).map((template) => (
+                    <button key={template.id} type="button" disabled={busy} onClick={() => applyTemplate(template)} title={`Insert ${template.name}`}>
+                      {template.name}
+                    </button>
+                  ))}
+                  {canManage && <button type="button" onClick={() => setTemplatesOpen(true)}><SlidersHorizontal size={13}/> Manage</button>}
+                </div>
                 <p className="support-delivery-line">
                   {mode === "reply"
                     ? `To ${ticket.customer_email} · From ${data.connection.email}`
@@ -643,6 +677,7 @@ export default function SupportPanel({
               </aside>
         )}
       </div>
+      </>}
     </section>
   );
 }

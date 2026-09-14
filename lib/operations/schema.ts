@@ -24,7 +24,7 @@ export async function operationsDb() {
   await ensureSchema(db);
   ready ??= (async()=>{
     const exists = await db.prepare("SELECT to_regclass('public.operations_schema_versions') name").first<{name:string}>();
-    if(exists?.name && await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0018_support_read_performance'").first())return;
+    if(exists?.name && await db.prepare("SELECT version FROM operations_schema_versions WHERE version='0019_support_templates'").first())return;
     await db.transaction(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(421995)`;
       await sql`CREATE TABLE IF NOT EXISTS operations_schema_versions (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
@@ -57,6 +57,8 @@ export async function operationsDb() {
       if(!inventoryReadVersion){await sql.unsafe(INVENTORY_READ_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0017_inventory_read_performance')`;}
       const [supportReadVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0018_support_read_performance'`;
       if(!supportReadVersion){await sql.unsafe(SUPPORT_READ_PERFORMANCE_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0018_support_read_performance')`;}
+      const [templatesVersion]=await sql`SELECT version FROM operations_schema_versions WHERE version='0019_support_templates'`;
+      if(!templatesVersion){await sql.unsafe(SUPPORT_TEMPLATES_MIGRATION);await sql`INSERT INTO operations_schema_versions(version) VALUES('0019_support_templates')`;}
     });
   })()
     .catch((e) => {
@@ -93,4 +95,28 @@ CREATE INDEX IF NOT EXISTS idx_support_tickets_assignee_status ON support_ticket
 CREATE INDEX IF NOT EXISTS idx_support_tickets_customer_email ON support_tickets (LOWER(customer_email));
 CREATE INDEX IF NOT EXISTS idx_orders_customer_email ON orders (LOWER(customer_email),created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_support_events_ticket_created ON support_events (ticket_id,created_at);
+`;
+const SUPPORT_TEMPLATES_MIGRATION = `
+CREATE TABLE IF NOT EXISTS support_reply_templates (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(name)
+);
+CREATE INDEX IF NOT EXISTS idx_support_reply_templates_updated ON support_reply_templates(updated_at DESC);
+INSERT INTO support_reply_templates(id,name,body,created_by,updated_by) VALUES
+  ('support-template-acknowledgement','Acknowledgement','Hi {{customer_name}},\n\nThanks for getting in touch. We have received your request and are looking into it. We will update you shortly.\n\nRegards,\nSatmi Support','system','system'),
+  ('support-template-order-update','Order status update','Hi {{customer_name}},\n\nThanks for your patience. We are checking the latest update for your order and will share the details as soon as possible.\n\nRegards,\nSatmi Support','system','system'),
+  ('support-template-resolution','Resolution confirmation','Hi {{customer_name}},\n\nYour request has been resolved. Please reply to this email if you need any further help.\n\nRegards,\nSatmi Support','system','system')
+ON CONFLICT(name) DO NOTHING;
+ALTER TABLE support_reply_templates ENABLE ROW LEVEL SECURITY;
+DO $$ DECLARE r TEXT; BEGIN
+  FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
+    IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname=r) THEN EXECUTE format('REVOKE ALL ON TABLE public.support_reply_templates FROM %I',r); END IF;
+  END LOOP;
+END $$;
 `;

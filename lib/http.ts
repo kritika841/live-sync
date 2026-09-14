@@ -20,6 +20,7 @@ export function errorResponse(error: unknown) {
   if (error instanceof HttpError)
     return Response.json({ error: message }, { status: error.status });
   const code = (error as {code?:string})?.code;
+  if(code === 'CONNECTION_DESTROYED') return Response.json({error:'The database connection was reset. Please retry this action.',code:'DATABASE_CONNECTION_RESET'},{status:503});
   if(code === '23505') return Response.json({error:'This record already exists. Refresh to see the saved record.',code:'DUPLICATE_RECORD'},{status:409});
   if(code === '23503') return Response.json({error:'A linked record is missing or still in use. Refresh and check your selection.',code:'INVALID_REFERENCE'},{status:409});
   if(code === '57014' || /timeout|timed out/i.test(message)) return Response.json({error:'The data service took too long to respond. Your saved records are unchanged. Please retry.',code:'SERVICE_TIMEOUT'},{status:503});

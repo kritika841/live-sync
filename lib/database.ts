@@ -135,6 +135,7 @@ export class PostgresDatabase {
   private query!: (text: string, values: unknown[]) => Promise<Row[]>;
   private sql!: Sql;
   private liveCheck: Promise<void> | undefined;
+  private reconnecting: Promise<void> | undefined;
   private lastLiveCheck = 0;
 
   constructor(private readonly connectionString: string) {
@@ -148,9 +149,6 @@ export class PostgresDatabase {
       // Supabase transaction pooling + Vercel functions: one client
       // connection per warm function instance avoids exhausting the pool.
       max: 1,
-      idle_timeout: 5,
-      max_lifetime: 60,
-      keep_alive: 10,
       connect_timeout: 5,
       // A slow or exhausted database must fail a dashboard request promptly.
       // Without these server-side limits, Vercel keeps requests alive for up
@@ -161,7 +159,36 @@ export class PostgresDatabase {
         idle_in_transaction_session_timeout: 25000,
       },
     });
-    this.query = async (text, values) => normalizeRows((await this.sql.unsafe(postgresPlaceholders(text), values as never[])) as Row[]);
+    this.query = (text, values) => this.execute(text, values);
+  }
+
+  private async replaceClient(failed: Sql) {
+    if (failed !== this.sql) return;
+    this.reconnecting ??= Promise.resolve().then(() => {
+      // Do not call `end()` on the old client here. A request that is already
+      // using it can still be completing; destroying it caused otherwise
+      // healthy concurrent dashboard requests to fail with CONNECTION_DESTROYED.
+      if (failed === this.sql) this.connect();
+    }).finally(() => {
+      this.reconnecting = undefined;
+    });
+    await this.reconnecting;
+  }
+
+  private async execute(text: string, values: unknown[]) {
+    const active = this.sql;
+    const run = (client: Sql) => client.unsafe(postgresPlaceholders(text), values as never[]) as Promise<Row[]>;
+    try {
+      return normalizeRows(await run(active));
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      // Retrying reads is safe and lets a warm serverless instance recover
+      // from a pooler-side reset without showing a dashboard error. Writes
+      // are deliberately not retried: their result can be ambiguous.
+      if (code !== "CONNECTION_DESTROYED" || !/^\s*(SELECT|WITH|SHOW)\b/i.test(text)) throw error;
+      await this.replaceClient(active);
+      return normalizeRows(await run(this.sql));
+    }
   }
 
   private async checkClient() {
@@ -175,8 +202,7 @@ export class PostgresDatabase {
     } catch {
       // A frozen serverless instance can retain a socket that Supabase's
       // pooler has already dropped. Recycle it before serving the request.
-      await active.end({ timeout: 0 }).catch(() => undefined);
-      this.connect();
+      await this.replaceClient(active);
       await Promise.race([
         this.sql.unsafe("SELECT 1"),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Database connection is unavailable")), 5000)),

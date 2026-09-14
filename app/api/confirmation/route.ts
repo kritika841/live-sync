@@ -2,8 +2,8 @@ import {completePhone} from "../../../lib/contact";
 import {shopifyOrderContacts} from "../../../lib/shopify";
 import { errorResponse } from "../../../lib/http";
 import { ACTIONABLE_STATUS_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
-import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
-import { isSameOrigin, requireApiUser } from "../../../lib/auth/access";
+import { ensureConfirmationSchema, getRuntimeEnv } from "../../../lib/database";
+import { isAdmin, isSameOrigin, requireApiUser } from "../../../lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +23,7 @@ const orderColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_nam
   o.order_date AS orderDate, o.status, o.payment_method AS paymentMethod, o.total,
   o.products_json AS productsJson, o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus,
   o.confirmation_updated_at AS confirmationUpdatedAt, o.confirmed_at AS confirmedAt, o.rejected_at AS rejectedAt,
+  o.confirmation_assignee_id AS confirmationAssigneeId, COALESCE(a.name, '') AS confirmationAssigneeName,
   c.id AS campaignId, c.name AS campaignName, c.position AS campaignPosition, ca.position AS orderPosition`;
 
 const candidateColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_name AS customerName,
@@ -65,12 +66,15 @@ async function handleGET(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
-  await ensureSchema(runtime.DB);
+  await ensureConfirmationSchema(runtime.DB);
   const url = new URL(request.url);
   const section = url.searchParams.get("section") === "campaigns" ? "campaigns" : "confirmation";
   const requestedMode = url.searchParams.get("mode");
   const mode = requestedMode === "confirmed" || requestedMode === "rejected" ? requestedMode : "queue";
   const now = new Date().toISOString();
+  const dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? String(url.searchParams.get("from")) : "";
+  const dateTo = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? String(url.searchParams.get("to")) : "";
+  const agent = String(url.searchParams.get("agent") || "");
 
   if (section === "campaigns") {
     const [campaigns, candidates] = await Promise.all([
@@ -92,21 +96,29 @@ async function handleGET(request: Request) {
     });
   }
 
+  const filters: string[] = [];
+  const filterValues: string[] = [];
+  if (dateFrom) { filters.push("COALESCE(NULLIF(o.order_date,''),o.created_at)::date >= ?::date"); filterValues.push(dateFrom); }
+  if (dateTo) { filters.push("COALESCE(NULLIF(o.order_date,''),o.created_at)::date <= ?::date"); filterValues.push(dateTo); }
+  if (agent === "unassigned") filters.push("o.confirmation_assignee_id='' ");
+  else if (agent) { filters.push("o.confirmation_assignee_id=?"); filterValues.push(agent); }
+  const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
+  const joins = "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id";
   const listQuery = mode === "confirmed"
     ? runtime.DB.prepare(`SELECT ${orderColumns}
-      FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
-      WHERE o.confirmation_status='confirmed' ORDER BY o.confirmed_at DESC, o.id DESC`)
+      FROM orders o ${joins}
+      WHERE o.confirmation_status='confirmed'${extraWhere} ORDER BY o.confirmed_at DESC, o.id DESC`).bind(...filterValues)
     : mode === "rejected"
       ? runtime.DB.prepare(`SELECT ${orderColumns}
-        FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
-        WHERE o.confirmation_status='rejected' ORDER BY o.rejected_at DESC, o.id DESC`)
+        FROM orders o ${joins}
+        WHERE o.confirmation_status='rejected'${extraWhere} ORDER BY o.rejected_at DESC, o.id DESC`).bind(...filterValues)
       : runtime.DB.prepare(`SELECT ${orderColumns}
-      FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id JOIN campaigns c ON c.id=ca.campaign_id
+      FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id
       WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
         AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
-          AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))
-      ORDER BY c.position, ca.position, COALESCE(NULLIF(o.order_date,''),o.created_at), o.id`).bind(now);
-  const [orders, countRow] = await Promise.all([
+          AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))${extraWhere}
+      ORDER BY c.position, ca.position, COALESCE(NULLIF(o.order_date,''),o.created_at), o.id`).bind(now, ...filterValues);
+  const [orders, countRow, agents] = await Promise.all([
     listQuery.all<Record<string, unknown>>(),
     runtime.DB.prepare(`SELECT
       (SELECT COUNT(*) FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id
@@ -115,6 +127,7 @@ async function handleGET(request: Request) {
             AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))) AS queue,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed') AS confirmed,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; rejected: number }>(),
+    runtime.DB.prepare("SELECT user_id AS userId,name FROM support_agents WHERE available ORDER BY name").all<{userId:string;name:string}>().catch(() => ({results:[] as {userId:string;name:string}[]})),
   ]);
   const visibleIds = orders.results.map((row) => Number(row.id));
   const attemptRows = visibleIds.length ? await runtime.DB.prepare(`SELECT id, order_id AS orderId, attempt_number AS attemptNumber,
@@ -136,6 +149,7 @@ async function handleGET(request: Request) {
   return Response.json({
     [mode]: serialized,
     counts,
+    agents: agents.results,
   });
 }
 
@@ -145,12 +159,24 @@ async function handlePOST(request: Request) {
   if (["support_agent","support_manager","warehouse"].includes(access.user.role)) return Response.json({error:"Order confirmation access required"},{status:403});
   if (!sameOrigin(request) || !isSameOrigin(request)) return Response.json({ error: "Invalid request origin" }, { status: 403 });
   const runtime = getRuntimeEnv();
-  await ensureSchema(runtime.DB);
+  await ensureConfirmationSchema(runtime.DB);
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body) return Response.json({ error: "Invalid request" }, { status: 400 });
   const action = String(body.action || "");
   const now = new Date().toISOString();
   try {
+    if (action === "assign_confirmation_agent") {
+      if (!isAdmin(access.user)) return Response.json({error:"Administrator access required"},{status:403});
+      const orderId = Number(body.orderId);
+      const agentId = String(body.agentId || "");
+      if (!orderId) throw new Error("Order is required");
+      if (agentId) {
+        const agent = await runtime.DB.prepare("SELECT user_id FROM support_agents WHERE user_id=? AND available").bind(agentId).first();
+        if (!agent) throw new Error("Select an available agent");
+      }
+      await runtime.DB.prepare("UPDATE orders SET confirmation_assignee_id=?,confirmation_updated_at=? WHERE id=?").bind(agentId, now, orderId).run();
+      return Response.json({ok:true});
+    }
     if (action === "refresh_contacts") {
       const after = Math.max(0, Number(body.after) || 0);
       const rows = await runtime.DB.prepare(`SELECT id,channel_order_id AS "channelOrderId",customer_phone AS "customerPhone" FROM orders WHERE id>? AND LOWER(channel_name) LIKE '%shopify%' ORDER BY id LIMIT 50`).bind(after).all<{id:number;channelOrderId:string;customerPhone:string}>();

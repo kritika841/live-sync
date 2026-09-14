@@ -233,6 +233,7 @@ export type RuntimeEnv = {
 
 let database: PostgresDatabase | undefined;
 let schemaReady: Promise<void> | undefined;
+let confirmationSchemaReady: Promise<void> | undefined;
 
 export function getRuntimeEnv(): RuntimeEnv {
   const connectionString = process.env.SUPABASE_DB_URL;
@@ -260,6 +261,18 @@ export async function ensureSchema(db: PostgresDatabase) {
     throw error;
   });
   return schemaReady;
+}
+
+export async function ensureConfirmationSchema(db: PostgresDatabase) {
+  await ensureSchema(db);
+  confirmationSchemaReady ??= db.batch([
+    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_assignee_id TEXT NOT NULL DEFAULT ''"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_assignee ON orders (confirmation_assignee_id, confirmation_status, confirmation_updated_at DESC)"),
+  ]).then(() => undefined).catch((error) => {
+    confirmationSchemaReady = undefined;
+    throw error;
+  });
+  await confirmationSchemaReady;
 }
 
 // Avoid repeating ALTER TABLE on every serverless cold start while order writes run.

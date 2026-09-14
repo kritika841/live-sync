@@ -465,7 +465,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           )}
         </section>
 
-        <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} preview={preview} />
+        <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} preview={preview} isAdmin={isAdmin} />
 
         <InventoryPanel active={view === "inventory"} isAdmin={isAdmin || ["operations", "warehouse"].includes(userRole)} preview={preview} />
         <SupportPanel active={view === "support"} isAdmin={isAdmin} preview={preview} />

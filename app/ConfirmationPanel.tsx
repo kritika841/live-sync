@@ -12,6 +12,7 @@ type ConfirmationOrder = {
   customerState: string; customerAddress: string; customerPincode: string; orderDate: string; status: string;
   paymentMethod: string; total: number; products: Array<{ name?: string; quantity?: number; sku?: string }>;
   confirmationStatus: string; campaignName?: string; confirmedAt?: string; rejectedAt?: string; phoneMasked?: boolean; tags: string[]; attempts: Attempt[];
+  confirmationAssigneeId?: string; confirmationAssigneeName?: string;
 };
 type Campaign = {
   id: string; name: string; description: string; position: number; isActive: boolean; autoAssign: boolean;
@@ -20,11 +21,12 @@ type Campaign = {
 type ConfirmationData = {
   queue: ConfirmationOrder[]; confirmed: ConfirmationOrder[]; rejected: ConfirmationOrder[]; candidates: ConfirmationOrder[];
   campaigns: Campaign[]; availableTags: string[]; counts: { queue: number; confirmed: number; rejected: number; approved: number };
+  agents: Array<{userId:string;name:string}>;
 };
 type Mode = "queue" | "confirmed" | "rejected";
 type OrderAction = "confirm" | "callback" | "unreachable" | "reject";
 
-const emptyData: ConfirmationData = { queue: [], confirmed: [], rejected: [], candidates: [], campaigns: [], availableTags: [], counts: { queue: 0, confirmed: 0, rejected: 0, approved: 0 } };
+const emptyData: ConfirmationData = { queue: [], confirmed: [], rejected: [], candidates: [], campaigns: [], availableTags: [], agents: [], counts: { queue: 0, confirmed: 0, rejected: 0, approved: 0 } };
 
 function when(value?: string) {
   if (!value) return "—";
@@ -36,7 +38,7 @@ function productSummary(products: ConfirmationOrder["products"]) {
   return products.length ? products.map((product) => `${product.name || product.sku || "Product"}${product.quantity ? ` ×${product.quantity}` : ""}`).join(", ") : "—";
 }
 
-export default function ConfirmationPanel({ active, section, preview=false }: { active: boolean; preview?:boolean; section: "confirmation" | "campaigns" }) {
+export default function ConfirmationPanel({ active, section, preview=false, isAdmin=false }: { active: boolean; preview?:boolean; section: "confirmation" | "campaigns"; isAdmin?:boolean }) {
   const [mode, setMode] = useState<Mode>("queue");
   const [data, setData] = useState<ConfirmationData>(emptyData);
   const [loading, setLoading] = useState(!preview);
@@ -63,6 +65,9 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
   const [draggedCampaignId, setDraggedCampaignId] = useState("");
   const [openCampaignMenu, setOpenCampaignMenu] = useState("");
   const [confirmationSearch, setConfirmationSearch] = useState("");
+  const [confirmationFrom, setConfirmationFrom] = useState("");
+  const [confirmationTo, setConfirmationTo] = useState("");
+  const [confirmationAgent, setConfirmationAgent] = useState("");
   const loadAbort = useRef<AbortController | null>(null);
   useLayoutEffect(() => {
     const next = new Map<string, number>();
@@ -82,6 +87,9 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
     if (!quiet) setLoading(true);
     try {
       const params = new URLSearchParams({ section, mode });
+      if (confirmationFrom) params.set("from", confirmationFrom);
+      if (confirmationTo) params.set("to", confirmationTo);
+      if (confirmationAgent) params.set("agent", confirmationAgent);
       if (section === "campaigns" && createOpen) params.set("candidates","true");
       const response = await fetch(`/api/confirmation?${params}`, { cache: "no-store", signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]) });
       const payload = await readJson<Partial<ConfirmationData>>(response);
@@ -94,7 +102,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
       if (loadAbort.current === controller) loadAbort.current = null;
       if (!controller.signal.aborted && !quiet) setLoading(false);
     }
-  }, [mode, section, createOpen]);
+  }, [mode, section, createOpen, confirmationFrom, confirmationTo, confirmationAgent]);
 
   useEffect(() => {
     if (!active || preview) return;
@@ -166,6 +174,9 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
   }
   function openAction(order: ConfirmationOrder, action: OrderAction) {
     setSelectedOrder(order); setOrderAction(action); setNote(""); setCallbackAt(""); setRejectionReason("customer_cancelled");
+  }
+  function confirmationTags(order: ConfirmationOrder) {
+    return <div className="confirmation-tags">{order.tags.length ? order.tags.map((tag) => <span key={tag}>{tag}</span>) : <small>No Shopify tags</small>}</div>;
   }
 
   async function submitOrderAction(event: FormEvent) {
@@ -239,7 +250,7 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
         <button className={mode === "rejected" ? "active rejected" : ""} onClick={() => setMode("rejected")}><strong>Rejected <b>{data.counts.rejected}</b></strong></button>
       </div>}
 
-      {section === "confirmation" && <div className="confirmation-contact-toolbar"><button disabled={busy || preview} onClick={()=>void refreshContacts()}>{busy ? "Working…" : "Refresh Shopify phones & tags"}</button><label className="confirmation-contact-filter"><Search size={16}/><input type="search" value={confirmationSearch} onChange={(event) => setConfirmationSearch(event.target.value)} placeholder="Filter by customer, contact number, order, city or state"/><span>{confirmationOrders.length} shown</span></label></div>}
+      {section === "confirmation" && <div className="confirmation-contact-toolbar"><button disabled={busy || preview} onClick={()=>void refreshContacts()}>{busy ? "Working…" : "Refresh Shopify phones & tags"}</button><label className="confirmation-contact-filter"><Search size={16}/><input type="search" value={confirmationSearch} onChange={(event) => setConfirmationSearch(event.target.value)} placeholder="Filter by customer, contact number, order, city or state"/><span>{confirmationOrders.length} shown</span></label><label>From<input type="date" value={confirmationFrom} max={confirmationTo || undefined} onChange={(event) => setConfirmationFrom(event.target.value)}/></label><label>To<input type="date" value={confirmationTo} min={confirmationFrom || undefined} onChange={(event) => setConfirmationTo(event.target.value)}/></label><label>Assigned agent<select value={confirmationAgent} onChange={(event) => setConfirmationAgent(event.target.value)}><option value="">All agents</option><option value="unassigned">Unassigned</option>{data.agents.map((agent) => <option value={agent.userId} key={agent.userId}>{agent.name}</option>)}</select></label></div>}
 
       {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}
       {loading ? <div className="confirmation-card confirmation-loading"><i className="loader"/><span>Loading confirmation workspace…</span></div> : null}
@@ -250,7 +261,8 @@ export default function ConfirmationPanel({ active, section, preview=false }: { 
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>{when(order.orderDate)} · {order.paymentMethod || "Payment unknown"} · ₹{Number(order.total || 0).toLocaleString("en-IN")}</small><p>{productSummary(order.products)}</p></div>
           <div className="confirmation-customer"><strong>{order.customerName || "Customer"}</strong><small>{[order.customerAddress, order.customerCity, order.customerState, order.customerPincode].filter(Boolean).join(", ") || "No address"}</small></div>
           {phoneColumn(order)}
-          <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{order.attempts.length}/3 recall attempts</small>{order.attempts.at(-1) && <small>Last: {order.attempts.at(-1)?.outcome} · {when(order.attempts.at(-1)?.createdAt)}</small>}</div>
+          {confirmationTags(order)}
+          <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span>{isAdmin ? <label className="confirmation-agent-select">Agent<select value={order.confirmationAssigneeId || ""} disabled={busy} onChange={(event) => void post({action:"assign_confirmation_agent",orderId:order.id,agentId:event.target.value})}><option value="">Unassigned</option>{data.agents.map((agent) => <option key={agent.userId} value={agent.userId}>{agent.name}</option>)}</select></label> : <small>{order.confirmationAssigneeName ? `Assigned to ${order.confirmationAssigneeName}` : "Unassigned"}</small>}<small>{order.attempts.length}/3 recall attempts</small>{order.attempts.at(-1) && <small>Last: {order.attempts.at(-1)?.outcome} · {when(order.attempts.at(-1)?.createdAt)}</small>}</div>
           <div className="confirmation-actions">
             <div className="confirmation-primary-actions">
               <button className="confirmation-accept" onClick={() => openAction(order, "confirm")}>Accept</button>

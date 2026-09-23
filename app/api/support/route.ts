@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
 import { access, manager } from "../../../lib/operations/access";
 import {
   supportData,
@@ -8,7 +10,7 @@ import { syncMailbox, flushOutbox } from "../../../lib/operations/gmail";
 import { HttpError, errorResponse } from "../../../lib/http";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
-export async function GET(r: Request) {
+async function GETHandler(r: Request) {
   try {
     const u = await access(r, "support");
     return Response.json(
@@ -26,7 +28,7 @@ export async function GET(r: Request) {
     return errorResponse(e);
   }
 }
-export async function POST(r: Request) {
+async function POSTHandler(r: Request) {
   try {
     const u = await access(r, "support");
     const b = await r.json();
@@ -56,4 +58,14 @@ export async function POST(r: Request) {
   } catch (e) {
     return errorResponse(e);
   }
+}
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}
+
+export async function POST(...args: Parameters<typeof POSTHandler>) {
+  try { return await withRequestDatabase(() => POSTHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
 }

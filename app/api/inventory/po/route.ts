@@ -1,8 +1,10 @@
+import { withRequestDatabase } from "../../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../../lib/http";
 import {access} from '../../../../lib/operations/access';
 import {operationsDb} from '../../../../lib/operations/schema';
 import {errorResponse,HttpError} from '../../../../lib/http';
 import {poDefaults,renderPurchaseOrder} from '../../../../lib/operations/po-document';
-export async function GET(request:Request) {
+async function GETHandler(request:Request) {
  try {
   await access(request);const db=await operationsDb();
   const po=await db.prepare(`SELECT p.*,s.name,s.email,s.phone,s.tax_id,s.address FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=?`).bind(new URL(request.url).searchParams.get('id')).first<Record<string,unknown>>();
@@ -12,4 +14,9 @@ export async function GET(request:Request) {
   const bytes=await renderPurchaseOrder({number:String(po.po_number),date:String(po.order_date),expected:String(po.expected_date),details,lines:lines.results.map(line=>({description:String(line.description),quantity:Number(line.ordered_quantity),unit:String(line.purchase_unit||''),cost:Number(line.unit_cost),gst:Number(line.tax_rate)}))});
   return new Response(Buffer.from(bytes),{headers:{'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="${String(po.po_number).replace(/[^a-zA-Z0-9_-]/g,'_')}.pdf"`,'Cache-Control':'private, no-store'}});
  }catch(error){return errorResponse(error);}
+}
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
 }

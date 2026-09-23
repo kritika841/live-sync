@@ -261,11 +261,12 @@ test("conversion and HTTP failures are explicit", async () => {
   assert.match(mime, /In-Reply-To: <ref@test>/);
 });
 
-test("verified fulfilment consumes once and RTO QC restores only accepted recovery", async () => {
+test("blank-SKU Shopify variant fulfilment consumes once and RTO QC restores only accepted recovery", async () => {
   const { reconcileInventory } = await import("../lib/operations/reconcile");
   const c = randomUUID(),
     product = randomUUID(),
     o = Date.now();
+  const variantGid = `gid://shopify/ProductVariant/${o}`;
   await mutateInventory(
     { action: "component", id: c, name: "QC material", sku: c, unit: "g" },
     admin,
@@ -273,7 +274,7 @@ test("verified fulfilment consumes once and RTO QC restores only accepted recove
   // Fixture represents stock already received with its purchasing paperwork.
   await sql`INSERT INTO component_ledger(component_id,quantity_delta,entry_type,reason,reference_type,reference_id,idempotency_key,actor_email,created_at) VALUES(${c},1000,'adjustment','Opening fixture','adjustment',${c},${c},'test','test')`;
 
-  await sql`INSERT INTO inventory_products(id,shopify_product_id,shopify_variant_id,sku,title,synced_at) VALUES(${product},${product},${product},${product},'QC product',${new Date().toISOString()})`;
+  await sql`INSERT INTO inventory_products(id,shopify_product_id,shopify_variant_id,sku,title,synced_at) VALUES(${product},${product},${variantGid},'','QC product',${new Date().toISOString()})`;
   await mutateInventory(
     {
       action: "recipe",
@@ -282,7 +283,7 @@ test("verified fulfilment consumes once and RTO QC restores only accepted recove
     },
     admin,
   );
-  await sql`INSERT INTO orders(id,channel_order_id,channel_id,channel_name,products_json,status,synced_at) VALUES(${o},${String(o)},1,'test',${JSON.stringify([{ sku: product, quantity: 2 }])},'NEW',${new Date().toISOString()})`;
+  await sql`INSERT INTO orders(id,channel_order_id,channel_id,channel_name,products_json,status,synced_at) VALUES(${o},${String(o)},1,'test',${JSON.stringify([{ sku: "", channel_sku: String(o), quantity: 2 }])},'NEW',${new Date().toISOString()})`;
   await reconcileInventory([o]);
   await assert.rejects(
     mutateInventory(
@@ -302,6 +303,8 @@ test("verified fulfilment consumes once and RTO QC restores only accepted recove
   let [r] =
     await sql`SELECT SUM(quantity_delta) qty FROM component_ledger WHERE component_id=${c}`;
   assert.equal(Number(r.qty), 600);
+  await sql`UPDATE orders SET status='RTO INITIATED' WHERE id=${o}`;
+  await assert.rejects(mutateInventory({action:'qc',orderId:o,reason:'Not received yet',lines:[{componentId:c,quantity:300}]},admin),/return is received/);
   await sql`UPDATE orders SET status='RTO DELIVERED' WHERE id=${o}`;
   const qc = {
     action: "qc",

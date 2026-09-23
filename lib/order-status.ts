@@ -39,3 +39,15 @@ export function sqlForTab(tab: OrderTab) {
   if (tab === "new") return `${s} IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')`;
   return "1 = 1";
 }
+
+export const orderIndiaDateSql = `(CASE
+  WHEN COALESCE(NULLIF(order_date, ''), created_at) ~ '^\\d{4}-\\d{2}-\\d{2}T'
+    THEN TO_CHAR(COALESCE(NULLIF(order_date, ''), created_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')
+  ELSE SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10)
+END)`;
+
+export function sqlForDashboardTab(tab: OrderTab) {
+  // New is the persistent unshipped intake queue. It is intentionally not
+  // date-bounded: older orders that remain NEW still need processing.
+  return sqlForTab(tab);
+}

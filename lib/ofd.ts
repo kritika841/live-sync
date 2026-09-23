@@ -5,17 +5,20 @@ const latestOfdDateSql=indiaDateSql("out_for_delivery_at");
 const firstOfdDateSql=indiaDateSql("first_out_for_delivery_at");
 export async function loadOfdRecords(db:PostgresDatabase,selectedDate:string){
   return db.prepare(`
-      WITH matching_events AS (
-        SELECT orders.id AS order_id,
+      WITH event_orders AS (
+        SELECT o.id AS order_id,e.id AS event_id FROM orders o JOIN webhook_events e ON e.shiprocket_order_id=o.id
+        UNION
+        SELECT o.id,e.id FROM orders o JOIN webhook_events e ON e.shipment_id=o.shipment_id
+        UNION
+        SELECT o.id,e.id FROM orders o JOIN webhook_events e ON e.awb=o.awb WHERE e.awb<>''
+        UNION
+        SELECT o.id,e.id FROM orders o JOIN webhook_events e ON e.channel_order_id=o.channel_order_id WHERE e.channel_order_id<>''
+      ), matching_events AS (
+        SELECT matched.order_id,
           COALESCE(NULLIF(events.event_at, ''), events.received_at) AS ofd_at,
           TO_CHAR(COALESCE(NULLIF(events.event_at, ''), events.received_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS event_date,
           events.status
-        FROM orders
-        JOIN webhook_events events ON
-          (events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
-          OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
-          OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
-          OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id)
+        FROM event_orders matched JOIN webhook_events events ON events.id=matched.event_id
       ), matching_ofd_events AS (
         SELECT order_id, ofd_at, event_date AS ofd_date
         FROM matching_events

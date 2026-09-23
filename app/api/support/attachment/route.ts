@@ -1,9 +1,11 @@
+import { withRequestDatabase } from "../../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../../lib/http";
 import { access } from "../../../../lib/operations/access";
 import { ticketAccess } from "../../../../lib/operations/support";
 import { operationsDb } from "../../../../lib/operations/schema";
 import { gmailAttachment } from "../../../../lib/operations/gmail";
 import { errorResponse, HttpError } from "../../../../lib/http";
-export async function GET(r: Request) {
+async function GETHandler(r: Request) {
   try {
     const u = await access(r, "support"),
       url = new URL(r.url),
@@ -40,4 +42,9 @@ export async function GET(r: Request) {
   } catch (e) {
     return errorResponse(e);
   }
+}
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
 }

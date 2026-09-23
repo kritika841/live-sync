@@ -1,8 +1,10 @@
+import { withRequestDatabase } from "../../../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../../../lib/http";
 import { verifyPush, runSupport } from "../../../../../lib/operations/gmail";
 import { mailbox } from "../../../../../lib/operations/support";
 import { errorResponse, HttpError } from "../../../../../lib/http";
 export const maxDuration = 300;
-export async function POST(r: Request) {
+async function POSTHandler(r: Request) {
   try {
     if (
       !process.env.GMAIL_PUSH_SERVICE_ACCOUNT ||
@@ -21,4 +23,9 @@ export async function POST(r: Request) {
   } catch (e) {
     return errorResponse(e);
   }
+}
+
+export async function POST(...args: Parameters<typeof POSTHandler>) {
+  try { return await withRequestDatabase(() => POSTHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
 }

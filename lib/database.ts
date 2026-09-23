@@ -1,9 +1,16 @@
-import postgres, { type Sql } from "postgres";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Pool, type PoolClient } from "pg";
+import { supabaseCA } from "./certs/supabase-ca";
+import {orderTagFunctionsSql} from "./order-tag-schema";
+import { transactionQueries } from "./postgres-transaction";
 
 type Row = Record<string, unknown>;
 
 const resultKeyAliases: Record<string, string> = {
   orderid: "orderId",
+  userid: "userId",
+  confirmationassigneeid: "confirmationAssigneeId",
+  confirmationassigneename: "confirmationAssigneeName",
   rejectionreason: "rejectionReason",
   confirmationnote: "confirmationNote",
   lowapproved: "lowApproved",
@@ -132,111 +139,70 @@ export class PreparedStatement {
 }
 
 export class PostgresDatabase {
-  private query!: (text: string, values: unknown[]) => Promise<Row[]>;
-  private sql!: Sql;
-  private liveCheck: Promise<void> | undefined;
-  private reconnecting: Promise<void> | undefined;
-  private lastLiveCheck = 0;
+  private readonly pool: Pool;
+  private readonly clients = new Set<PoolClient>();
 
-  constructor(private readonly connectionString: string) {
-    this.connect();
-  }
-
-  private connect() {
-    this.sql = postgres(this.connectionString, {
-      prepare: false,
-      onnotice: () => {},
-      // Supabase transaction pooling + Vercel functions: one client
-      // connection per warm function instance avoids exhausting the pool.
-      max: 1,
-      connect_timeout: 5,
-      // A slow or exhausted database must fail a dashboard request promptly.
-      // Without these server-side limits, Vercel keeps requests alive for up
-      // to five minutes and browser polling multiplies the backlog.
-      connection: {
-        statement_timeout: 20000,
-        lock_timeout: 5000,
-        idle_in_transaction_session_timeout: 25000,
-      },
+  constructor(connectionString: string) {
+    const url = new URL(connectionString);
+    const supabase = url.hostname.endsWith('.supabase.com') || url.hostname.endsWith('.supabase.co');
+    // Use the provider CA with hostname verification, never rejectUnauthorized:false.
+    if (supabase) url.searchParams.delete('sslmode');
+    this.pool = new Pool({
+      connectionString: url.toString(),
+      ...(supabase ? {ssl:{ca:supabaseCA,rejectUnauthorized:true}} : {}),
+      max: 3,
+      connectionTimeoutMillis: 5000,
+      idleTimeoutMillis: 10000,
+      query_timeout: 15000,
+      statement_timeout: 15000,
+      lock_timeout: 5000,
+      idle_in_transaction_session_timeout: 20000,
+      application_name: "satmi-dashboard",
     });
-    this.query = (text, values) => this.execute(text, values);
-  }
-
-  private async replaceClient(failed: Sql) {
-    if (failed !== this.sql) return;
-    this.reconnecting ??= Promise.resolve().then(() => {
-      // Do not call `end()` on the old client here. A request that is already
-      // using it can still be completing; destroying it caused otherwise
-      // healthy concurrent dashboard requests to fail with CONNECTION_DESTROYED.
-      if (failed === this.sql) this.connect();
-    }).finally(() => {
-      this.reconnecting = undefined;
-    });
-    await this.reconnecting;
+    this.pool.on('connect',client=>this.clients.add(client));
+    this.pool.on('remove',client=>this.clients.delete(client));
+    // Idle socket errors are handled by the pool; do not crash the process.
+    this.pool.on('error',error=>console.error('Idle database connection failed',{code:(error as {code?:string}).code}));
   }
 
   private async execute(text: string, values: unknown[]) {
-    const active = this.sql;
-    const run = (client: Sql) => client.unsafe(postgresPlaceholders(text), values as never[]) as Promise<Row[]>;
-    try {
-      return normalizeRows(await run(active));
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      // Retrying reads is safe and lets a warm serverless instance recover
-      // from a pooler-side reset without showing a dashboard error. Writes
-      // are deliberately not retried: their result can be ambiguous.
-      if (code !== "CONNECTION_DESTROYED" || !/^\s*(SELECT|WITH|SHOW)\b/i.test(text)) throw error;
-      await this.replaceClient(active);
-      return normalizeRows(await run(this.sql));
-    }
+    const result = await this.pool.query(postgresPlaceholders(text),values);
+    return normalizeRows(result.rows);
   }
 
-  private async checkClient() {
-    const active = this.sql;
-    const preflight = () => Promise.race([
-      active.unsafe("SELECT 1"),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Database connection preflight timed out")), 3000)),
-    ]);
-    try {
-      await preflight();
-    } catch {
-      // A frozen serverless instance can retain a socket that Supabase's
-      // pooler has already dropped. Recycle it before serving the request.
-      await this.replaceClient(active);
-      await Promise.race([
-        this.sql.unsafe("SELECT 1"),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Database connection is unavailable")), 5000)),
-      ]);
-    }
-  }
-
-  async ensureLive() {
-    if (Date.now() - this.lastLiveCheck < 5000) return;
-    this.liveCheck ??= this.checkClient().then(() => {
-      this.lastLiveCheck = Date.now();
-    }).finally(() => {
-      this.liveCheck = undefined;
-    });
-    await this.liveCheck;
+  async close() {
+    // Explicitly end sockets even if a timed-out query is still pending.
+    await Promise.allSettled([...this.clients].map(client=>client.end()));
+    await this.pool.end();
   }
 
   prepare(text: string) {
-    return new PreparedStatement(this.query, text);
+    return new PreparedStatement((text,values)=>this.execute(text,values),text);
   }
 
   async transaction<T>(work: (sql: import("postgres").TransactionSql) => Promise<T>): Promise<T> {
-    return this.sql.begin(work) as Promise<T>;
+    const client=await this.pool.connect();
+    let failed=false;
+    try {
+      await client.query('BEGIN');
+      const result=await work(transactionQueries(client));
+      await client.query('COMMIT');
+      return result;
+    } catch(error) {
+      failed=true;
+      await client.query('ROLLBACK').catch(()=>{});
+      throw error;
+    } finally { client.release(failed); }
   }
 
   async batch(statements: PreparedStatement[]) {
     if (!statements.length) return [];
-    return this.sql.begin(async (transaction) => {
-      // Serialize writes within the transaction for compatibility with Supabase transaction pooling.
-      const results = [];
-      for (const statement of statements) {
-        const query = statement.toQuery();
-        const rows = await transaction.unsafe(query.text, query.values as never[]);
-        results.push({ success: true, results: normalizeRows(rows as Row[]) });
+    return this.transaction(async transaction => {
+      const results=[];
+      for(const statement of statements){
+        const query=statement.toQuery();
+        const rows=await transaction.unsafe(query.text,query.values as never[]);
+        results.push({success:true,results:normalizeRows(rows as Row[])});
       }
       return results;
     });
@@ -257,6 +223,7 @@ export type RuntimeEnv = {
   SHOPIFY_API_VERSION?: string;
 };
 
+const requestDatabase = new AsyncLocalStorage<PostgresDatabase>();
 let database: PostgresDatabase | undefined;
 let schemaReady: Promise<void> | undefined;
 let confirmationSchemaReady: Promise<void> | undefined;
@@ -264,9 +231,10 @@ let confirmationSchemaReady: Promise<void> | undefined;
 export function getRuntimeEnv(): RuntimeEnv {
   const connectionString = process.env.SUPABASE_DB_URL;
   if (!connectionString) throw new Error("SUPABASE_DB_URL is not configured");
-  database ??= new PostgresDatabase(connectionString);
+  const scoped = requestDatabase.getStore();
+  if (!scoped) database ??= new PostgresDatabase(connectionString);
   return {
-    DB: database,
+    DB: scoped || database!,
     SHIPROCKET_EMAIL: process.env.SHIPROCKET_EMAIL,
     SHIPROCKET_PASSWORD: process.env.SHIPROCKET_PASSWORD,
     SHIPROCKET_BACKUP_EMAIL: process.env.SHIPROCKET_BACKUP_EMAIL,
@@ -281,7 +249,6 @@ export function getRuntimeEnv(): RuntimeEnv {
 }
 
 export async function ensureSchema(db: PostgresDatabase) {
-  await db.ensureLive();
   schemaReady ??= initializeSchema(db).catch((error) => {
     schemaReady = undefined;
     throw error;
@@ -291,10 +258,18 @@ export async function ensureSchema(db: PostgresDatabase) {
 
 export async function ensureConfirmationSchema(db: PostgresDatabase) {
   await ensureSchema(db);
-  confirmationSchemaReady ??= db.batch([
-    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_assignee_id TEXT NOT NULL DEFAULT ''"),
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_assignee ON orders (confirmation_assignee_id, confirmation_status, confirmation_updated_at DESC)"),
-  ]).then(() => undefined).catch((error) => {
+  confirmationSchemaReady ??= (async () => {
+    // An existing installation needs no DDL (even IF NOT EXISTS takes locks).
+    const installed = await db.prepare(`SELECT
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
+        AND table_name='orders' AND column_name='confirmation_assignee_id') AS column_ready,
+      to_regclass('public.idx_orders_confirmation_assignee') AS index_ready`).first<{column_ready:boolean;index_ready:string|null}>();
+    if (installed?.column_ready && installed.index_ready) return;
+    await db.batch([
+      db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_assignee_id TEXT NOT NULL DEFAULT ''"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_assignee ON orders (confirmation_assignee_id, confirmation_status, confirmation_updated_at DESC)"),
+    ]);
+  })().catch((error) => {
     confirmationSchemaReady = undefined;
     throw error;
   });
@@ -320,6 +295,7 @@ async function initializeSchema(db: PostgresDatabase) {
 
 async function createSchema(db: PostgresDatabase) {
   await db.batch([
+    db.prepare(orderTagFunctionsSql),
     db.prepare(`
       CREATE TABLE IF NOT EXISTS orders (
         id BIGINT PRIMARY KEY, channel_order_id TEXT NOT NULL, channel_id INTEGER NOT NULL,
@@ -333,10 +309,13 @@ async function createSchema(db: PostgresDatabase) {
         ndr_attempts INTEGER NOT NULL DEFAULT 0, ndr_raised_at TEXT NOT NULL DEFAULT '',
         ndr_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT '', status_code INTEGER, payment_method TEXT NOT NULL DEFAULT '',
-        payment_status TEXT NOT NULL DEFAULT '', total REAL NOT NULL DEFAULT 0,
-        shipping_cost REAL NOT NULL DEFAULT 0, pickup_location TEXT NOT NULL DEFAULT '', awb TEXT NOT NULL DEFAULT '',
+        payment_status TEXT NOT NULL DEFAULT '', total NUMERIC(14,2) NOT NULL DEFAULT 0,
+        shipping_cost NUMERIC(14,2) NOT NULL DEFAULT 0, pickup_location TEXT NOT NULL DEFAULT '', awb TEXT NOT NULL DEFAULT '',
         courier TEXT NOT NULL DEFAULT '', shipment_id BIGINT,
-        products_json TEXT NOT NULL DEFAULT '[]', raw_json TEXT NOT NULL DEFAULT '{}', synced_at TEXT NOT NULL
+        products_json TEXT NOT NULL DEFAULT '[]', raw_json TEXT NOT NULL DEFAULT '{}',
+        order_tags TEXT[] GENERATED ALWAYS AS (dashboard_order_tags(raw_json)) STORED,
+        shopify_risk_level TEXT GENERATED ALWAYS AS (dashboard_shopify_risk(raw_json)) STORED,
+        rto_risk_level TEXT GENERATED ALWAYS AS (LOWER(REPLACE(REPLACE(COALESCE(raw_json::json->>'rto_risk',''),'_',' '),'-',' '))) STORED, synced_at TEXT NOT NULL
       )
     `),
     db.prepare(`CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`),
@@ -507,11 +486,11 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare(`INSERT INTO campaign_assignments (campaign_id, order_id, position, created_at)
       SELECT 'cmp_default_high_rto', id, ROW_NUMBER() OVER (ORDER BY COALESCE(NULLIF(order_date, ''), created_at), id), ?
       FROM orders
-      WHERE LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')
+      WHERE rto_risk_level IN ('high', 'very high')
       ON CONFLICT(order_id) DO NOTHING`).bind(new Date().toISOString()),
     db.prepare(`UPDATE orders SET confirmation_status='pending', confirmation_updated_at=?
       WHERE confirmation_status='not_required'
-        AND LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')
+        AND rto_risk_level IN ('high', 'very high')
         AND UPPER(status) NOT LIKE '%DELIVERED%' AND UPPER(status) NOT LIKE 'RTO%' AND UPPER(status) NOT LIKE '%CANCEL%'`).bind(new Date().toISOString()),
   ]);
 }
@@ -522,4 +501,24 @@ export async function logActivity(db: PostgresDatabase, source: string, eventTyp
 
 export async function setSyncState(db: PostgresDatabase, key: string, value: string) {
   await db.prepare(`INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).bind(key, value, new Date().toISOString()).run();
+}
+
+// A serverless instance can freeze a TCP socket while another invocation is
+// still using the shared pool. Each HTTP request owns and closes its connection;
+// background sync cannot occupy a panel's only connection.
+export async function withRequestDatabase<T>(work: () => Promise<T>, timeoutMs = 20000): Promise<T> {
+  if (requestDatabase.getStore()) return work();
+  const url = process.env.SUPABASE_DB_URL;
+  if (!url) return work(); // Existing configuration error handling owns this case.
+  const db = new PostgresDatabase(url);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await requestDatabase.run(db, () => Promise.race([
+      work(),
+      new Promise<never>((_,reject) => { timer=setTimeout(() => reject(Object.assign(new Error("Data request timed out"),{code:"REQUEST_TIMEOUT"})),timeoutMs); }),
+    ]));
+  } finally {
+    clearTimeout(timer);
+    await db.close();
+  }
 }

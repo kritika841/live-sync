@@ -1,7 +1,8 @@
 import { type PostgresDatabase } from "./database";
+import { highRiskSql } from "./analytics-status";
 
 export const DEFAULT_HIGH_RTO_CAMPAIGN_ID = "cmp_default_high_rto";
-export const HIGH_RISK_SQL = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
+export const HIGH_RISK_SQL = highRiskSql;
 export const ACTIONABLE_STATUS_SQL = "UPPER(status) NOT LIKE '%DELIVERED%' AND UPPER(status) NOT LIKE 'RTO%' AND UPPER(status) NOT LIKE '%CANCEL%'";
 
 type CampaignCriteria = {
@@ -25,6 +26,12 @@ type RoutingOrder = {
 
 const normalized = (value: unknown) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replaceAll("-", " ");
 
+function isHighRisk(raw: Record<string, unknown>) {
+  const tags = extractOrderTags(raw).map(normalized);
+  const providerRisk = normalized(raw.rto_risk);
+  return tags.includes("high") || tags.includes("rto prediction high") || providerRisk === "high" || providerRisk === "very high";
+}
+
 export function extractOrderTags(raw: Record<string, unknown>) {
   const values = [raw.shopify_tags, raw.order_tag, raw.sr_tags, raw.tags].flatMap((value) => Array.isArray(value) ? value : String(value ?? "").split(","));
   const tags = values.map((value) => String(value ?? "").trim()).filter(Boolean);
@@ -33,8 +40,7 @@ export function extractOrderTags(raw: Record<string, unknown>) {
 
 function campaignMatches(order: RoutingOrder, criteria: CampaignCriteria) {
   const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
-  const risk = normalized(raw.rto_risk);
-  const highRisk = risk === "high" || risk === "very high";
+  const highRisk = isHighRisk(raw);
   if (criteria.risk === "high" && !highRisk) return false;
   if (criteria.risk === "low" && highRisk) return false;
   const paymentMethod = normalized(criteria.paymentMethod);
@@ -72,8 +78,7 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
   for (const order of orderResult.results) {
     if (["confirmed", "rejected"].includes(order.confirmationStatus)) continue;
     const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
-    const risk = normalized(raw.rto_risk);
-    const highRisk = risk === "high" || risk === "very high";
+    const highRisk = isHighRisk(raw);
     const campaign = highRisk
       ? campaignResult.results.find((item) => item.id === DEFAULT_HIGH_RTO_CAMPAIGN_ID)
       : campaignResult.results.find((item) => campaignMatches(order, JSON.parse(item.criteriaJson || "{}") as CampaignCriteria));

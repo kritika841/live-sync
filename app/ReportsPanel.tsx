@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import LiveStatus from "./LiveStatus";
 
 type Change = { orderId: number; channelOrderId: string; fields: string[]; statusBefore?: string; statusAfter?: string };
 type Report = {
@@ -26,25 +27,30 @@ export default function ReportsPanel({ active, preview=false }: { active: boolea
   const [loading, setLoading] = useState(!preview);
   const [error, setError] = useState("");
 
+  const loadController = useRef<AbortController | null>(null);
   const loadReports = useCallback(async () => {
+    if (loadController.current || document.hidden) return;
+    const controller = new AbortController();
+    loadController.current = controller;
     try {
-      const response = await fetch("/api/reports?page=1", { cache: "no-store" });
+      const response = await fetch("/api/reports?page=1", { cache: "no-store", signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]) });
       const payload = await response.json() as ReportsResponse;
       if (!response.ok) throw new Error(payload.error || "Could not load reports");
+      if (controller.signal.aborted) return;
       setReports(payload.reports);
       setSelectedId((current) => current && payload.reports.some((report) => report.id === current) ? current : payload.reports[0]?.id ?? null);
       setError("");
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load reports");
+      if (!controller.signal.aborted) setError(loadError instanceof Error ? loadError.message : "Could not load reports");
     } finally {
-      setLoading(false);
+      if (loadController.current === controller) { loadController.current = null; setLoading(false); }
     }
   }, []);
 
   useEffect(() => {
     if (!active || preview) return;
     const timer = window.setTimeout(() => void loadReports(), 0);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); loadController.current?.abort(); loadController.current = null; };
   }, [active, loadReports, preview]);
   useEffect(() => {
     if (!active || preview) return;
@@ -54,7 +60,7 @@ export default function ReportsPanel({ active, preview=false }: { active: boolea
   useEffect(() => {
     if (!active || preview || !selectedId) return;
     const controller = new AbortController();
-    fetch(`/api/reports?id=${selectedId}`, { signal: controller.signal, cache: "no-store" })
+    fetch(`/api/reports?id=${selectedId}`, { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]), cache: "no-store" })
       .then(async (response) => {
         const payload = await response.json() as { report?: Report; error?: string };
         if (!response.ok || !payload.report) throw new Error(payload.error || "Could not load report");
@@ -71,25 +77,25 @@ export default function ReportsPanel({ active, preview=false }: { active: boolea
       <section className="reports-card">
         <header className="reports-heading">
           <div><p className="eyebrow">Saved reports</p><h2>Reconciliation history</h2><p>Every completed API sync is stored here. Open any row to inspect it or download its Excel workbook.</p></div>
-          <span>{reports.length} recent reports</span>
+          <div className="reports-status"><LiveStatus preview={preview} active={active}/><span>{reports.length} recent reports</span></div>
         </header>
         <div className="report-table-wrap history-table">
           <table className="report-table">
             <thead><tr><th>Completed</th><th>Type</th><th>Checked</th><th>New</th><th>Changed</th><th>Unchanged</th><th>Discrepancies</th><th>NDR filled</th><th>Excel</th></tr></thead>
             <tbody>
+              {loading && reports.length===0 && Array.from({length:5},(_,row)=><tr className="skeleton-row" key={`report-skeleton-${row}`}>{Array.from({length:9},(_,column)=><td key={column}><i/></td>)}</tr>)}
               {reports.map((report) => (
                 <tr key={report.id} className={selectedId === report.id ? "active" : ""} onClick={() => setSelectedId(report.id)}>
-                  <td><strong>{formatDate(report.createdAt)}</strong><small>Report #{report.id}</small></td>
-                  <td><span className="report-kind">{report.mode}</span><small>{report.source}</small></td>
-                  <td>{report.checked}</td><td>{report.newOrders}</td><td>{report.changedOrders}</td><td>{report.unchangedOrders}</td>
-                  <td><strong>{report.discrepanciesTotal}</strong></td><td>{report.ndrEnriched} / {report.ndrRecords}</td>
-                  <td><a className="report-download compact" href={`/api/reports?id=${report.id}&download=xlsx`} onClick={(event) => event.stopPropagation()}>Download</a></td>
+                  <td data-label="Completed"><strong>{formatDate(report.createdAt)}</strong><small>Report #{report.id}</small></td>
+                  <td data-label="Type"><span className="report-kind">{report.mode}</span><small>{report.source}</small></td>
+                  <td data-label="Checked">{report.checked}</td><td data-label="New">{report.newOrders}</td><td data-label="Changed">{report.changedOrders}</td><td data-label="Unchanged">{report.unchangedOrders}</td>
+                  <td data-label="Discrepancies"><strong>{report.discrepanciesTotal}</strong></td><td data-label="NDR filled">{report.ndrEnriched} / {report.ndrRecords}</td>
+                  <td data-label="Excel"><a className="report-download compact" href={`/api/reports?id=${report.id}&download=xlsx`} onClick={(event) => event.stopPropagation()}>Download</a></td>
                 </tr>
               ))}
             </tbody>
           </table>
           {!loading && reports.length === 0 && <div className="reports-empty">No reports yet. Run a sync and its reconciliation report will appear here.</div>}
-          {loading && reports.length === 0 && <div className="reports-empty">Loading saved reports…</div>}
         </div>
       </section>
 

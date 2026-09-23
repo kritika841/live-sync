@@ -1,4 +1,5 @@
 "use client";
+import { requestErrorMessage } from "../lib/http";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Boxes,
@@ -72,43 +73,36 @@ export default function InventoryPanel({
       { componentId: "", quantity: "", unit: "unit", cost: "0" },
     ]);
   const {requestEntry,dialog} = useEntryDialog();
-  const retryTimer = useRef<number | undefined>(undefined);
-  const retryLoad = useRef<() => void>(() => {});
   const [invoicePo,setInvoicePo] = useState("");
   const [invoiceOpen,setInvoiceOpen]=useState(false);
   const [receiveOpen,setReceiveOpen]=useState(false);
   async function ask(label:string,value?:string){const r=await requestEntry(value===undefined?"Add reason":"QC quantity",[{name:"value",label,type:value===undefined?"text":"number",value}]);return r?.value ?? null;}
+  const loadController = useRef<AbortController | null>(null);
+  const hasLoaded = useRef(preview);
   const load = useCallback(async () => {
     if (preview) return;
-    setLoading(true);
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
+    if (!hasLoaded.current) setLoading(true);
     try {
-      setData(
-        await readJson<Data>(
-          await fetch("/api/inventory", { cache: "no-store" }),
-        ),
-      );
+      const next = await readJson<Data>(await fetch("/api/inventory", {
+        cache:"no-store",signal:AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]),
+      }));
+      if (controller.signal.aborted) return;
+      setData(next);
+      hasLoaded.current = true;
       setError("");
     } catch (e) {
-      // Keep the last usable snapshot on a transient gateway timeout.  A retry
-      // is less disruptive than replacing the workspace with a raw 504 error.
-      if (e instanceof Error && /temporarily busy|usable response/i.test(e.message)) {
-        setError("");
-        window.clearTimeout(retryTimer.current);
-        retryTimer.current = window.setTimeout(() => retryLoad.current(), 2500);
-      } else {
-        setError(e instanceof Error ? e.message : "Could not load inventory");
-      }
+      if (!controller.signal.aborted) setError(requestErrorMessage(e, "Could not load inventory"));
     } finally {
-      setLoading(false);
+      if (loadController.current === controller) { loadController.current = null; setLoading(false); }
     }
   }, [preview]);
   useEffect(() => {
-    retryLoad.current = () => void load();
-  }, [load]);
-  useEffect(() => {
     if (!active) return;
     const timer = setTimeout(() => void load(), 0);
-    return () => { clearTimeout(timer); window.clearTimeout(retryTimer.current); };
+    return () => { clearTimeout(timer); loadController.current?.abort(); loadController.current = null; };
   }, [active, load]);
   const pending = useRef<{
     signature: string;
@@ -330,7 +324,7 @@ export default function InventoryPanel({
           ],
           [
             "Recipes pending",
-            data.products.filter((p) => !p.recipe_id).length,
+            data.products.filter((p) => p.active && !p.recipe_id).length,
             "Add recipes when ready",
           ],
           [
@@ -363,7 +357,7 @@ export default function InventoryPanel({
       </nav>
       {loading && <p className="ops-muted">Loading current inventory…</p>}
       {tab === "stock" && (
-        <>
+        <div className="inventory-section">
           <div className="ops-toolbar">
             <h2>Stock & components</h2>
             <label className="ops-search">
@@ -475,10 +469,10 @@ export default function InventoryPanel({
               emptyState("Start with your components")}
           </div>
 
-        </>
+        </div>
       )}
       {tab === "vendors" && (
-        <>
+        <div className="inventory-section">
           <div className="ops-card-grid">
             {data.vendors.map((v) => (
               <article className="ops-card" key={v.id}>
@@ -506,10 +500,10 @@ export default function InventoryPanel({
               busy={busy}
             />
           )}
-        </>
+        </div>
       )}
       {tab === "pos" && (
-        <>
+        <div className="inventory-section">
           <div className="ops-toolbar">
             <h2>Purchase orders</h2>
             <span className="ops-muted">
@@ -684,10 +678,10 @@ export default function InventoryPanel({
             <PurchaseOrderForm vendors={data.vendors as unknown as Array<{id:string;name:string;phone:string;tax_id:string;address:string}>} components={data.components as unknown as Array<{id:string;name:string;unit:string}>} onSave={b=>save("po",b)} busy={busy} onOpenStock={()=>setTab("stock")} onOpenVendors={()=>setTab("vendors")}/>
           )}
 
-        </>
+        </div>
       )}
       {tab === "products" && (
-        <>
+        <div className="inventory-section">
           <div className="ops-toolbar">
             <div>
               <h2>Products & recipes</h2>
@@ -761,10 +755,10 @@ export default function InventoryPanel({
               {lineEditor(true)}
             </OperationsForm>
           )}
-        </>
+        </div>
       )}
       {tab === "invoices" && (
-        <>
+        <div className="inventory-section">
           <div className="inventory-table-wrap">
             <table>
               <thead>
@@ -912,10 +906,10 @@ export default function InventoryPanel({
               </button>
             </form></Modal></>
           )}
-        </>
+        </div>
       )}
       {tab === "sales" && (
-        <>
+        <div className="inventory-section">
           {isAdmin && (
             <OperationsForm
               title="Record a manual sale"
@@ -960,14 +954,14 @@ export default function InventoryPanel({
             {!data.sales.length &&
               emptyState("No manual sales")}
           </div>
-        </>
+        </div>
       )}
       {tab === "orders" && (
-        <>
+        <div className="inventory-section">
           <div className="ops-toolbar">
             <h2>Order requirements & fulfilment</h2>
             <span className="ops-muted">
-              Latest 200 orders · missing recipes block stock allocation
+              Latest 200 orders · missing recipes block allocation. RTO stock becomes available only after return receipt and QC.
             </span>
           </div>
           <div className="inventory-table-wrap">
@@ -1044,7 +1038,7 @@ export default function InventoryPanel({
                                   disabled={busy}
                                   onClick={async () => {
                                     const reason = await ask(
-                                      "QC notes: condition and reason for restocking",
+                                      "Received return QC: condition and reason for restocking",
                                     );
                                     if (!reason) return;
                                     const lines = [];
@@ -1069,7 +1063,7 @@ export default function InventoryPanel({
                                     });
                                   }}
                                 >
-                                  RTO QC
+                                  Receive return & QC
                                 </button>
                               </>
                             )}
@@ -1084,10 +1078,10 @@ export default function InventoryPanel({
             {!data.orders.length &&
               emptyState("Order insights will appear here")}
           </div>
-        </>
+        </div>
       )}
       {tab === "activity" && (
-        <>
+        <div className="inventory-section">
           <div className="ops-toolbar">
             <h2>Inventory log</h2>
             <span className="ops-muted">Latest 300 events</span>
@@ -1111,7 +1105,7 @@ export default function InventoryPanel({
           ))}
           {!data.activity.length &&
             emptyState("A clear history from day one")}
-        </>
+        </div>
       )}
     </section>
   );

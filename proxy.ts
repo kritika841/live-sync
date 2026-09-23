@@ -14,8 +14,8 @@ export default async function proxy(request: NextRequest) {
       },
     },
   });
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.redirect(new URL("/auth/sign-in", request.url));
+  const { data } = await supabase.auth.getClaims();
+  if (!data?.claims?.sub) return NextResponse.redirect(new URL("/auth/sign-in", request.url));
   return response;
 }
 

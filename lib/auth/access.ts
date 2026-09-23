@@ -1,3 +1,4 @@
+import { HttpError } from "../http";
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "../supabase/server";
 
@@ -21,14 +22,40 @@ function dashboardUser(user: { id: string; email?: string; user_metadata?: Recor
   };
 }
 
+function userFromClaims(claims: Record<string, unknown>): DashboardUser | null {
+  const id = typeof claims.sub === "string" ? claims.sub : "";
+  if (!id) return null;
+  const userMetadata = claims.user_metadata && typeof claims.user_metadata === "object" ? claims.user_metadata as Record<string, unknown> : {};
+  const appMetadata = claims.app_metadata && typeof claims.app_metadata === "object" ? claims.app_metadata as Record<string, unknown> : {};
+  return dashboardUser({
+    id,
+    email: typeof claims.email === "string" ? claims.email : "",
+    user_metadata: userMetadata,
+    app_metadata: appMetadata,
+  });
+}
+
 export function isAdmin(user: { role?: unknown }) {
   return roleOf(user).split(",").map((role) => role.trim()).includes("admin");
 }
 
 export async function currentDashboardUser(): Promise<DashboardUser | null> {
   const supabase = await createSupabaseServerClient();
-  const { data } = await supabase.auth.getUser();
-  return data.user ? dashboardUser(data.user) : null;
+  // getClaims verifies the signed access token and avoids a remote Auth user
+  // lookup for every dashboard API request when the project uses signing keys.
+  // This removes Auth gateway latency from panel loading without trusting raw
+  // cookie session data.
+  let result = await supabase.auth.getClaims();
+  if (result.error && (!result.error.status || result.error.status >= 500)) {
+    await new Promise(resolve => setTimeout(resolve, 200));
+    result = await supabase.auth.getClaims();
+  }
+  const { data, error } = result;
+  if (error) {
+    console.warn("Dashboard authentication failed", {name:error.name,code:error.code,status:error.status});
+    if (!error.status || error.status >= 500 || error.status === 429) throw new HttpError(503,"Sign-in service is temporarily unavailable. Please retry.");
+  }
+  return data?.claims ? userFromClaims(data.claims as Record<string, unknown>) : null;
 }
 
 export async function requirePageUser(): Promise<DashboardUser> {

@@ -8,6 +8,7 @@ export async function createSupabaseServerClient() {
   if (!url || !key) throw new Error("Supabase URL and publishable key are not configured");
   const cookieStore = await cookies();
   return createServerClient(url!, key!, {
+    global: { fetch: (input, init) => fetch(input, {...init,signal:init?.signal ? AbortSignal.any([init.signal,AbortSignal.timeout(3500)]) : AbortSignal.timeout(3500)}) },
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll(values) { try { values.forEach(({ name, value, options }) => cookieStore.set(name, value, options)); } catch { /* Server Components may not write cookies. */ } },

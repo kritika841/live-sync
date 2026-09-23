@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
 import { errorResponse } from "../../../lib/http";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { requireApiUser } from "../../../lib/auth/access";
@@ -18,7 +20,7 @@ async function handleGET() {
   `).all<Record<string, unknown>>();
   const stateRows = await runtime.DB.prepare(`
     SELECT key, value FROM sync_state
-    WHERE key IN ('sync_status', 'last_sync_at', 'last_sync_mode', 'last_sync_count', 'last_sync_error')
+    WHERE key IN ('sync_status', 'last_sync_at', 'last_sync_mode', 'last_sync_count', 'last_sync_error', 'fast_sync_checked_at', 'fast_sync_error')
   `).all<{ key: string; value: string }>();
   return Response.json({
     logs: rows.results.map((row) => ({ ...row, details: JSON.parse(String(row.detailsJson || "{}")), detailsJson: undefined })),
@@ -26,4 +28,9 @@ async function handleGET() {
   });
 }
 
-export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+async function GETHandler(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}

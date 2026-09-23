@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../../lib/http";
 import { errorResponse } from "../../../../lib/http";
 import { GET as runScheduledSync } from "../sync/route";
 
@@ -8,4 +10,9 @@ async function handleGET(request: Request) {
   return runScheduledSync(request);
 }
 
-export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+async function GETHandler(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
+}

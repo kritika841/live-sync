@@ -23,8 +23,10 @@ try{
  else console.log('Catalog already imported today');
  console.log('Scheduler:',JSON.stringify(await configureSupabaseCron()));
  const recent=await db.prepare("SELECT value FROM sync_state WHERE key='fast_sync_checked_at'").first<{value:string}>();
- if(!recent?.value || Date.now()-Date.parse(recent.value)>600000)console.log('Recent order import:',JSON.stringify(await syncRecentOrders(getRuntimeEnv())));
+ if(!recent?.value || Date.now()-Date.parse(recent.value)>600000){try{console.log('Recent order import:',JSON.stringify(await syncRecentOrders(getRuntimeEnv())));}catch(error){console.warn('Scheduled order sync will retry:',error instanceof Error?error.message:'Provider unavailable');}}
  else console.log('Recent orders already imported; scheduled reconciliation will continue');
  console.log('Last provider validation:',JSON.stringify(await db.prepare("SELECT value FROM sync_state WHERE key='shiprocket_validation_json'").first()));
  if(process.env.VALIDATE_SHIPROCKET_ON_DEPLOY==='true')await import('./validate-shiprocket');
 }catch(error){console.error('Production initialization failed:',error instanceof Error?error.message:'Unknown error');process.exitCode=1;}
+
+finally { await getRuntimeEnv().DB.close(); }

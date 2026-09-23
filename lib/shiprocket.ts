@@ -102,7 +102,8 @@ export async function resolveChannel(runtime: RuntimeEnv, token: string) {
   return channel;
 }
 
-const stringValue = (value: unknown) => value == null ? "" : String(value);
+const stringValue = (value: unknown) => value == null ? "" : String(value).replaceAll(String.fromCharCode(0), "");
+export const providerJson = (value: unknown) => JSON.stringify(value, (_key, item) => typeof item === "string" ? item.replaceAll(String.fromCharCode(0), "") : item);
 const numberValue = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
 const firstPositiveNumber = (...values: unknown[]) => {
   for (const value of values) {
@@ -156,7 +157,7 @@ function shipmentFor(order: ShiprocketOrder) {
     : order.shipments && typeof order.shipments === "object" ? order.shipments : {};
 }
 
-function orderSnapshot(order: ShiprocketOrder) {
+export function orderSnapshot(order: ShiprocketOrder) {
   const shipment = shipmentFor(order);
   const others = order.others && typeof order.others === "object" ? order.others as Record<string, unknown> : {};
   const status = stringValue(order.status || shipment.status || shipment.shipment_status);
@@ -178,11 +179,11 @@ function orderSnapshot(order: ShiprocketOrder) {
     status, statusCode: numberValue(order.status_code || shipment.status_code) || null,
     paymentMethod: stringValue(order.payment_method), paymentStatus: stringValue(order.payment_status),
     total: firstPositiveNumber(order.total, order.sub_total, order.total_amount, order.order_total, order.amount),
-    shippingCost: numberValue(shipment.shipping_charges || shipment.cost || order.shipping_charges || order.freight_charges),
+    shippingCost: firstPositiveNumber(shipment.shipping_charges, shipment.cost, order.shipping_charges, order.freight_charges),
     pickupLocation: stringValue(order.pickup_location), awb: stringValue(shipment.awb),
     courier: stringValue(shipment.courier || shipment.courier_name),
     shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
-    productsJson: JSON.stringify(Array.isArray(order.products) ? order.products : []), rawJson: JSON.stringify(order),
+    productsJson: providerJson(Array.isArray(order.products) ? order.products : []), rawJson: providerJson(order),
   };
 }
 
@@ -347,7 +348,9 @@ async function analyzeOrders(db: PostgresDatabase, orders: ShiprocketOrder[], re
   }
 }
 
-export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder[]) {
+export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder[], options: { historicalImport?: boolean } = {}) {
+  // The provider can repeat one order for multiple shipment rows.
+  orders = [...new Map(orders.map(order => [Number(order.id),order])).values()];
   const syncedAt = new Date().toISOString();
   for (let start = 0; start < orders.length; start += 100) {
     const statements = orders.slice(start, start + 100).map((order) => {
@@ -388,7 +391,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
           total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
           pickup_location=excluded.pickup_location, awb=excluded.awb,
           courier=excluded.courier, shipment_id=excluded.shipment_id,
-          products_json=excluded.products_json, raw_json=(excluded.raw_json::jsonb || CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text, synced_at=excluded.synced_at
+          products_json=excluded.products_json, raw_json=(excluded.raw_json::jsonb || CASE WHEN orders.raw_json::jsonb->'source_report' IS NOT NULL THEN jsonb_build_object('source_report',orders.raw_json::jsonb->'source_report') ELSE '{}'::jsonb END || CASE WHEN COALESCE(excluded.raw_json::jsonb->>'rto_risk','')='' AND orders.raw_json::jsonb->'rto_risk' IS NOT NULL THEN jsonb_build_object('rto_risk',orders.raw_json::jsonb->'rto_risk') ELSE '{}'::jsonb END || CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text, synced_at=excluded.synced_at
       `).bind(
         value.id, value.channelOrderId, value.channelId, value.channelName, value.customerName,
         value.customerEmail, value.customerPhone, value.customerCity, value.customerState,
@@ -398,7 +401,17 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         value.awb, value.courier, value.shipmentId, value.productsJson, value.rawJson, syncedAt,
       );
     });
-    if (statements.length) await db.batch(statements);
+    if (statements.length) {
+      // One atomic multi-row upsert avoids 100 network round trips per page.
+      const first = statements[0].toQuery().text;
+      const valuesAt = first.indexOf("VALUES (");
+      const conflictAt = first.indexOf("ON CONFLICT(id)");
+      const bindings = statements.flatMap(statement => statement.toQuery().values);
+      const row = `(${statements[0].toQuery().values.map(() => "?").join(",")})`;
+      await db.prepare(`${first.slice(0, valuesAt)} VALUES ${statements.map(() => row).join(",")} ${first.slice(conflictAt)}`).bind(...bindings).run();
+    }
+    // Historical reconciliation must not allocate stock or queue calls for old orders.
+    if (options.historicalImport) continue;
     await routeConfirmationOrders(db, orders.slice(start, start + 100).map((order) => numberValue(order.id)));
     await reconcileInventorySafely(orders.slice(start, start + 100).map((order) => numberValue(order.id)));
   }
@@ -453,7 +466,11 @@ async function syncNdrDetails(db: PostgresDatabase, token: string, channelId: nu
   }
 }
 
-const dateOnly = (date: Date) => date.toISOString().slice(0, 10);
+// Earliest verified Shopify_5 history: January 2026. Explicit ISO bounds use
+// Shiprocket's current paginated endpoint; textual dates select its legacy path.
+export const providerDate = (date: Date) => date.toISOString().slice(0,10);
+const historyStart = "2026-01-01";
+const dateOnly = providerDate;
 
 export async function syncShiprocketOrders(
   runtime: RuntimeEnv,
@@ -479,6 +496,10 @@ export async function syncShiprocketOrders(
     const report: SyncReport = { mode: effectiveMode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, trackingOrders: 0, trackingEvents: 0, fields: {}, changes: [] };
     const fetchPage = (page: number) => {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
+      // Always specify the creation-date range, including for updated-order
+      // scans: an older shipment can change status today.
+      params.set("from", historyStart);
+      params.set("to", dateOnly(new Date(Date.now() + 86400000)));
       if (effectiveMode === "incremental") {
         const from = new Date();
         from.setUTCDate(from.getUTCDate() - 2);
@@ -495,14 +516,21 @@ export async function syncShiprocketOrders(
       );
     };
     const firstPage = await fetchPage(startPage);
-    const totalPages = Math.min(Number(firstPage.meta?.pagination?.total_pages || 1), 500);
+    if (!Array.isArray(firstPage.data)) throw new Error("Shiprocket order list is missing");
+    let totalPages = Math.min(Number(firstPage.meta?.pagination?.total_pages) || (firstPage.data.length === 100 ? 500 : startPage), 500);
     const orders = [...(firstPage.data || [])];
-    const endPage = Math.min(totalPages, startPage + maxPages - 1);
+    let endPage = Math.min(totalPages, startPage + maxPages - 1);
     for (let start = startPage + 1; start <= endPage; start += 4) {
       const pageNumbers = Array.from({ length: Math.min(4, endPage - start + 1) }, (_, index) => start + index);
       const pages = await Promise.all(pageNumbers.map(fetchPage));
-      for (const page of pages) orders.push(...(page.data || []));
+      for (let index=0;index<pages.length;index++) {
+        const page=pages[index];
+        if (!Array.isArray(page.data)) throw new Error("Shiprocket order list is missing");
+        orders.push(...page.data);
+        if(page.data.length<100){totalPages=Math.min(totalPages,pageNumbers[index]);endPage=Math.min(endPage,totalPages);}
+      }
     }
+    if(orders.some(order=>Number(order.channel_id)!==channel.id))throw new Error("Shiprocket returned orders from another channel");
     for (let start = 0; start < orders.length; start += 100) {
       const batch = orders.slice(start, start + 100);
       await analyzeOrders(db, batch, report);
@@ -598,18 +626,20 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
     const token = await getShiprocketToken(runtime);
     const channel = await resolveChannel(runtime,token);
     const page = async (number:number) => {
-      const params = new URLSearchParams({page:String(number),per_page:"50",sort:"DESC",sort_by:"id",channel_id:String(channel.id),updated_from:from,updated_to:new Date(Date.now()+86400000).toISOString().slice(0,10)});
+      const params = new URLSearchParams({page:String(number),per_page:"50",sort:"DESC",sort_by:"id",channel_id:String(channel.id),from:historyStart,to:providerDate(new Date(Date.now()+86400000)),updated_from:providerDate(new Date(from)),updated_to:providerDate(new Date(Date.now()+86400000))});
       const result = await apiJson<{data?:ShiprocketOrder[];meta?:{pagination?:{total_pages?:number}}}>(`${API_ROOT}/orders?${params}`,{headers:{authorization:`Bearer ${token}`}});
       if (!Array.isArray(result.data)) throw new Error("Shiprocket order list is missing");
+      if(result.data.some(order=>Number(order.channel_id)!==channel.id))throw new Error("Shiprocket returned orders from another channel");
       await upsertOrders(db,result.data);
-      return {count:result.data.length,total:Math.max(1,Number(result.meta?.pagination?.total_pages)||1)};
+      return {count:result.data.length,total:Number(result.meta?.pagination?.total_pages)||(result.data.length===50?number+1:number)};
     };
     // Always import the newest page even while draining a larger backlog.
     const first = await page(1);
     let imported=first.count;
     let next=Math.max(2,cursor);
-    for(let i=0;i<1 && next<=first.total;i++,next++) imported+=(await page(next)).count;
-    const pending=next<=first.total;
+    let totalPages=Math.max(first.total,cursor);
+    for(let i=0;i<1 && next<=totalPages;i++,next++){const result=await page(next);imported+=result.count;totalPages=result.total;}
+    const pending=next<=totalPages;
     await setSyncState(db,"fast_sync_cursor",pending?String(next):"1");
     await setSyncState(db,"fast_sync_from",pending?from:new Date(Date.now()-2*86400000).toISOString().slice(0,10));
     await setSyncState(db,"fast_sync_error","");

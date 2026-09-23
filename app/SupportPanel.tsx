@@ -1,4 +1,5 @@
 "use client";
+import { requestErrorMessage } from "../lib/http";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Inbox,
@@ -20,7 +21,7 @@ import {
   UserRoundCheck,
 } from "lucide-react";
 import { Modal, useEntryDialog } from "./Modal";
-import { isTransientRequestError, readJson } from "../lib/http";
+import { readJson } from "../lib/http";
 import { visibleEmailBody } from "../lib/email-body";
 import type { supportData } from "../lib/operations/support";
 type Data = Awaited<ReturnType<typeof supportData>>;
@@ -99,54 +100,37 @@ export default function SupportPanel({
     [requestKey, setRequestKey] = useState("");
   const {requestEntry,dialog}=useEntryDialog();
   const [loaded,setLoaded]=useState(false);
+  const [deferredSearch,setDeferredSearch]=useState(search);
+  useEffect(() => { const timer=setTimeout(()=>setDeferredSearch(search),300); return ()=>clearTimeout(timer); },[search]);
   const loadController = useRef<AbortController | null>(null);
-  const loadInFlight = useRef(false);
-  const retryTimer = useRef<number | undefined>(undefined);
-  const retryLoad = useRef<() => void>(()=>{});
-  const load = useCallback(async () => {
-    if (preview) return;
-    if (loadInFlight.current) return;
-    loadInFlight.current = true;
+  const load = useCallback(async (quiet = false) => {
+    if (preview || (quiet && (document.hidden || loadController.current))) return;
     loadController.current?.abort();
     const controller = new AbortController();
     loadController.current = controller;
     try {
-      setData(
-        await readJson<Data>(
-          await fetch(
-            "/api/support?" +
-              new URLSearchParams({
-                ticket: selected,
-                page: String(page),
-                queue,
-                q: search,
-              }),
-            { cache: "no-store", signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]) },
-          ),
-        ),
-      );
+      const next = await readJson<Data>(await fetch("/api/support?" + new URLSearchParams({
+        ticket: selected, page: String(page), queue, q: deferredSearch,
+      }), {cache:"no-store",signal:AbortSignal.any([controller.signal,AbortSignal.timeout(25000)])}));
+      if (controller.signal.aborted) return;
+      setData(next);
       setLoaded(true);
       setError("");
     } catch (e) {
-      if (!controller.signal.aborted) {
-        if (isTransientRequestError(e)) {
-          setError("");
-          window.clearTimeout(retryTimer.current);
-          retryTimer.current=window.setTimeout(()=>retryLoad.current(),3000);
-        } else setError(e instanceof Error ? e.message : "Could not load support");
-      }
-    } finally { loadInFlight.current = false; }
-  }, [preview, selected, page, queue, search]);
-  useEffect(()=>{retryLoad.current=()=>void load()},[load]);
+      if (!controller.signal.aborted) setError(requestErrorMessage(e, "Could not load support"));
+    } finally {
+      if (loadController.current === controller) loadController.current = null;
+    }
+  }, [preview, selected, page, queue, deferredSearch]);
   useEffect(() => {
     if (!active) return;
     const initial = setTimeout(() => void load(), 0);
-    const timer = setInterval(() => void load(), 30000);
+    const timer = setInterval(() => void load(true), 30000);
     return () => {
       clearTimeout(initial);
       clearInterval(timer);
-      window.clearTimeout(retryTimer.current);
       loadController.current?.abort();
+      loadController.current = null;
     };
   }, [active, load]);
   const ticket =
@@ -357,7 +341,7 @@ export default function SupportPanel({
         ].map(([label, value, sub]) => (
           <article key={label}>
             <span>{label}</span>
-            <strong>{value}</strong>
+            <strong>{loaded || preview ? value : "—"}</strong>
             <small>{sub}</small>
           </article>
         ))}
@@ -472,7 +456,8 @@ export default function SupportPanel({
               </button>
             </div>
           ))}
-          {!filtered.length && (
+          {!loaded && !preview && <div className="ops-empty" role="status"><h3>{error ? "Tickets could not load" : "Loading tickets…"}</h3><p>{error || "Connecting to your support inbox."}</p>{error && <button onClick={()=>void load()}>Retry</button>}</div>}
+          {(loaded || preview) && !filtered.length && (
             <div className="ops-empty">
               <Mail size={28} />
               <h3>

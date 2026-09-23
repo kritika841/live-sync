@@ -19,13 +19,14 @@ function shopifyConfig(runtime: RuntimeEnv) {
   return { domain, token, apiVersion };
 }
 
-async function shopifyGraphql<T>(runtime: RuntimeEnv, query: string, variables: Record<string, unknown>) {
+export async function shopifyGraphql<T>(runtime: RuntimeEnv, query: string, variables: Record<string, unknown>) {
   const config = shopifyConfig(runtime);
   const response = await fetch(`https://${config.domain}/admin/api/${config.apiVersion}/graphql.json`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-shopify-access-token": config.token },
     body: JSON.stringify({ query, variables }),
     cache: "no-store",
+    signal: AbortSignal.timeout(20000),
   });
   const payload = await response.json().catch(() => null) as GraphqlResponse<T> | null;
   if (!response.ok || !payload) throw new Error(`Shopify catalog request failed with status ${response.status}`);
@@ -91,7 +92,7 @@ export async function syncShopifyCatalog(runtime: RuntimeEnv, actorEmail: string
     }
     cursor = data.products.pageInfo.hasNextPage ? data.products.pageInfo.endCursor || null : null;
   } while (cursor);
-  await runtime.DB.prepare("UPDATE inventory_products SET active=FALSE WHERE synced_at<>?").bind(runMarker).run();
+  await runtime.DB.prepare("UPDATE inventory_products SET active=FALSE WHERE shopify_variant_id<>'' AND synced_at<>?").bind(runMarker).run();
   const completedAt = new Date().toISOString();
   await setSyncState(runtime.DB, "shopify_catalog_last_sync_at", completedAt);
   await setSyncState(runtime.DB, "shopify_catalog_last_sync_count", String(variantCount));
@@ -113,4 +114,24 @@ export async function shopifyOrderContacts(runtime: RuntimeEnv, names: string[])
     }
   }
   return result;
+}
+
+/** Store only exact Shopify order-name matches; an empty fetched tag list is known low risk. */
+export async function storeShopifyOrderTags(runtime:RuntimeEnv, orders:Array<{name:string;tags:string[]}>) {
+  let updated=0;
+  for(let start=0;start<orders.length;start+=100){
+    const values:unknown[]=[];const rows=orders.slice(start,start+100).map(order=>{values.push(order.name.replace(/^#/,''),JSON.stringify(order.tags));return '(?::text,?::jsonb)';});
+    if(!rows.length)continue;
+    const result=await runtime.DB.prepare(`UPDATE orders o SET raw_json=(o.raw_json::jsonb || jsonb_build_object('shopify_tags',v.tags,'shopify_tags_checked_at',?::text))::text FROM(VALUES ${rows.join(',')}) v(name,tags) WHERE o.channel_id=? AND o.channel_order_id=v.name RETURNING o.id`).bind(new Date().toISOString(),...values,Number(runtime.SHIPROCKET_CHANNEL_ID||9574697)).all();
+    updated+=result.results.length;
+  }
+  return updated;
+}
+export async function syncRecentShopifyTags(runtime:RuntimeEnv){
+ const state=(await runtime.DB.prepare("SELECT key,value FROM sync_state WHERE key IN ('shopify_tags_cursor','shopify_tags_from')").all<{key:string;value:string}>()).results;const s=Object.fromEntries(state.map(r=>[r.key,r.value]));
+ const from=s.shopify_tags_from||new Date(Date.now()-2*86400000).toISOString();
+ const data=await shopifyGraphql<{orders:{nodes:Array<{name:string;tags:string[]}>;pageInfo:{hasNextPage:boolean;endCursor:string}}}>(runtime,`query RecentOrderTags($cursor:String,$query:String!){orders(first:250,after:$cursor,sortKey:UPDATED_AT,query:$query){nodes{name tags}pageInfo{hasNextPage endCursor}}}`,{cursor:s.shopify_tags_cursor||null,query:`updated_at:>=${from}`});
+ const updated=await storeShopifyOrderTags(runtime,data.orders.nodes);const pending=data.orders.pageInfo.hasNextPage;
+ await setSyncState(runtime.DB,'shopify_tags_cursor',pending?data.orders.pageInfo.endCursor:'');await setSyncState(runtime.DB,'shopify_tags_from',pending?from:new Date(Date.now()-2*86400000).toISOString());
+ if(!pending)await setSyncState(runtime.DB,'shopify_tags_last_sync_at',new Date().toISOString());return {updated,pending};
 }

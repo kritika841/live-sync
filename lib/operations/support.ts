@@ -118,10 +118,12 @@ export async function supportData(
   if (queue === "mine") { clauses.push("assignee_id=?"); values.push(u.id); }
   else if (queue === "unassigned") clauses.push("assignee_id IS NULL");
   else if (queue !== "all") { clauses.push("status=?"); values.push(queue); }
-  clauses.push("(subject ILIKE ? OR customer_email ILIKE ? OR ticket_number::text ILIKE ?)");
-  const search = `%${filters.search || ""}%`;
-  values.push(search,search,search);
-  const where = clauses.join(" AND ");
+  if (filters.search?.trim()) {
+    clauses.push("(subject ILIKE ? OR customer_email ILIKE ? OR ticket_number::text ILIKE ?)");
+    const search = `%${filters.search.trim().slice(0,200)}%`;
+    values.push(search,search,search);
+  }
+  const where = clauses.join(" AND ") || "TRUE";
   const summaryWhere = canManage ? "TRUE" : "assignee_id=?";
   const summaryValues = canManage ? [] : [u.id];
   const [ticketRows,totalRow,summaryRow,agentRows,connection,templateRows] = await Promise.all([

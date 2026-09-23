@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
 import { errorResponse } from "../../../lib/http";
 import { access } from "../../../lib/operations/access";
 import {
@@ -8,7 +10,7 @@ import { getRuntimeEnv } from "../../../lib/database";
 import { syncShopifyCatalog } from "../../../lib/shopify";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
-export async function GET(request: Request) {
+async function GETHandler(request: Request) {
   try {
     await access(request);
     return Response.json(await inventoryData());
@@ -16,7 +18,7 @@ export async function GET(request: Request) {
     return errorResponse(e);
   }
 }
-export async function POST(request: Request) {
+async function POSTHandler(request: Request) {
   try {
     const u = await access(request);
     const b = await request.json();
@@ -26,4 +28,14 @@ export async function POST(request: Request) {
   } catch (e) {
     return errorResponse(e);
   }
+}
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}
+
+export async function POST(...args: Parameters<typeof POSTHandler>) {
+  try { return await withRequestDatabase(() => POSTHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
 }

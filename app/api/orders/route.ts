@@ -1,14 +1,16 @@
-import {tagRowsSql} from "../../../lib/order-tags-sql";
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
 import { errorResponse } from "../../../lib/http";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
-import { sqlForTab, statusTab, type OrderTab } from "../../../lib/order-status";
+import { orderIndiaDateSql, sqlForDashboardTab, statusTab, type OrderTab } from "../../../lib/order-status";
 import { requireApiUser } from "../../../lib/auth/access";
+import { highRiskSql, lowRiskSql } from "../../../lib/analytics-status";
 
 import {cachedValue} from "../../../lib/server-cache";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+async function GETHandler(request: Request) {
   try { return await loadOrders(request); } catch (error) { return errorResponse(error); }
 }
 async function loadOrders(request: Request) {
@@ -22,11 +24,12 @@ async function loadOrders(request: Request) {
   const requestedRisk = url.searchParams.get("risk");
   const risk = ["high", "low"].includes(requestedRisk || "") || (tab === "new" && ["approved", "low_approved"].includes(requestedRisk || "")) ? requestedRisk : "all";
   const approved = risk === "approved";
-  const page = Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1));
+  const requestedPage = Number(url.searchParams.get("page") || 1);
+  const page = Number.isFinite(requestedPage) ? Math.max(1, Math.min(100000,Math.floor(requestedPage))) : 1;
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
   const perPage = 50;
-  const filters: string[] = [];
-  const filterValues: unknown[] = [];
+  const filters: string[] = ["channel_id = ?"];
+  const filterValues: unknown[] = [Number(runtime.SHIPROCKET_CHANNEL_ID || 9574697)];
   const search = url.searchParams.get("search")?.trim();
   const payment = url.searchParams.get("payment")?.trim();
   const courier = url.searchParams.get("courier")?.trim();
@@ -44,17 +47,16 @@ async function loadOrders(request: Request) {
   if (payment) { filters.push("LOWER(payment_method) = LOWER(?)"); filterValues.push(payment); }
   if (courier) { filters.push("LOWER(courier) LIKE LOWER(?)"); filterValues.push(`%${courier}%`); }
   if (pickup) { filters.push("LOWER(pickup_location) LIKE LOWER(?)"); filterValues.push(`%${pickup}%`); }
-  if (from) { filters.push("SUBSTR(order_date, 1, 10) >= ?"); filterValues.push(from); }
-  if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
+  if (from) { filters.push(`${orderIndiaDateSql} >= ?`); filterValues.push(from); }
+  if (to) { filters.push(`${orderIndiaDateSql} <= ?`); filterValues.push(to); }
   if (deliveredDate && tab === "delivered") { filters.push("SUBSTR(delivered_at, 1, 10) = ?"); filterValues.push(deliveredDate); }
 
   const tag = url.searchParams.get("tag")?.trim();
 
-  if (tag) { filters.push(`EXISTS (${tagRowsSql} WHERE LOWER(TRIM(tag_value))=LOWER(?))`); filterValues.push(tag); }
-  const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
-  const riskSql = risk === "high" ? highRiskSql : risk === "low" ? `NOT (${highRiskSql})` : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? `(NOT (${highRiskSql}) OR confirmation_status = 'confirmed')` : "1 = 1";
+  if (tag) { filters.push(`EXISTS (SELECT 1 FROM unnest(order_tags) t(tag_value) WHERE LOWER(tag_value)=LOWER(?))`); filterValues.push(tag); }
+  const riskSql = risk === "high" ? highRiskSql : risk === "low" ? lowRiskSql : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? `((${lowRiskSql}) OR confirmation_status = 'confirmed')` : "1 = 1";
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
-  const where = [sqlForTab(tab), riskSql, ...filters];
+  const where = [sqlForDashboardTab(tab), riskSql, ...filters];
   const whereSql = where.join(" AND ");
   const orderBy = approved ? "COALESCE(NULLIF(confirmed_at, ''), confirmation_updated_at) DESC, id DESC" : `COALESCE(NULLIF(order_date, ''), created_at) ${sort}, id ${sort}`;
   if (url.searchParams.get("selection") === "all") {
@@ -81,12 +83,12 @@ async function loadOrders(request: Request) {
     LIMIT ? OFFSET ?
   `).bind(...filterValues, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
 
-  const groupedPromise = runtime.DB.prepare(`SELECT status,${highRiskSql} AS "isHigh",confirmation_status AS "confirmationStatus",COUNT(*) AS total FROM orders WHERE ${filterSql} GROUP BY status,${highRiskSql},confirmation_status`).bind(...filterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;total:number}>();
-  const optionsPromise = cachedValue("order-options", 60000, async () => {
+  const groupedPromise = runtime.DB.prepare(`SELECT status,${highRiskSql} AS "isHigh",${lowRiskSql} AS "isLow",confirmation_status AS "confirmationStatus",COUNT(*) AS total FROM orders WHERE ${filterSql} GROUP BY status,${highRiskSql},${lowRiskSql},confirmation_status`).bind(...filterValues).all<{status:string;isHigh:boolean;isLow:boolean;confirmationStatus:string;total:number}>();
+  const optionsPromise = cachedValue("order-options-tags-v2", 60000, async () => {
     const [couriers,pickups,tags] = await Promise.all([
       runtime.DB.prepare("SELECT DISTINCT courier FROM orders WHERE courier<>'' ORDER BY courier").all<{courier:string}>(),
       runtime.DB.prepare("SELECT DISTINCT pickup_location AS pickup FROM orders WHERE pickup_location<>'' ORDER BY pickup_location").all<{pickup:string}>(),
-      runtime.DB.prepare(`SELECT DISTINCT tag FROM orders CROSS JOIN LATERAL (${tagRowsSql}) t WHERE tag<>'' ORDER BY tag`).all<{tag:string}>(),
+      runtime.DB.prepare(`SELECT DISTINCT tag FROM orders CROSS JOIN LATERAL unnest(order_tags) t(tag) ORDER BY tag`).all<{tag:string}>(),
     ]);
     return {couriers:couriers.results.map(r=>r.courier),pickups:pickups.results.map(r=>r.pickup),tags:tags.results.map(r=>r.tag)};
   });
@@ -97,12 +99,12 @@ async function loadOrders(request: Request) {
   let total=0;
   for(const row of grouped.results) {
     const count=Number(row.total), bucket=statusTab(row.status), confirmed=row.confirmationStatus==='confirmed';
-    const matchesRisk=risk==='high' ? row.isHigh : risk==='low' ? !row.isHigh : risk==='approved' ? confirmed : risk==='low_approved' ? (!row.isHigh||confirmed) : true;
+    const matchesRisk=risk==='high' ? row.isHigh : risk==='low' ? row.isLow : risk==='approved' ? confirmed : risk==='low_approved' ? (row.isLow||confirmed) : true;
     if(matchesRisk) {counts.all+=count;if(bucket!=='other')counts[bucket]+=count;}
     if(tab==='all'||bucket===tab) {
-      riskCounts.all+=count; riskCounts[row.isHigh?'high':'low']+=count;
+      riskCounts.all+=count; if(row.isHigh)riskCounts.high+=count;else if(row.isLow)riskCounts.low+=count;
       if(confirmed)riskCounts.approved+=count;
-      if(!row.isHigh||confirmed)riskCounts.low_approved+=count;
+      if(row.isLow||confirmed)riskCounts.low_approved+=count;
       if(matchesRisk)total+=count;
     }
   }
@@ -122,3 +124,8 @@ async function loadOrders(request: Request) {
 }
 
 function safeProducts(value: unknown) { try { const data=JSON.parse(String(value || "[]")); return Array.isArray(data) ? data : []; } catch { return []; } }
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}

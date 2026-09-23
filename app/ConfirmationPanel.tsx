@@ -1,10 +1,11 @@
 "use client";
+import { requestErrorMessage } from "../lib/http";
 
 import {completePhone} from "../lib/contact";
 import { Modal } from "./Modal";
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PhoneCall, PhoneMissed, CheckCircle2, GripVertical, MoreHorizontal, Search, UsersRound } from "lucide-react";
-import { isTransientRequestError, readJson } from "../lib/http";
+import { readJson } from "../lib/http";
 
 type Attempt = { attemptNumber: number; outcome: string; note: string; rejectionReason?: string; nextActionAt?: string; createdAt: string };
 type ConfirmationOrder = {
@@ -69,6 +70,7 @@ export default function ConfirmationPanel({ active, section, preview=false, isAd
   const [confirmationTo, setConfirmationTo] = useState("");
   const [confirmationAgent, setConfirmationAgent] = useState("");
   const loadAbort = useRef<AbortController | null>(null);
+  const hasLoaded = useRef(preview);
   useLayoutEffect(() => {
     const next = new Map<string, number>();
     campaignElements.current.forEach((element,id) => {
@@ -84,7 +86,7 @@ export default function ConfirmationPanel({ active, section, preview=false, isAd
     if (loadAbort.current || (quiet && document.hidden)) return;
     const controller = new AbortController();
     loadAbort.current = controller;
-    if (!quiet) setLoading(true);
+    if (!quiet && !hasLoaded.current) setLoading(true);
     try {
       const params = new URLSearchParams({ section, mode });
       if (confirmationFrom) params.set("from", confirmationFrom);
@@ -95,9 +97,10 @@ export default function ConfirmationPanel({ active, section, preview=false, isAd
       const payload = await readJson<Partial<ConfirmationData>>(response);
       if(controller.signal.aborted) return;
       setData((current) => ({ ...current, ...payload, counts: payload.counts ? { ...current.counts, ...payload.counts } : current.counts }));
+      hasLoaded.current = true;
       setError("");
     } catch (cause) {
-      if (!controller.signal.aborted && !quiet && !isTransientRequestError(cause)) setError(cause instanceof Error ? cause.message : "Could not load confirmations");
+      if (!controller.signal.aborted && !quiet) setError(requestErrorMessage(cause, "Could not load confirmations"));
     } finally {
       if (loadAbort.current === controller) loadAbort.current = null;
       if (!controller.signal.aborted && !quiet) setLoading(false);
@@ -253,7 +256,7 @@ export default function ConfirmationPanel({ active, section, preview=false, isAd
       {section === "confirmation" && <div className="confirmation-contact-toolbar"><button disabled={busy || preview} onClick={()=>void refreshContacts()}>{busy ? "Working…" : "Refresh Shopify phones & tags"}</button><label className="confirmation-contact-filter"><Search size={16}/><input type="search" value={confirmationSearch} onChange={(event) => setConfirmationSearch(event.target.value)} placeholder="Filter by customer, contact number, order, city or state"/><span>{confirmationOrders.length} shown</span></label><label>From<input type="date" value={confirmationFrom} max={confirmationTo || undefined} onChange={(event) => setConfirmationFrom(event.target.value)}/></label><label>To<input type="date" value={confirmationTo} min={confirmationFrom || undefined} onChange={(event) => setConfirmationTo(event.target.value)}/></label><label>Assigned agent<select value={confirmationAgent} onChange={(event) => setConfirmationAgent(event.target.value)}><option value="">All agents</option><option value="unassigned">Unassigned</option>{data.agents.map((agent) => <option value={agent.userId} key={agent.userId}>{agent.name}</option>)}</select></label></div>}
 
       {error && <div className="error-banner"><span>!</span><p>{error}</p><button onClick={() => void load()}>Try again</button></div>}
-      {loading ? <div className="confirmation-card confirmation-loading"><i className="loader"/><span>Loading confirmation workspace…</span></div> : null}
+      {loading ? <div className="confirmation-card confirmation-skeleton" aria-label="Loading confirmation workspace">{Array.from({length:6},(_,row)=><div key={row}>{Array.from({length:4},(_,column)=><i key={column}/>)}</div>)}</div> : null}
 
       {!loading && section === "confirmation" && mode === "queue" && <article className="confirmation-card">
         <header className="confirmation-header"><div><p className="eyebrow">CONFIRMATION QUEUE</p><h2>High-RTO customer calls</h2><p>Orders are automatically assigned. Scheduled callbacks return when they are due.</p></div><span>{data.counts.approved} approved</span></header>

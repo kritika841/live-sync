@@ -1,10 +1,12 @@
+import { withRequestDatabase } from "../../../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../../../lib/http";
 import { cookies } from "next/headers";
 import { randomBytes, createHash } from "node:crypto";
 import { access } from "../../../../../lib/operations/access";
 import { isAdmin } from "../../../../../lib/auth/access";
 import { errorResponse, HttpError } from "../../../../../lib/http";
 import { mailbox } from "../../../../../lib/operations/support";
-export async function GET(r: Request) {
+async function GETHandler(r: Request) {
   try {
     const u = await access(r, "support");
     if (!isAdmin(u)) throw new HttpError(403, "Administrator access required");
@@ -47,4 +49,9 @@ export async function GET(r: Request) {
   } catch (e) {
     return errorResponse(e);
   }
+}
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
 }

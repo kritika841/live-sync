@@ -1,3 +1,6 @@
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
+import { operationsDb } from "../../../lib/operations/schema";
 import {completePhone} from "../../../lib/contact";
 import {shopifyOrderContacts} from "../../../lib/shopify";
 import { errorResponse } from "../../../lib/http";
@@ -21,14 +24,14 @@ const orderColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_nam
   COALESCE(o.raw_json::jsonb->>'customer_address', '') AS customerAddress,
   COALESCE(o.raw_json::jsonb->>'customer_pincode', '') AS customerPincode,
   o.order_date AS orderDate, o.status, o.payment_method AS paymentMethod, o.total,
-  o.products_json AS productsJson, o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus,
+  o.products_json AS productsJson, jsonb_build_object('customer_phone_unmasked', o.raw_json::jsonb->'customer_phone_unmasked', 'billing_phone', o.raw_json::jsonb->'billing_phone', 'shipping_phone', o.raw_json::jsonb->'shipping_phone', 'billing_phone_number', o.raw_json::jsonb->'billing_phone_number', 'shipping_phone_number', o.raw_json::jsonb->'shipping_phone_number', 'phone', o.raw_json::jsonb->'phone', 'others', jsonb_build_object('billing_phone_number', o.raw_json::jsonb->'others'->'billing_phone_number', 'shipping_phone_number', o.raw_json::jsonb->'others'->'shipping_phone_number', 'billing_phone', o.raw_json::jsonb->'others'->'billing_phone', 'shipping_phone', o.raw_json::jsonb->'others'->'shipping_phone', 'phone', o.raw_json::jsonb->'others'->'phone'), 'shopify_tags', o.raw_json::jsonb->'shopify_tags', 'order_tag', o.raw_json::jsonb->'order_tag', 'sr_tags', o.raw_json::jsonb->'sr_tags', 'tags', o.raw_json::jsonb->'tags')::text AS rawJson, o.confirmation_status AS confirmationStatus,
   o.confirmation_updated_at AS confirmationUpdatedAt, o.confirmed_at AS confirmedAt, o.rejected_at AS rejectedAt,
   o.confirmation_assignee_id AS confirmationAssigneeId, COALESCE(a.name, '') AS confirmationAssigneeName,
   c.id AS campaignId, c.name AS campaignName, c.position AS campaignPosition, ca.position AS orderPosition`;
 
 const candidateColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_name AS customerName,
   o.customer_phone AS customerPhone, o.order_date AS orderDate, o.payment_method AS paymentMethod,
-  o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus, c.id AS campaignId, c.name AS campaignName`;
+  jsonb_build_object('customer_phone_unmasked', o.raw_json::jsonb->'customer_phone_unmasked', 'billing_phone', o.raw_json::jsonb->'billing_phone', 'shipping_phone', o.raw_json::jsonb->'shipping_phone', 'billing_phone_number', o.raw_json::jsonb->'billing_phone_number', 'shipping_phone_number', o.raw_json::jsonb->'shipping_phone_number', 'phone', o.raw_json::jsonb->'phone', 'others', jsonb_build_object('billing_phone_number', o.raw_json::jsonb->'others'->'billing_phone_number', 'shipping_phone_number', o.raw_json::jsonb->'others'->'shipping_phone_number', 'billing_phone', o.raw_json::jsonb->'others'->'billing_phone', 'shipping_phone', o.raw_json::jsonb->'others'->'shipping_phone', 'phone', o.raw_json::jsonb->'others'->'phone'), 'shopify_tags', o.raw_json::jsonb->'shopify_tags', 'order_tag', o.raw_json::jsonb->'order_tag', 'sr_tags', o.raw_json::jsonb->'sr_tags', 'tags', o.raw_json::jsonb->'tags')::text AS rawJson, o.confirmation_status AS confirmationStatus, c.id AS campaignId, c.name AS campaignName`;
 
 function sourcePhone(row: Record<string, unknown>) {
   let raw: Record<string, unknown> = {};
@@ -66,6 +69,7 @@ async function handleGET(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
+  await operationsDb();
   await ensureConfirmationSchema(runtime.DB);
   const url = new URL(request.url);
   const section = url.searchParams.get("section") === "campaigns" ? "campaigns" : "confirmation";
@@ -159,6 +163,7 @@ async function handlePOST(request: Request) {
   if (["support_agent","support_manager","warehouse"].includes(access.user.role)) return Response.json({error:"Order confirmation access required"},{status:403});
   if (!sameOrigin(request) || !isSameOrigin(request)) return Response.json({ error: "Invalid request origin" }, { status: 403 });
   const runtime = getRuntimeEnv();
+  await operationsDb();
   await ensureConfirmationSchema(runtime.DB);
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body) return Response.json({ error: "Invalid request" }, { status: 400 });
@@ -289,10 +294,21 @@ async function handlePOST(request: Request) {
     ]);
     return Response.json({ ok: true, status: outcome });
   } catch (error) {
+    if (error && typeof error === "object" && "code" in error) return errorResponse(error);
     return Response.json({ error: error instanceof Error ? error.message : "Confirmation action failed" }, { status: 422 });
   }
 }
 
-export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+async function GETHandler(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
 
-export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }
+async function POSTHandler(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}
+
+export async function POST(...args: Parameters<typeof POSTHandler>) {
+  try { return await withRequestDatabase(() => POSTHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
+}

@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../../lib/http";
 import { randomUUID, createHash } from "node:crypto";
 import { access } from "../../../../lib/operations/access";
 import { operationsDb } from "../../../../lib/operations/schema";
@@ -14,7 +16,7 @@ import {
   quantity,
   HttpError,
 } from "../../../../lib/http";
-export async function GET(r: Request) {
+async function GETHandler(r: Request) {
   try {
     await access(r);
     const db = await operationsDb();
@@ -28,7 +30,7 @@ export async function GET(r: Request) {
     return errorResponse(e);
   }
 }
-export async function POST(r: Request) {
+async function POSTHandler(r: Request) {
   let key = "";
   try {
     const u = await access(r);
@@ -85,4 +87,14 @@ export async function POST(r: Request) {
     if (key) await removeFile(key).catch(() => {});
     return errorResponse(e);
   }
+}
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}
+
+export async function POST(...args: Parameters<typeof POSTHandler>) {
+  try { return await withRequestDatabase(() => POSTHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
 }

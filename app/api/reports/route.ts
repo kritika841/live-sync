@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
 import { errorResponse } from "../../../lib/http";
 import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
 import { buildSyncReportWorkbook, type StoredSyncReport } from "../../../lib/excel-report";
@@ -54,7 +56,8 @@ async function handleGET(request: Request) {
     return Response.json({ report }, { headers: { "cache-control": "no-store" } });
   }
 
-  const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+  const requestedPage = Number(url.searchParams.get("page") || 1);
+  const page = Number.isFinite(requestedPage) ? Math.max(1, Math.min(100000,Math.floor(requestedPage))) : 1;
   const perPage = 50;
   const offset = (page - 1) * perPage;
   const [rows, countRow] = await Promise.all([
@@ -63,7 +66,7 @@ async function handleGET(request: Request) {
         changed_orders AS changedOrders, unchanged_orders AS unchangedOrders,
         discrepancies_total AS discrepanciesTotal, ndr_records AS ndrRecords,
         ndr_enriched AS ndrEnriched, fields_json AS fieldsJson,
-        changes_json AS changesJson, created_at AS createdAt
+        '[]' AS changesJson, created_at AS createdAt
       FROM sync_reports ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
     `).bind(perPage, offset).all<ReportRow>(),
     runtime.DB.prepare("SELECT COUNT(*) AS total FROM sync_reports").first<{ total: number }>(),
@@ -78,4 +81,9 @@ async function handleGET(request: Request) {
   }, { headers: { "cache-control": "no-store" } });
 }
 
-export async function GET(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+async function GETHandler(...args: Parameters<typeof handleGET>) { try { return await handleGET(...args); } catch (error) { return errorResponse(error); } }
+
+export async function GET(...args: Parameters<typeof GETHandler>) {
+  try { return await withRequestDatabase(() => GETHandler(...args), 20000); }
+  catch (error) { return requestErrorResponse(error); }
+}

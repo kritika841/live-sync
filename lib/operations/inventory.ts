@@ -272,13 +272,15 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         }
       >();
       for (const p of itemList(products)) {
-        const sku = required(p.sku, "Order SKU");
-        const matches =
-          await sql`SELECT id FROM inventory_products WHERE sku=${sku} AND active`;
+        const sku = String(p.sku || "").trim();
+        const variant = String(p.shopify_variant_id || p.variant_id || p.channel_sku || "").split("/").pop() || "";
+        if(!sku && !/^\d+$/.test(variant))throw new HttpError(409,"Order has no SKU or Shopify variant identifier");
+        const variantGid=/^\d+$/.test(variant)?`gid://shopify/ProductVariant/${variant}`:"";
+        const matches = await sql`SELECT id FROM inventory_products WHERE active AND ((${sku}<>'' AND sku=${sku}) OR (${variantGid}<>'' AND shopify_variant_id=${variantGid}))`;
         if (matches.length !== 1)
           throw new HttpError(
             409,
-            `Map SKU ${sku} to exactly one product first`,
+            `Map SKU or Shopify variant ${sku || variant} to exactly one product first`,
           );
         const items =
           await sql`SELECT i.*,v.version FROM recipe_items i JOIN recipe_versions v ON v.id=i.recipe_version_id WHERE v.product_id=${matches[0].id} AND v.active`;
@@ -287,7 +289,7 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         for (const l of items) {
           const t = totals.get(l.component_id) || { qty: 0, snap: [] };
           t.qty += Number(l.quantity) * quantity(p.quantity);
-          t.snap.push({ sku, version: l.version, quantity: l.quantity });
+          t.snap.push({ sku:sku || variant, version: l.version, quantity: l.quantity });
           totals.set(l.component_id, t);
         }
       }
@@ -329,8 +331,8 @@ export async function mutateInventory(b: Body, u: DashboardUser) {
         if (action === "release" && r.state === "reserved")
           await sql`UPDATE inventory_order_allocations SET state='released' WHERE id=${r.id}`;
         if (action === "qc" && r.state === "consumed" && r.recoverable) {
-          if (!/rto/i.test(o.status))
-            throw new HttpError(409, "Only RTO orders can be restocked");
+          if (!/^(RTO DELIVERED|RTO RECEIVED|RETURN RECEIVED|RETURNED TO ORIGIN)$/i.test(String(o.status).trim()))
+            throw new HttpError(409, "Wait until the return is received before QC restocking");
           const input = itemList(b.lines).find(
             (l) => l.componentId === r.component_id,
           );

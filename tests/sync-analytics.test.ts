@@ -58,3 +58,6 @@ test('batched writes remain atomic on a constraint failure',async()=>{
  await assert.rejects(db.batch([insert(),insert()]));
  assert.equal((await sql`SELECT key FROM sync_state WHERE key=${key}`).length,0);
 });
+test('repeated provider shipment rows upsert one order without changing workflow state',async()=>{
+ const {upsertOrders}=await import('../lib/shiprocket');const id=998887766;const order={id,channel_id:123,channel_order_id:'duplicate-audit',status:'NEW',total:714.28};try{await upsertOrders(db,[order,order],{historicalImport:true});await db.prepare("UPDATE orders SET confirmation_status='confirmed' WHERE id=?").bind(id).run();await upsertOrders(db,[order,order],{historicalImport:true});const rows=(await db.prepare('SELECT confirmation_status FROM orders WHERE id=?').bind(id).all<{confirmation_status:string}>()).results;assert.equal(rows.length,1);assert.equal(rows[0].confirmation_status,'confirmed');}finally{await db.prepare('DELETE FROM orders WHERE id=?').bind(id).run();}
+});

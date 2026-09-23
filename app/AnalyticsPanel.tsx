@@ -1,15 +1,16 @@
 "use client";
+import { requestErrorMessage } from "../lib/http";
 
 import DateRangePicker from "./DateRangePicker";
 import { useEffect, useMemo, useState } from "react";
 
 type Metric = { count: number; percent: number };
-type Breakdown = { name: string; total: number; delivered: number; outcomes: number; rate: number };
+type Breakdown = { name: string; total: number; delivered: number; outcomes: number; shippedOutcomes?: number; rate: number };
 type OverviewData = {
-  statusBreakdown: Array<{status:string;count:number;attempted:boolean;shipped:boolean}>;
   metrics: Record<string, Metric>;
   financials: { deliveredRevenue: number; avgShippingCost: number; avgDeliveredOrderValue: number; deliveredCount: number; shippingCostCount: number };
-  risk: { high: Metric; low: Metric; unknown: Metric };
+  risk: { high: Metric; low: Metric; unknown: Metric; sources: { shopifyHigh: number; shiprocketHigh: number; bothHigh: number } };
+  allHistory: { orders: number; highRisk: Metric; lowRisk: Metric; unknownRisk: Metric; shopifyHigh: number; shiprocketHigh: number; bothHigh: number; ndrHistory: number };
   byCourier: Breakdown[];
   byState: Breakdown[];
   ndrReasons: Array<{ reason: string; count: number }>;
@@ -32,6 +33,7 @@ const indiaDateValue = (date: Date) => {
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
 };
+const analyticsRangeKey = "satmi.analytics.range.v1";
 
 function MetricCard({ label, metric, hint }: { label: string; metric?: Metric; hint?: string }) {
   return <article className="metric-card" title={hint}><p>{label}</p><strong>{metric ? <>{metric.percent}% <span>({metric.count})</span></> : "—"}</strong></article>;
@@ -66,6 +68,26 @@ export default function AnalyticsPanel({ mode, active, preview=false }: { previe
   const [ofd, setOfd] = useState<OfdData | null>(null);
   const [loading, setLoading] = useState(!preview);
   const [error, setError] = useState("");
+  const [retryKey,setRetryKey] = useState(0);
+  const [rangeReady,setRangeReady] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(analyticsRangeKey) || "null") as {from?:string;to?:string} | null;
+        if (saved && (!saved.from || /^\d{4}-\d{2}-\d{2}$/.test(saved.from)) && (!saved.to || /^\d{4}-\d{2}-\d{2}$/.test(saved.to))) {
+          setFrom(saved.from || "");
+          setTo(saved.to || "");
+        }
+      } catch { /* Ignore invalid local preferences. */ }
+      setRangeReady(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  useEffect(() => {
+    if (!rangeReady) return;
+    window.localStorage.setItem(analyticsRangeKey,JSON.stringify({from,to}));
+  },[from,to,rangeReady]);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ mode });
@@ -81,23 +103,27 @@ export default function AnalyticsPanel({ mode, active, preview=false }: { previe
   useEffect(() => {
     if (!active || preview) return;
     let live = true;
+    let inFlight = false;
+    const controller = new AbortController();
     const load = async (quiet = false) => {
+      if (inFlight || (quiet && document.hidden)) return;
+      inFlight = true;
       if (!quiet) setLoading(true);
       try {
-        const response = await fetch(`/api/analytics?${query}`, { cache: "no-store" });
+        const response = await fetch(`/api/analytics?${query}`, { cache: "no-store", signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]) });
         const payload = await response.json() as (OverviewData | OfdData) & { error?: string };
         if (!response.ok) throw new Error(payload.error || "Could not load analytics");
         if (!live) return;
         if (mode === "overview") setOverview(payload as OverviewData); else setOfd(payload as OfdData);
         setError("");
       } catch (loadError) {
-        if (live) setError(loadError instanceof Error ? loadError.message : "Could not load analytics");
-      } finally { if (live && !quiet) setLoading(false); }
+        if (live) setError(requestErrorMessage(loadError, "Could not load analytics"));
+      } finally { inFlight = false; if (live && !quiet) setLoading(false); }
     };
     void load();
     const interval = window.setInterval(() => void load(true), 15000);
-    return () => { live = false; window.clearInterval(interval); };
-  }, [active, mode, query, preview]);
+    return () => { live = false; controller.abort(); window.clearInterval(interval); };
+  }, [active, mode, query, preview,retryKey]);
 
   if (mode === "today_ofd") {
     const metrics = ofd?.metrics || {};
@@ -129,7 +155,7 @@ export default function AnalyticsPanel({ mode, active, preview=false }: { previe
         {(metrics.laterAttemptOFD?.count || 0) > 0 && <MetricCard label="4+ recorded OFD days" metric={metrics.laterAttemptOFD} />}
       </div>
       <section className="analytics-card ofd-orders-card">
-        <header><div><h2>OFD register</h2><span className="record-count" title="Counts use distinct recorded OFD dates in India. Missing history and repeated attempts on the same day mean these are not verified courier attempt numbers.">Recorded scans</span><p>{historical ? "Latest known outcome; old OFD scans without closure move to Unresolved after OFD." : "Live attempt number, current outcome, and NDR detail"} for {ofdDate}.</p></div><span className="record-count">{shownOrders.length} orders</span></header>
+        <header><div><h2>OFD register</h2><span className="record-count" title="Counts use distinct recorded OFD dates in India. Missing history and repeated attempts on the same day mean these are not verified courier attempt numbers.">Recorded scans</span><p>{historical ? "Outcome recorded on the selected date; scans without a recorded outcome remain unresolved." : "Live attempt number, current outcome, and NDR detail"} for {ofdDate}.</p></div><span className="record-count">{shownOrders.length} orders</span></header>
         <nav className="outcome-tabs" aria-label="Filter OFD outcomes">{([['all','All'],['delivered','Delivered'],['undelivered','Undelivered / RTO'],['out','Still OFD'],['unresolved','Unresolved after OFD'],['attempt1','1st recorded day'],['attempt2','2nd recorded day'],['attempt3','3rd recorded day']] as const).map(([key,label])=><button key={key} className={ofdOutcome===key?'active':''} onClick={()=>setOfdOutcome(key)}>{label}</button>)}</nav>
         <div className="analytics-table-wrap"><table className="analytics-table"><thead><tr><th>Order</th><th>Recorded OFD day</th><th>Customer</th><th>OFD time</th><th>First OFD</th><th>Current outcome</th><th>NDR reason</th><th>AWB / Courier</th><th>Amount</th></tr></thead><tbody>
           {shownOrders.map((order) => <tr key={order.id}><td><strong>#{order.channelOrderId || order.id}</strong>{order.previousUndelivered && <small className="repeat-attempt">Previous attempt failed</small>}</td><td><strong className="attempt-number">{order.attemptNumber || "Unknown"}</strong></td><td><strong>{order.customerName || "—"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ")}</small></td><td>{formatDateTime(order.outForDeliveryAt)}</td><td>{formatDateTime(order.firstOutForDeliveryAt)}</td><td><span className="analytics-status">{order.status || "Unknown"}</span>{order.deliveredAt && <small>Delivered {formatDateTime(order.deliveredAt)}</small>}</td><td><strong>{order.ndrReason || "—"}</strong>{order.ndrRaisedAt && <small>{formatDateTime(order.ndrRaisedAt)}</small>}</td><td><strong>{order.awb || "—"}</strong><small>{order.courier || "Not assigned"}</small></td><td><strong>{formatCurrency(order.total)}</strong>{order.shippingCost > 0 && <small>Ship {formatCurrency(order.shippingCost)}</small>}</td></tr>)}
@@ -138,26 +164,37 @@ export default function AnalyticsPanel({ mode, active, preview=false }: { previe
     </section>;
   }
 
+  if (!overview && !preview) return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
+    <div className="analytics-loading" role="status">{error || "Loading analytics…"}</div>
+    {error && <button onClick={()=>setRetryKey(key=>key+1)}>Retry analytics</button>}
+  </section>;
   const metrics = overview?.metrics || {};
   const delivered = analyticsView === "closed" ? metrics.deliveryRate?.percent || 0 : metrics.openDeliveryRate?.percent || 0;
   const rto = analyticsView === "closed" ? metrics.closedRto?.percent || 0 : 0;
   const ndr = analyticsView === "closed" ? metrics.closedNdr?.percent || 0 : metrics.inTransit?.percent || 0;
   const other = Math.max(0, 100 - delivered - rto - ndr);
+  const chartRows = (rows: Breakdown[] = []) => rows.map(row => {
+    const outcomes = Number(analyticsView === "open" ? row.shippedOutcomes || 0 : row.outcomes);
+    return {...row,outcomes,rate:outcomes ? Math.round(Number(row.delivered)/outcomes*1000)/10 : 0};
+  });
+  const chartSubtitle = analyticsView === "open" ? "Delivered ÷ all shipped statuses" : "Delivered ÷ attempted outcomes (including OFD)";
   const maxReason = Math.max(1, ...(overview?.ndrReasons || []).map((item) => Number(item.count)));
+  const applyRange = (days:number) => { const start=new Date();start.setDate(start.getDate()-(days-1));setFrom(indiaDateValue(start));setTo(today); };
+  const applyMonthToDate = () => { const now=new Date();setFrom(indiaDateValue(new Date(now.getFullYear(),now.getMonth(),1)));setTo(today); };
   return <section className={`analytics-view ${!active ? "view-hidden" : ""}`}>
     <div className="analytics-filter">
       <DateRangePicker from={from} to={to} max={today} onApply={(start,end) => {setFrom(start); setTo(end);}}/>
+      <div className="analytics-date-presets" aria-label="Date presets"><button className={from===today&&to===today?"active":""} onClick={()=>applyRange(1)}>Today</button><button onClick={()=>applyRange(7)}>7 days</button><button onClick={()=>applyRange(30)}>30 days</button><button onClick={applyMonthToDate}>Month to date</button><button className={!from&&!to?"active":""} onClick={()=>{setFrom("");setTo("");}}>All history</button></div>
       <label>Payment<select value={payment} onChange={(event) => setPayment(event.target.value)}><option value="">All payments</option><option value="prepaid">Prepaid</option><option value="cod">COD</option></select></label>
       <label>Courier<select value={courier} onChange={(event) => setCourier(event.target.value)}><option value="">All couriers</option>{overview?.filterOptions.couriers.map((item) => <option key={item}>{item}</option>)}</select></label>
       <label>State<select value={state} onChange={(event) => setState(event.target.value)}><option value="">All states</option>{overview?.filterOptions.states.map((item) => <option key={item}>{item}</option>)}</select></label>
-      <label>RTO risk<select value={risk} onChange={(event) => setRisk(event.target.value)}><option value="">All risk</option><option value="low">Low risk</option><option value="high">High / very high</option></select></label>
+      <label>RTO risk<select value={risk} onChange={(event) => setRisk(event.target.value)}><option value="">All risk</option><option value="low">Low risk</option><option value="high">High risk</option></select></label>
       <button onClick={() => { setFrom(monthAgo); setTo(today); setPayment(""); setCourier(""); setState(""); setRisk(""); }}>Reset</button>
     </div>
     {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
     {overview && <div className={`analytics-data-quality ${overview.dataQuality.syncStatus === "healthy" ? "healthy" : "warning"}`}>
-      <i /><span><strong>{overview.dataQuality.orderCount} real orders in this view</strong> · {overview.dataQuality.source} · {overview.dataQuality.dateBasis} · {overview.dataQuality.lastSyncAt ? `Last sync ${formatDateTime(overview.dataQuality.lastSyncAt)}` : "No completed sync timestamp"}{overview.dataQuality.lastSyncError ? ` · Sync warning: ${overview.dataQuality.lastSyncError}` : ""}</span>
+      <i /><span><strong>{overview.dataQuality.orderCount} synced orders in this view</strong> · {overview.dataQuality.source} · {overview.dataQuality.dateBasis} · {overview.dataQuality.lastSyncAt ? `Last sync ${formatDateTime(overview.dataQuality.lastSyncAt)}` : "No completed sync timestamp"}{overview.dataQuality.lastSyncError ? ` · Sync warning: ${overview.dataQuality.lastSyncError}` : ""}</span>
     </div>}
-    <details className="analytics-status-audit"><summary>Shipment status reconciliation</summary><p>Counts use the same filters and order-date cohort as the charts. Compare these rows against the source report.</p><table><thead><tr><th>Shipment status</th><th>Orders</th><th>Attempted denominator</th><th>Shipped denominator</th></tr></thead><tbody>{overview?.statusBreakdown?.map(row=><tr key={row.status}><td>{row.status || "Unknown"}</td><td>{row.count}</td><td>{row.attempted ? "Included" : "Excluded"}</td><td>{row.shipped ? "Included" : "Excluded"}</td></tr>)}</tbody></table></details>
     <nav className="analytics-mode-tabs" aria-label="Analytics calculation view">
       <button className={analyticsView === "closed" ? "active" : ""} onClick={() => setAnalyticsView("closed")}><strong>Attempted outcomes</strong><span>Delivered ÷ (Delivered + RTO + Undelivered + OFD) × 100</span></button>
       <button className={analyticsView === "open" ? "active" : ""} onClick={() => setAnalyticsView("open")}><strong>Open delivery view</strong><span>Delivered ÷ (All shipped statuses) × 100 · Includes RTO, undelivered and lost</span></button>
@@ -182,10 +219,10 @@ export default function AnalyticsPanel({ mode, active, preview=false }: { previe
     <div className="analytics-grid overview-grid">
       <section className="analytics-card outcome-card"><header><div><h2>{analyticsView === "closed" ? "Attempted outcome mix" : "Open delivery mix"}</h2><p>{analyticsView === "closed" ? "Delivered, RTO, undelivered and out-for-delivery orders" : "All shipped orders, including RTO, undelivered and lost"}</p></div></header><div className="donut-layout"><div className="donut" style={{ background: `conic-gradient(#46d495 0 ${delivered}%, #ff706b ${delivered}% ${delivered + rto}%, #f0aa5c ${delivered + rto}% ${delivered + rto + ndr}%, #27302c ${delivered + rto + ndr}% 100%)` }}><span><strong>{analyticsView === "closed" ? metrics.closed?.count || 0 : metrics.openPopulation?.count || 0}</strong><small>{analyticsView === "closed" ? "attempted" : "shipped population"}</small></span></div><div className="legend"><span><i className="delivered" />Delivered <b>{delivered}%</b></span>{analyticsView === "closed" && <span><i className="rto" />RTO <b>{rto}%</b></span>}<span><i className="ndr" />{analyticsView === "closed" ? "Undelivered" : "In transit"} <b>{ndr}%</b></span>{other > 0 && <span><i />{analyticsView === "closed" ? "Out for delivery" : "RTO / undelivered / lost"} <b>{Math.round(other * 10) / 10}%</b></span>}</div></div></section>
       <section className="analytics-card finance-card"><header><div><h2>Revenue & cost</h2><p>Calculated only from delivered orders in the selected order-date cohort</p></div></header><div className="finance-list"><div><span>Delivered revenue</span><strong>{formatCurrency(overview?.financials.deliveredRevenue || 0)}</strong><small>Sum of {overview?.financials.deliveredCount || 0} delivered order totals</small></div><div><span>Avg. delivered shipping cost</span><strong>{overview?.financials.shippingCostCount ? formatCurrency(overview.financials.avgShippingCost) : "Not reported"}</strong><small>{overview?.financials.shippingCostCount || 0} delivered orders report shipping cost</small></div><div><span>Avg. delivered order value</span><strong>{overview?.financials.deliveredCount ? formatCurrency(overview.financials.avgDeliveredOrderValue) : "Not reported"}</strong><small>Delivered order totals only</small></div><div><span>COD share</span><strong>{metrics.cod?.percent || 0}% <small>({metrics.cod?.count || 0})</small></strong><small>All orders in this view</small></div></div></section>
-      <section className="analytics-card risk-card"><header><div><h2>RTO risk split</h2><p>Tagged orders only · {overview?.risk.unknown.count || 0} orders have no recognised risk tag</p></div></header><div className="risk-split"><div><span>Low risk</span><strong>{overview?.risk.low.percent || 0}% <small>({overview?.risk.low.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.low.percent || 0}%` }} /></i></div><div className="high"><span>High / very high</span><strong>{overview?.risk.high.percent || 0}% <small>({overview?.risk.high.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.high.percent || 0}%` }} /></i></div></div></section>
-      <section className="analytics-card ndr-card"><header><div><h2>NDR reasons</h2><p>Why delivery attempts failed</p></div></header><div className="reason-list">{(overview?.ndrReasons || []).map((item) => <div key={item.reason}><span title={item.reason}>{item.reason}</span><i><b style={{ width: `${(Number(item.count) / maxReason) * 100}%` }} /></i><strong>{item.count}</strong></div>)}{!overview?.ndrReasons.length && <p className="analytics-empty">No NDR orders in this period.</p>}</div></section>
-      <RateChart title="Delivery % by courier" subtitle="Delivered ÷ final outcomes; highest-volume couriers first" rows={overview?.byCourier || []} />
-      <RateChart title="Delivery % by state" subtitle="Delivered ÷ final outcomes; highest-volume states first" rows={overview?.byState || []} />
+      <section className="analytics-card risk-card" title="High risk: Shopify tag high or rto prediction high; or Shiprocket RTO Risk high or very high. Overlapping orders count once."><header><h2>RTO risk split <span className="cohort-label">Selected period</span></h2><span className="history-total">{overview?.allHistory.highRisk.count || 0} all history</span></header><div className="risk-split"><div><span>Low risk</span><strong>{overview?.risk.low.percent || 0}% <small>({overview?.risk.low.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.low.percent || 0}%` }} /></i></div><div className="high"><span>High risk</span><strong>{overview?.risk.high.percent || 0}% <small>({overview?.risk.high.count || 0})</small></strong><i><b style={{ width: `${overview?.risk.high.percent || 0}%` }} /></i></div></div></section>
+      <section className="analytics-card ndr-card" title="One latest NDR reason per order in the selected order-date range, including later delivered or returned orders."><header><h2>NDR history & reasons <span className="cohort-label">Selected period</span></h2><span className="history-total">{overview?.allHistory.ndrHistory || 0} all history</span></header><div className="reason-list">{(overview?.ndrReasons || []).map((item) => <div key={item.reason}><span title={item.reason}>{item.reason}</span><i><b style={{ width: `${(Number(item.count) / maxReason) * 100}%` }} /></i><strong>{item.count}</strong></div>)}{!overview?.ndrReasons.length && <p className="analytics-empty">No NDR orders in this period.</p>}</div></section>
+      <RateChart title="Delivery % by courier" subtitle={chartSubtitle} rows={chartRows(overview?.byCourier)} />
+      <RateChart title="Delivery % by state" subtitle={chartSubtitle} rows={chartRows(overview?.byState)} />
     </div>
     {loading && !overview && <div className="analytics-loading"><span className="loader" />Calculating analytics…</div>}
   </section>;

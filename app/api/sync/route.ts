@@ -1,3 +1,5 @@
+import { withRequestDatabase } from "../../../lib/database";
+import { errorResponse as requestErrorResponse } from "../../../lib/http";
 import { errorResponse } from "../../../lib/http";
 import { getRuntimeEnv } from "../../../lib/database";
 import { syncShiprocketOrders } from "../../../lib/shiprocket";
@@ -47,4 +49,9 @@ async function handlePOST(request: Request) {
   }
 }
 
-export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }
+async function POSTHandler(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }
+
+export async function POST(...args: Parameters<typeof POSTHandler>) {
+  try { return await withRequestDatabase(() => POSTHandler(...args), 270000); }
+  catch (error) { return requestErrorResponse(error); }
+}

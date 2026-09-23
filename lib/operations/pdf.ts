@@ -1,10 +1,17 @@
 import { getDocumentProxy } from 'unpdf';
 import { HttpError } from '../http';
-export type ExtractedLine = { description: string; quantity: string; unit: string; cost: string };
+export type ExtractedLine = { description: string; quantity: string; unit: string; cost: string; gst?: string };
 // Conservative table parser: only rows with a description, quantity and rate qualify.
 export function parseRows(rows: string[]): ExtractedLine[] {
   const result: ExtractedLine[] = [];
-  for (const row of rows) {
+  const hasHsn=rows.some(row=>/\bHSN\b/i.test(row));
+  const logicalRows:string[]=[];
+  for(let i=0;i<rows.length;i++){
+    const split=rows[i].trim().match(/^(\d+[.)]?)\s+(\d{6,8})\s+([\d,.]+)\s+(KGS?|G|PCS|UNITS?)\s*$/i);
+    const next=rows[i+1]?.trim().match(/^([A-Za-z].+?)\s{2,}([\d,.]+)\s{2,}([\d,.]+)\s*$/);
+    if(split&&next){logicalRows.push(`${split[1]}  ${next[1]}  ${split[2]}  ${split[3]}  ${split[4]}  ${next[2]}  ${next[3]}`);i++;}else logicalRows.push(rows[i]);
+  }
+  for (const row of logicalRows) {
     if (/\b(sub.?total|grand total|tax total|amount due|bank|ifsc|gstin|total amount)\b/i.test(row)) continue;
     const cells = row.trim().split(/\s{2,}|\t|\|/).map(s=>s.trim()).filter(Boolean);
     if(cells.length < 3) {
@@ -17,8 +24,9 @@ export function parseRows(rows: string[]): ExtractedLine[] {
     if (!/[a-z]/i.test(description) || /^(description|item|particulars|quantity|invoice|purchase order|date)\b/i.test(description) && description.split(' ').length < 3) continue;
     const unit = cells.join(' ').match(/\b(kg|kgs|g|grams|packs?|pcs|units?)\b/i)?.[1]?.toLowerCase() || 'unit';
     const nums = cells.map(c=>c.replace(/(?:₹|Rs\.?|INR|kg|kgs|grams|packs?|pcs|units?)\s*/gi,'').replace(/,/g,'').trim()).filter(c=>/^\d+(?:\.\d+)?$/.test(c));
+    if(hasHsn && /^\d{6,8}$/.test(nums[0]||'') && nums.length>=4)nums.shift();
     if(nums.length<2) continue;
-    result.push({description:description.slice(0,500),quantity:nums[0],cost:nums[1],unit:/^kg/.test(unit)?'kg':/^(g|grams)$/.test(unit)?'g':/^pack/.test(unit)?'pack':'unit'});
+    result.push({description:description.slice(0,500),quantity:nums[0],cost:nums[1],unit:/^kg/.test(unit)?'kg':/^(g|grams)$/.test(unit)?'g':/^pack/.test(unit)?'pack':'unit',...(row.match(/(\d+(?:\.\d+)?)\s*%/)?{gst:row.match(/(\d+(?:\.\d+)?)\s*%/)![1]}:{})});
     if(result.length>=100)break;
   }
   return result;

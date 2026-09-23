@@ -3,7 +3,7 @@ import type { DashboardUser } from '../auth/access';
 import { HttpError, quantity, required } from '../http';
 import { operationsDb } from './schema';
 import { audit, conversion } from './inventory';
-export type ReviewLine={description:string;componentId?:string;lineId?:string;quantity:string;cost:string;unit:string;checked:boolean};
+export type ReviewLine={description:string;componentId?:string;lineId?:string;quantity:string;cost:string;unit:string;checked:boolean;gst?:string};
 export type Review={kind:'po'|'invoice';number:string;vendorId?:string;poId?:string;vendorNumber?:string;date:string;amount?:string;lines:ReviewLine[]};
 export async function commitDocument(b:Review, file:{key:string;hash:string;name:string;text:string},u:DashboardUser){
  if(!['po','invoice'].includes(b.kind)||!Array.isArray(b.lines)||!b.lines.length||b.lines.length>100)throw new HttpError(400,'Review between 1 and 100 line items');
@@ -19,7 +19,8 @@ export async function commitDocument(b:Review, file:{key:string;hash:string;name
     const [c]=await sql`SELECT * FROM inventory_components WHERE id=${required(l.componentId,'Component')}`;
     if(!c)throw new HttpError(400,'Select an existing component for every item');
     const factor=conversion(l.unit,c.unit);
-    await sql`INSERT INTO purchase_order_lines(id,purchase_order_id,component_id,description,ordered_quantity,unit_cost,purchase_unit,conversion_factor,created_at) VALUES(${randomUUID()},${id},${c.id},${required(l.description,'Description')},${quantity(l.quantity)},${quantity(l.cost,'Unit price',true)},${l.unit},${factor},${now})`;
+    const gst=quantity(l.gst||0,'GST',true);if(gst>100)throw new HttpError(400,'GST must be between 0 and 100');
+    await sql`INSERT INTO purchase_order_lines(id,purchase_order_id,component_id,description,ordered_quantity,unit_cost,tax_rate,purchase_unit,conversion_factor,created_at) VALUES(${randomUUID()},${id},${c.id},${required(l.description,'Description')},${quantity(l.quantity)},${quantity(l.cost,'Unit price',true)},${gst},${l.unit},${factor},${now})`;
    }
   }else{
    const [po]=await sql`SELECT * FROM purchase_orders WHERE id=${required(b.poId,'Purchase order')} FOR UPDATE`;

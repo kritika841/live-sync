@@ -1,0 +1,34 @@
+name: Inspect VPS Environment and Logs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect VPS processes, ports, and logs
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            echo "=== PM2 Process Status ==="
+            pm2 status || true
+
+            echo "=== Listening Ports (3000, 5001, etc.) ==="
+            ss -tulpn 2>/dev/null | grep -E ':(3000|5001|80|443)' || netstat -tulpn 2>/dev/null | grep -E ':(3000|5001|80|443)' || true
+
+            echo "=== App Directories in /home/deployer/apps ==="
+            ls -la /home/deployer/apps || true
+
+            echo "=== Variable names in /home/deployer/apps/satmi-orders/.env.local ==="
+            grep -E '^[A-Za-z0-9_]+=' /home/deployer/apps/satmi-orders/.env.local 2>/dev/null | cut -d= -f1 || echo "No .env.local yet"
+
+            echo "=== Last 40 lines of satmi-orders-error.log ==="
+            tail -n 40 /home/deployer/logs/satmi-orders-error.log 2>/dev/null || echo "No error log yet"
+
+            echo "=== Last 20 lines of satmi-orders-out.log ==="
+            tail -n 20 /home/deployer/logs/satmi-orders-out.log 2>/dev/null || echo "No out log yet"

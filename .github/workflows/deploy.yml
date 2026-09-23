@@ -1,0 +1,87 @@
+name: Deploy to Hostinger VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: Package build output
+        run: |
+          tar --exclude='.next/cache' --exclude='.next/dev' -czf release.tar.gz \
+            .next \
+            public \
+            scripts \
+            lib \
+            package.json \
+            package-lock.json \
+            deploy.sh \
+            ecosystem.config.cjs \
+            next.config.ts \
+            proxy.ts
+
+      - name: Ensure target directory exists on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            mkdir -p /home/deployer/apps/satmi-orders /home/deployer/logs
+
+      - name: Upload build to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "release.tar.gz"
+          target: "/home/deployer/apps/satmi-orders"
+
+      - name: Extract and restart on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          PROD_ENV_B64: ${{ secrets.PROD_ENV_BASE64 }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          envs: PROD_ENV_B64
+          script: |
+            set -e
+            APP_DIR="/home/deployer/apps/satmi-orders"
+            ENV_FILE="$APP_DIR/.env.local"
+            
+            if [ -n "$PROD_ENV_B64" ]; then
+              echo "$PROD_ENV_B64" | base64 -d > "$ENV_FILE"
+              echo "Synced complete production .env.local from secret."
+            else
+              touch "$ENV_FILE"
+            fi
+
+            chmod +x "$APP_DIR/deploy.sh"
+            bash "$APP_DIR/deploy.sh"

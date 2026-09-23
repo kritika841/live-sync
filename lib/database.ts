@@ -148,13 +148,13 @@ export class PostgresDatabase {
       onnotice: () => {},
       // Supabase transaction pooling + Vercel functions: one client
       // connection per warm function instance avoids exhausting the pool.
-      max: 1,
-      connect_timeout: 5,
+      max: 7,
+      connect_timeout: 15,
       // A slow or exhausted database must fail a dashboard request promptly.
       // Without these server-side limits, Vercel keeps requests alive for up
       // to five minutes and browser polling multiplies the backlog.
       connection: {
-        statement_timeout: 20000,
+        statement_timeout: 30000,
         lock_timeout: 5000,
         idle_in_transaction_session_timeout: 25000,
       },
@@ -347,6 +347,7 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_updated_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rejected_at TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_high_risk BOOLEAN NOT NULL DEFAULT FALSE"),
     db.prepare("ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS event_at TEXT NOT NULL DEFAULT ''"),
     db.prepare(`CREATE TABLE IF NOT EXISTS campaigns (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
@@ -472,6 +473,7 @@ async function createSchema(db: PostgresDatabase) {
       VALUES ('cmp_default_high_rto', 'High RTO Confirmation', 'Automatically receives every High and Very High RTO order.', '{"risk":"high"}', 0, TRUE, TRUE, ?, ?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, criteria_json=excluded.criteria_json, is_active=TRUE, auto_assign=TRUE`).bind(new Date().toISOString(), new Date().toISOString()),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_channel_status ON orders (channel_id, status)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_status_high_risk_conf ON orders (status, is_high_risk, confirmation_status)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_order_date ON orders (order_date DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_delivered_at ON orders (delivered_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_shipped_at ON orders (shipped_at DESC)"),

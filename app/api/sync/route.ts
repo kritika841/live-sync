@@ -1,7 +1,8 @@
 import { errorResponse } from "../../../lib/http";
 import { getRuntimeEnv } from "../../../lib/database";
 import { syncShiprocketOrders } from "../../../lib/shiprocket";
-import { requireApiUser, isAdmin } from "../../../lib/auth/access";
+import { requireApiUser, isAdmin, isSameOrigin } from "../../../lib/auth/access";
+import { invalidateCache } from "../../../lib/server-cache";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -14,12 +15,8 @@ function safeEqual(left: string, right: string) {
 }
 
 function isSameOriginDashboardRequest(request: Request) {
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
-  const protocol = request.headers.get("x-forwarded-proto") || (process.env.NODE_ENV === "production" ? "https" : "http");
-  return request.headers.get("x-requested-with") === "satmi-orders-dashboard"
-    && request.headers.get("sec-fetch-site") === "same-origin"
-    && Boolean(origin && host && origin === `${protocol}://${host}`);
+  if (request.headers.get("x-requested-with") === "satmi-orders-dashboard") return true;
+  return isSameOrigin(request);
 }
 
 async function handlePOST(request: Request) {
@@ -29,18 +26,19 @@ async function handlePOST(request: Request) {
   if (!secretAccess) {
     const access = await requireApiUser();
     if (access.response) return access.response;
-    if(!isAdmin(access.user) && access.user.role!=="operations")return Response.json({error:"Operations access required"},{status:403});
-  }
-  if (!secretAccess && !isSameOriginDashboardRequest(request)) {
-    return Response.json({ error: "A valid sync API key is required" }, { status: 401 });
+    if (!isAdmin(access.user) && access.user.role !== "operations") return Response.json({ error: "Operations access required" }, { status: 403 });
+    if (!isSameOriginDashboardRequest(request)) {
+      return Response.json({ error: "Invalid request origin" }, { status: 403 });
+    }
   }
   const body = await request.json().catch(() => ({})) as { mode?: string; page?: number };
   const mode = body.mode === "full" ? "full" : "incremental";
   try {
     const result = await syncShiprocketOrders(runtime, mode, "manual sync", {
       startPage: Number.isFinite(Number(body.page)) ? Math.max(1, Number(body.page)) : undefined,
-      maxPages: 4,
+      maxPages: mode === "full" ? 4 : 2,
     });
+    invalidateCache();
     return Response.json(result);
   } catch (error) {
     return errorResponse(error);

@@ -48,11 +48,24 @@ async function loadOrders(request: Request) {
   if (to) { filters.push("SUBSTR(order_date, 1, 10) <= ?"); filterValues.push(to); }
   if (deliveredDate && tab === "delivered") { filters.push("SUBSTR(delivered_at, 1, 10) = ?"); filterValues.push(deliveredDate); }
 
+const DEFAULT_ORDER_TAGS = [
+  "Abandoned Orders", "Agent", "B2G1", "bankOffer", "BOGO", "Cards", "COD",
+  "Duplicate", "easysell_cod_form", "fastrr", "GoKwik", "Gokwik_cod_fees",
+  "Gokwik_cod_prompt", "Gokwik_ppcod_upi", "high", "Influencer", "Landing KARUNGALI",
+  "Landing: ALL-PRODUCTS", "Landing: BUY-2-KARUNGALI", "Landing: INCENSE-STICKS",
+  "Landing: KARUNGALI", "Landing: RUDRAKSHA", "low", "Netbanking", "ops-cancelled",
+  "ops-confirmed", "Order modified by Buyer", "ORDER_CANCELLED", "ORDER_CONFIRMED",
+  "Order_Recovery", "pickup-prioritization", "PPCOD-UPI", "PREPAID-DISCOUNT",
+  "Refund_credited", "Refund_initiated", "RTO Delivered via Shiprocket",
+  "RTO Initiated via Shiprocket", "RTO Rejected via Shiprocket", "rto_prediction_high",
+  "rtorejected", "Standard", "UPI", "very-high", "Wallets"
+];
+
   const tag = url.searchParams.get("tag")?.trim();
 
   if (tag) { filters.push(`EXISTS (${tagRowsSql} WHERE LOWER(TRIM(tag_value))=LOWER(?))`); filterValues.push(tag); }
-  const highRiskSql = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
-  const riskSql = risk === "high" ? highRiskSql : risk === "low" ? `NOT (${highRiskSql})` : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? `(NOT (${highRiskSql}) OR confirmation_status = 'confirmed')` : "1 = 1";
+  const highRiskSql = "is_high_risk";
+  const riskSql = risk === "high" ? "is_high_risk = TRUE" : risk === "low" ? "is_high_risk = FALSE" : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? "(is_high_risk = FALSE OR confirmation_status = 'confirmed')" : "1 = 1";
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
   const where = [sqlForTab(tab), riskSql, ...filters];
   const whereSql = where.join(" AND ");
@@ -81,15 +94,19 @@ async function loadOrders(request: Request) {
     LIMIT ? OFFSET ?
   `).bind(...filterValues, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
 
-  const groupedPromise = runtime.DB.prepare(`SELECT status,${highRiskSql} AS "isHigh",confirmation_status AS "confirmationStatus",COUNT(*) AS total FROM orders WHERE ${filterSql} GROUP BY status,${highRiskSql},confirmation_status`).bind(...filterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;total:number}>();
-  const optionsPromise = cachedValue("order-options", 60000, async () => {
-    const [couriers,pickups,tags] = await Promise.all([
+  const groupedPromise = filterSql === "1 = 1"
+    ? cachedValue("order-grouped-counts", 30000, async () => {
+        return runtime.DB.prepare(`SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus", COUNT(*) AS total FROM orders GROUP BY status, is_high_risk, confirmation_status`).all<{status:string;isHigh:boolean;confirmationStatus:string;total:number}>();
+      })
+    : runtime.DB.prepare(`SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus", COUNT(*) AS total FROM orders WHERE ${filterSql} GROUP BY status, is_high_risk, confirmation_status`).bind(...filterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;total:number}>();
+
+  const optionsPromise = cachedValue("order-options", 86400000, async () => {
+    const [couriers,pickups] = await Promise.all([
       runtime.DB.prepare("SELECT DISTINCT courier FROM orders WHERE courier<>'' ORDER BY courier").all<{courier:string}>(),
       runtime.DB.prepare("SELECT DISTINCT pickup_location AS pickup FROM orders WHERE pickup_location<>'' ORDER BY pickup_location").all<{pickup:string}>(),
-      runtime.DB.prepare(`SELECT DISTINCT tag FROM orders CROSS JOIN LATERAL (${tagRowsSql}) t WHERE tag<>'' ORDER BY tag`).all<{tag:string}>(),
     ]);
-    return {couriers:couriers.results.map(r=>r.courier),pickups:pickups.results.map(r=>r.pickup),tags:tags.results.map(r=>r.tag)};
-  });
+    return {couriers:couriers.results.map(r=>r.courier),pickups:pickups.results.map(r=>r.pickup),tags:DEFAULT_ORDER_TAGS};
+  }, { couriers: [], pickups: [], tags: DEFAULT_ORDER_TAGS });
   const statePromise = runtime.DB.prepare(`SELECT key,value FROM sync_state WHERE key IN ('sync_status','last_sync_at','last_sync_count','last_sync_error')`).all<{key:string;value:string}>();
   const [rows,grouped,filterOptions,stateRows] = await Promise.all([rowsPromise,groupedPromise,optionsPromise,statePromise]);
   const counts = {new:0,ready:0,shipped:0,out_for_delivery:0,undelivered:0,delivered:0,rto:0,all:0};

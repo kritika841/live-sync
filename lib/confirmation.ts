@@ -68,7 +68,8 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
       confirmation_status AS confirmationStatus FROM orders WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<RoutingOrder>(),
   ]);
   const now = new Date().toISOString();
-  const statements = [];
+  const assignments: Array<{ campaignId: string; orderId: number; position: number; createdAt: string }> = [];
+  const pendingOrderIds: number[] = [];
   for (const order of orderResult.results) {
     if (["confirmed", "rejected"].includes(order.confirmationStatus)) continue;
     const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
@@ -78,12 +79,26 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
       ? campaignResult.results.find((item) => item.id === DEFAULT_HIGH_RTO_CAMPAIGN_ID)
       : campaignResult.results.find((item) => campaignMatches(order, JSON.parse(item.criteriaJson || "{}") as CampaignCriteria));
     if (!campaign) continue;
-    statements.push(db.prepare(`INSERT INTO campaign_assignments (campaign_id, order_id, position, created_at)
-      VALUES (?, ?, ?, ?) ON CONFLICT(order_id) DO UPDATE SET campaign_id=excluded.campaign_id
-      WHERE excluded.campaign_id=?`).bind(campaign.id, order.id, Date.now(), now, DEFAULT_HIGH_RTO_CAMPAIGN_ID));
+    assignments.push({ campaignId: campaign.id, orderId: order.id, position: Date.now(), createdAt: now });
     if (actionable(order.status) && order.confirmationStatus === "not_required") {
-      statements.push(db.prepare("UPDATE orders SET confirmation_status='pending', confirmation_updated_at=? WHERE id=? AND confirmation_status='not_required'").bind(now, order.id));
+      pendingOrderIds.push(order.id);
     }
   }
-  if (statements.length) await db.batch(statements);
+  if (assignments.length) {
+    const rowPlaceholders = assignments.map(() => "(?, ?, ?, ?)").join(", ");
+    const values = assignments.flatMap((a) => [a.campaignId, a.orderId, a.position, a.createdAt]);
+    await db.prepare(`
+      INSERT INTO campaign_assignments (campaign_id, order_id, position, created_at)
+      VALUES ${rowPlaceholders}
+      ON CONFLICT(order_id) DO UPDATE SET campaign_id=excluded.campaign_id
+      WHERE excluded.campaign_id='${DEFAULT_HIGH_RTO_CAMPAIGN_ID}'
+    `).bind(...values).run();
+  }
+  if (pendingOrderIds.length) {
+    const placeholders = pendingOrderIds.map(() => "?").join(", ");
+    await db.prepare(`
+      UPDATE orders SET confirmation_status='pending', confirmation_updated_at=?
+      WHERE id IN (${placeholders}) AND confirmation_status='not_required'
+    `).bind(now, ...pendingOrderIds).run();
+  }
 }

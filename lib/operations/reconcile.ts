@@ -19,14 +19,15 @@ export async function reconcileInventory(orderIds?: number[]) {
       ? await sql`SELECT id,status,shipped_at FROM orders WHERE id IN ${sql(orderIds)} ORDER BY created_at,id`
       : await sql`SELECT o.id,o.status,o.shipped_at FROM orders o WHERE EXISTS(SELECT 1 FROM inventory_order_allocations a WHERE a.order_id=o.id AND a.state='reserved') ORDER BY o.created_at,o.id LIMIT 500`,
   );
+  const statesResult = orders.length
+    ? await db.prepare(`SELECT order_id AS orderId, state FROM inventory_order_allocations WHERE order_id IN (${orders.map(() => "?").join(",")})`).bind(...orders.map((o) => o.id)).all<{ orderId: number; state: string }>()
+    : { results: [] };
+  const stateByOrder = new Map(statesResult.results.map((r) => [Number(r.orderId), r.state]));
   for (const o of orders) {
-    const state = await db
-      .prepare("SELECT state FROM inventory_order_allocations WHERE order_id=?")
-      .bind(o.id)
-      .first<{ state: string }>();
+    const state = stateByOrder.get(Number(o.id));
     try {
       if (/cancel/i.test(o.status)) {
-        if (state?.state === "reserved")
+        if (state === "reserved")
           await mutateInventory(
             {
               action: "release",

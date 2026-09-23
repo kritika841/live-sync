@@ -115,21 +115,26 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     if (preview) return;
     setError("");
     try {
-      const response = await fetch(`/api/orders?${query}`, { cache: "no-store", signal: AbortSignal.timeout(25000) });
+      const response = await fetch(`/api/orders?${query}`, { cache: "no-store", signal: AbortSignal.timeout(60000) });
       const payload = await readJson(response) as OrdersResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Could not load orders");
       if(currentQuery.current!==query)return;
       setData(payload);
       setLoadedQuery(query);
     } catch (loadError) {
-      if (!isTransientRequestError(loadError)) setError(loadError instanceof Error ? loadError.message : "Could not load orders");
+      if (loadError instanceof Error && loadError.name === "AbortError") return;
+      if (!isTransientRequestError(loadError)) {
+        setError(loadError instanceof Error ? loadError.message : "Could not load orders");
+      } else if (!loadedQuery) {
+        setError("Connection took too long to respond. Click 'Try again' to retry.");
+      }
     }
   }
 
   useEffect(() => {
     if (preview || view !== "orders") return;
     const controller = new AbortController();
-    fetch(`/api/orders?${query}`, { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(25000)]), cache: "no-store" })
+    fetch(`/api/orders?${query}`, { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(60000)]), cache: "no-store" })
       .then(async (response) => {
         const payload = await readJson(response) as OrdersResponse & { error?: string };
         if (!response.ok) throw new Error(payload.error || "Could not load orders");
@@ -143,7 +148,12 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         setError("");
       })
       .catch((loadError: Error) => {
-        if (loadError.name !== "AbortError" && !isTransientRequestError(loadError)) setError(loadError.message || "Could not load orders");
+        if (loadError.name === "AbortError") return;
+        if (!isTransientRequestError(loadError)) {
+          setError(loadError.message || "Could not load orders");
+        } else if (!loadedQuery) {
+          setError("Connection took too long to respond. Click 'Try again' to retry.");
+        }
       });
     return () => controller.abort();
   }, [query, preview, view]);
@@ -177,17 +187,17 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     const controller=new AbortController();
     let running=false;
     const refresh=async()=>{
-      if(running || document.hidden)return;running=true;
+      if(running || document.hidden || syncing || loading)return;running=true;
       try{
-        const response=await fetch(`/api/orders?${query}`,{cache:"no-store",signal:AbortSignal.any([controller.signal,AbortSignal.timeout(25000)])});
+        const response=await fetch(`/api/orders?${query}`,{cache:"no-store",signal:AbortSignal.any([controller.signal,AbortSignal.timeout(30000)])});
         const payload=await readJson<OrdersResponse>(response);
         if(!controller.signal.aborted && currentQuery.current===query){setData(payload);setLoadedQuery(query);}
       }catch{/* Preserve the visible snapshot during a background failure. */}
       finally{running=false;}
     };
-    const interval=window.setInterval(()=>void refresh(),10000);
+    const interval=window.setInterval(()=>void refresh(),25000);
     return()=>{controller.abort();window.clearInterval(interval);};
-  }, [query, view, preview]);
+  }, [query, view, preview, syncing, loading]);
 
   async function loadLogs() {
     if (preview) return;
@@ -204,6 +214,27 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     }
   }
 
+  const autoSyncedRef = useRef(false);
+  useEffect(() => {
+    if (preview || autoSyncedRef.current || !loadedQuery) return;
+    autoSyncedRef.current = true;
+    (async () => {
+      try {
+        const response = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
+          body: JSON.stringify({ mode: "incremental" }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (response.ok) {
+          await loadOrders();
+        }
+      } catch {
+        /* Background sync preserves visible snapshot on transient failure */
+      }
+    })();
+  }, [preview, loadedQuery]);
+
   async function syncNow() {
     if (preview) return;
     setSyncing(true);
@@ -216,6 +247,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           method: "POST",
           headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
           body: JSON.stringify({ mode, page }),
+          signal: AbortSignal.timeout(60000),
         });
         const payload = await readJson(response) as { error?: string; mode?: "incremental" | "full"; hasMore?: boolean; nextPage?: number };
         if (!response.ok) throw new Error(payload.error || "Sync failed");
@@ -223,8 +255,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         page = payload.hasMore ? payload.nextPage : undefined;
         await loadOrders();
       } while (page);
-      await Promise.all([loadOrders(), loadLogs()]);
-      setView("logs");
+      await loadOrders();
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : "Sync failed");
     } finally {

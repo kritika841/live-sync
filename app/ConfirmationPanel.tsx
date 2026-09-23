@@ -281,7 +281,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
           <div className="confirmation-customer"><strong>{order.customerName || "Customer"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
           {phoneColumn(order)}
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{latest?.note || "No confirmation note"}</small></div>
-          <div className="confirmed-badge">✓ Customer confirmed</div>
+          <div className="confirmed-badge">✓ Customer confirmed {order.status && order.status !== "NEW" ? `· ${order.status}` : ""}</div>
         </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No confirmed orders yet</h3><p>Approved orders will appear here as soon as a call is completed.</p></div>}
       </article>}
 

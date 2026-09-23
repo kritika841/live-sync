@@ -183,6 +183,7 @@ function orderSnapshot(order: ShiprocketOrder) {
     courier: stringValue(shipment.courier || shipment.courier_name),
     shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
     productsJson: JSON.stringify(Array.isArray(order.products) ? order.products : []), rawJson: JSON.stringify(order),
+    isHighRisk: ["high", "very high"].includes(String(order.rto_risk || "").toLowerCase().replace(/[_-]/g, " ").trim()),
   };
 }
 
@@ -348,59 +349,70 @@ async function analyzeOrders(db: PostgresDatabase, orders: ShiprocketOrder[], re
 }
 
 export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder[]) {
+  if (!orders.length) return;
   const syncedAt = new Date().toISOString();
-  for (let start = 0; start < orders.length; start += 100) {
-    const statements = orders.slice(start, start + 100).map((order) => {
-      const value = orderSnapshot(order);
-      if (!value.id) throw new Error("Shiprocket returned an order without an id");
-      return db.prepare(`
-        INSERT INTO orders (
-          id, channel_order_id, channel_id, channel_name, customer_name, customer_email,
-          customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at,
-          shipped_at, out_for_delivery_at, first_out_for_delivery_at,
-          status, status_code, payment_method, payment_status, total, shipping_cost, pickup_location,
-          awb, courier, shipment_id, products_json, raw_json, synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
-          channel_name=excluded.channel_name, customer_name=excluded.customer_name,
-          customer_email=excluded.customer_email, customer_phone=CASE WHEN excluded.customer_phone<>'' THEN excluded.customer_phone ELSE orders.customer_phone END,
-          customer_city=excluded.customer_city, customer_state=excluded.customer_state,
-          order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
-          delivered_at=COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
-          shipped_at=COALESCE(NULLIF(excluded.shipped_at, ''), orders.shipped_at),
-          out_for_delivery_at=CASE
-            WHEN excluded.out_for_delivery_at = '' THEN orders.out_for_delivery_at
-            WHEN orders.out_for_delivery_at = '' THEN excluded.out_for_delivery_at
-            WHEN excluded.out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND orders.out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
-              THEN CASE WHEN excluded.out_for_delivery_at::timestamptz > orders.out_for_delivery_at::timestamptz THEN excluded.out_for_delivery_at ELSE orders.out_for_delivery_at END
-            ELSE GREATEST(excluded.out_for_delivery_at, orders.out_for_delivery_at)
-          END,
-          first_out_for_delivery_at=CASE
-            WHEN excluded.first_out_for_delivery_at = '' THEN orders.first_out_for_delivery_at
-            WHEN orders.first_out_for_delivery_at = '' THEN excluded.first_out_for_delivery_at
-            WHEN excluded.first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND orders.first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
-              THEN CASE WHEN excluded.first_out_for_delivery_at::timestamptz < orders.first_out_for_delivery_at::timestamptz THEN excluded.first_out_for_delivery_at ELSE orders.first_out_for_delivery_at END
-            ELSE LEAST(excluded.first_out_for_delivery_at, orders.first_out_for_delivery_at)
-          END,
-          status=excluded.status, status_code=excluded.status_code,
-          payment_method=excluded.payment_method, payment_status=excluded.payment_status,
-          total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
-          pickup_location=excluded.pickup_location, awb=excluded.awb,
-          courier=excluded.courier, shipment_id=excluded.shipment_id,
-          products_json=excluded.products_json, raw_json=(excluded.raw_json::jsonb || CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text, synced_at=excluded.synced_at
-      `).bind(
+  for (let start = 0; start < orders.length; start += 50) {
+    const chunk = orders.slice(start, start + 50);
+    const validSnapshots = chunk.map(orderSnapshot).filter((v) => Boolean(v.id));
+    if (!validSnapshots.length) continue;
+
+    const rowPlaceholders = "(" + Array.from({ length: 30 }, () => "?").join(", ") + ")";
+    const placeholders = validSnapshots.map(() => rowPlaceholders).join(", ");
+    const values: unknown[] = [];
+    for (const value of validSnapshots) {
+      values.push(
         value.id, value.channelOrderId, value.channelId, value.channelName, value.customerName,
         value.customerEmail, value.customerPhone, value.customerCity, value.customerState,
         value.orderDate, value.createdAt, value.updatedAt, value.deliveredAt, value.shippedAt,
         value.outForDeliveryAt, value.firstOutForDeliveryAt, value.status, value.statusCode,
         value.paymentMethod, value.paymentStatus, value.total, value.shippingCost, value.pickupLocation,
         value.awb, value.courier, value.shipmentId, value.productsJson, value.rawJson, syncedAt,
+        value.isHighRisk,
       );
-    });
-    if (statements.length) await db.batch(statements);
-    await routeConfirmationOrders(db, orders.slice(start, start + 100).map((order) => numberValue(order.id)));
-    await reconcileInventorySafely(orders.slice(start, start + 100).map((order) => numberValue(order.id)));
+    }
+
+    const query = `
+      INSERT INTO orders (
+        id, channel_order_id, channel_id, channel_name, customer_name, customer_email,
+        customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at,
+        shipped_at, out_for_delivery_at, first_out_for_delivery_at,
+        status, status_code, payment_method, payment_status, total, shipping_cost, pickup_location,
+        awb, courier, shipment_id, products_json, raw_json, synced_at, is_high_risk
+      ) VALUES ${placeholders}
+      ON CONFLICT(id) DO UPDATE SET
+        channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
+        channel_name=excluded.channel_name, customer_name=excluded.customer_name,
+        customer_email=excluded.customer_email, customer_phone=CASE WHEN excluded.customer_phone<>'' THEN excluded.customer_phone ELSE orders.customer_phone END,
+        customer_city=excluded.customer_city, customer_state=excluded.customer_state,
+        order_date=excluded.order_date, created_at=excluded.created_at, updated_at=excluded.updated_at,
+        delivered_at=COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
+        shipped_at=COALESCE(NULLIF(excluded.shipped_at, ''), orders.shipped_at),
+        out_for_delivery_at=CASE
+          WHEN excluded.out_for_delivery_at = '' THEN orders.out_for_delivery_at
+          WHEN orders.out_for_delivery_at = '' THEN excluded.out_for_delivery_at
+          WHEN excluded.out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND orders.out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+            THEN CASE WHEN excluded.out_for_delivery_at::timestamptz > orders.out_for_delivery_at::timestamptz THEN excluded.out_for_delivery_at ELSE orders.out_for_delivery_at END
+          ELSE GREATEST(excluded.out_for_delivery_at, orders.out_for_delivery_at)
+        END,
+        first_out_for_delivery_at=CASE
+          WHEN excluded.first_out_for_delivery_at = '' THEN orders.first_out_for_delivery_at
+          WHEN orders.first_out_for_delivery_at = '' THEN excluded.first_out_for_delivery_at
+          WHEN excluded.first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T' AND orders.first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+            THEN CASE WHEN excluded.first_out_for_delivery_at::timestamptz < orders.first_out_for_delivery_at::timestamptz THEN excluded.first_out_for_delivery_at ELSE orders.first_out_for_delivery_at END
+          ELSE LEAST(excluded.first_out_for_delivery_at, orders.first_out_for_delivery_at)
+        END,
+        status=excluded.status, status_code=excluded.status_code,
+        payment_method=excluded.payment_method, payment_status=excluded.payment_status,
+        total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
+        pickup_location=excluded.pickup_location, awb=excluded.awb,
+        courier=excluded.courier, shipment_id=excluded.shipment_id,
+        products_json=excluded.products_json, raw_json=(excluded.raw_json::jsonb || CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text,
+        synced_at=excluded.synced_at, is_high_risk=excluded.is_high_risk
+    `;
+
+    await db.prepare(query).bind(...values).run();
+    await routeConfirmationOrders(db, validSnapshots.map((v) => v.id)).catch(() => null);
+    void reconcileInventorySafely(validSnapshots.map((v) => v.id)).catch(() => null);
   }
 }
 
@@ -464,12 +476,17 @@ export async function syncShiprocketOrders(
   const db = runtime.DB;
   if (!db) throw new Error("Database binding is unavailable");
   await ensureSchema(db);
-  const syncRows = await db.prepare("SELECT key, value FROM sync_state WHERE key IN ('initial_sync_completed_at', 'full_sync_next_page')").all<{ key: string; value: string }>();
+  const syncRows = await db.prepare("SELECT key, value FROM sync_state WHERE key IN ('initial_sync_completed_at', 'full_sync_next_page', 'sync_status', 'last_sync_started_at')").all<{ key: string; value: string }>();
   const syncState = Object.fromEntries(syncRows.results.map((row) => [row.key, row.value]));
+  const lastStartedAt = Date.parse(syncState.last_sync_started_at || "");
+  const isRunning = syncState.sync_status === "running";
+  if (isRunning && Number.isFinite(lastStartedAt) && Date.now() - lastStartedAt < 30000 && mode === "incremental") {
+    return { synced: 0, channelId: 0, channelName: "", mode, report: { mode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, trackingOrders: 0, trackingEvents: 0, fields: {}, changes: [] }, hasMore: false, totalPages: 1, message: "Sync already in progress" };
+  }
   const effectiveMode: SyncMode = mode === "incremental" && !syncState.initial_sync_completed_at ? "full" : mode;
   const storedPage = Math.max(1, Number(syncState.full_sync_next_page || 1));
   const startPage = effectiveMode === "full" ? Math.max(1, Number(options.startPage || storedPage)) : 1;
-  const maxPages = effectiveMode === "full" ? Math.min(10, Math.max(1, Number(options.maxPages || 4))) : 500;
+  const maxPages = effectiveMode === "full" ? Math.min(10, Math.max(1, Number(options.maxPages || 4))) : Math.min(3, Math.max(1, Number(options.maxPages || 1)));
   await logActivity(db, source, "sync.started", `${effectiveMode === "full" ? "Full" : "Incremental"} Shiprocket sync started`, { mode: effectiveMode });
   await setSyncState(db, "sync_status", "running");
   await setSyncState(db, "last_sync_started_at", new Date().toISOString());
@@ -480,14 +497,10 @@ export async function syncShiprocketOrders(
     const fetchPage = (page: number) => {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
       if (effectiveMode === "incremental") {
-        const from = new Date();
-        from.setUTCDate(from.getUTCDate() - 2);
-        const through = new Date();
-        through.setUTCDate(through.getUTCDate() + 1);
-        params.set("updated_from", dateOnly(from));
-        // Shiprocket treats a date-only upper bound as midnight at the start of that date.
-        // Using tomorrow keeps every order created or updated today inside the window.
-        params.set("updated_to", dateOnly(through));
+        const from = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+        const through = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        params.set("from", dateOnly(from));
+        params.set("to", dateOnly(through));
       }
       return apiJson<{ data?: ShiprocketOrder[]; meta?: { pagination?: { total_pages?: number } } }>(
         `${API_ROOT}/orders?${params.toString()}`,
@@ -498,20 +511,50 @@ export async function syncShiprocketOrders(
     const totalPages = Math.min(Number(firstPage.meta?.pagination?.total_pages || 1), 500);
     const orders = [...(firstPage.data || [])];
     const endPage = Math.min(totalPages, startPage + maxPages - 1);
-    for (let start = startPage + 1; start <= endPage; start += 4) {
-      const pageNumbers = Array.from({ length: Math.min(4, endPage - start + 1) }, (_, index) => start + index);
+    for (let start = startPage + 1; start <= endPage; start += 2) {
+      const pageNumbers = Array.from({ length: Math.min(2, endPage - start + 1) }, (_, index) => start + index);
       const pages = await Promise.all(pageNumbers.map(fetchPage));
       for (const page of pages) orders.push(...(page.data || []));
     }
+
+    // Refresh active confirmed orders so their status changes (e.g. AWB assigned, shipped, delivered) persist immediately
+    const existingOrderIds = new Set(orders.map((o) => Number(o.id)).filter(Boolean));
+    const activeConfirmed = await db.prepare(`
+      SELECT id FROM orders
+      WHERE confirmation_status = 'confirmed'
+        AND UPPER(TRIM(status)) NOT IN ('DELIVERED', 'DELIVERED TO CUSTOMER', 'RTO DELIVERED', 'CANCELED', 'LOST')
+      ORDER BY id DESC LIMIT 50
+    `).all<{ id: number }>().catch(() => ({ results: [] as { id: number }[] }));
+    const confirmedToRefresh = activeConfirmed.results.filter((row) => !existingOrderIds.has(Number(row.id)));
+    if (confirmedToRefresh.length > 0) {
+      const refreshedOrders = await Promise.all(
+        confirmedToRefresh.slice(0, 15).map(async (row) => {
+          try {
+            const res = await apiJson<{ data?: ShiprocketOrder }>(`${API_ROOT}/orders/show/${row.id}`, {
+              headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+            });
+            return res.data || null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const refreshed of refreshedOrders) {
+        if (refreshed && refreshed.id) orders.push(refreshed);
+      }
+    }
+
     for (let start = 0; start < orders.length; start += 100) {
       const batch = orders.slice(start, start + 100);
       await analyzeOrders(db, batch, report);
       await upsertOrders(db, batch);
-      const tracking = await syncTrackingHistories(db, token, batch.map(orderSnapshot).map((order) => ({
-        id: order.id, channelOrderId: order.channelOrderId, shipmentId: order.shipmentId, awb: order.awb,
-      })));
-      report.trackingOrders += tracking.orders;
-      report.trackingEvents += tracking.events;
+      if (effectiveMode === "full") {
+        const tracking = await syncTrackingHistories(db, token, batch.map(orderSnapshot).map((order) => ({
+          id: order.id, channelOrderId: order.channelOrderId, shipmentId: order.shipmentId, awb: order.awb,
+        }))).catch(() => ({ orders: 0, events: 0 }));
+        report.trackingOrders += tracking.orders;
+        report.trackingEvents += tracking.events;
+      }
     }
     const synced = orders.length;
     const hasMore = effectiveMode === "full" && endPage < totalPages;
@@ -525,10 +568,12 @@ export async function syncShiprocketOrders(
       });
       return { synced, channelId: channel.id, channelName: channel.name, mode: effectiveMode, report, hasMore, nextPage, totalPages };
     }
-    await syncNdrDetails(db, token, channel.id, report);
-    const trackingBackfill = await backfillTrackingHistories(db, token);
-    report.trackingOrders += trackingBackfill.orders;
-    report.trackingEvents += trackingBackfill.events;
+    if (effectiveMode === "full") {
+      await syncNdrDetails(db, token, channel.id, report).catch(() => null);
+      const trackingBackfill = await backfillTrackingHistories(db, token).catch(() => ({ orders: 0, events: 0 }));
+      report.trackingOrders += trackingBackfill.orders;
+      report.trackingEvents += trackingBackfill.events;
+    }
     const completedAt = new Date().toISOString();
     report.completedAt = completedAt;
     await setSyncState(db, "channel_id", String(channel.id));
@@ -546,7 +591,7 @@ export async function syncShiprocketOrders(
       report.mode, source, report.checked, report.newOrders, report.changedOrders,
       report.unchangedOrders, report.discrepanciesTotal, report.ndrRecords,
       report.ndrEnriched, JSON.stringify(report.fields), JSON.stringify(report.changes), completedAt,
-    ).run();
+    ).run().catch(() => null);
     await setSyncState(db, "sync_status", "healthy");
     await setSyncState(db, "last_sync_error", "");
     if (effectiveMode === "full") {

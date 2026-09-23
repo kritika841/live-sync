@@ -21,6 +21,7 @@ const orderColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_nam
   COALESCE(o.raw_json::jsonb->>'customer_address', '') AS customerAddress,
   COALESCE(o.raw_json::jsonb->>'customer_pincode', '') AS customerPincode,
   o.order_date AS orderDate, o.status, o.payment_method AS paymentMethod, o.total,
+  o.awb, o.courier, o.shipped_at AS "shippedAt", o.delivered_at AS "deliveredAt",
   o.products_json AS productsJson, o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus,
   o.confirmation_updated_at AS confirmationUpdatedAt, o.confirmed_at AS confirmedAt, o.rejected_at AS rejectedAt,
   o.confirmation_assignee_id AS confirmationAssigneeId, COALESCE(a.name, '') AS confirmationAssigneeName,
@@ -98,10 +99,18 @@ async function handleGET(request: Request) {
 
   const filters: string[] = [];
   const filterValues: string[] = [];
+  const fulfillment = url.searchParams.get("fulfillment") || "all";
   if (dateFrom) { filters.push("COALESCE(NULLIF(o.order_date,''),o.created_at)::date >= ?::date"); filterValues.push(dateFrom); }
   if (dateTo) { filters.push("COALESCE(NULLIF(o.order_date,''),o.created_at)::date <= ?::date"); filterValues.push(dateTo); }
   if (agent === "unassigned") filters.push("o.confirmation_assignee_id='' ");
   else if (agent) { filters.push("o.confirmation_assignee_id=?"); filterValues.push(agent); }
+  if (mode === "confirmed") {
+    if (fulfillment === "pending") {
+      filters.push("UPPER(TRIM(o.status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')");
+    } else if (fulfillment === "shipped") {
+      filters.push("UPPER(TRIM(o.status)) NOT IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')");
+    }
+  }
   const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
   const joins = "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id";
   const listQuery = mode === "confirmed"
@@ -126,7 +135,9 @@ async function handleGET(request: Request) {
           AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
             AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))) AS queue,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed') AS confirmed,
-      (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; rejected: number }>(),
+      (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed' AND UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')) AS confirmed_pending,
+      (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed' AND UPPER(TRIM(status)) NOT IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')) AS confirmed_shipped,
+      (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; confirmed_pending: number; confirmed_shipped: number; rejected: number }>(),
     runtime.DB.prepare("SELECT user_id AS userId,name FROM support_agents WHERE available ORDER BY name").all<{userId:string;name:string}>().catch(() => ({results:[] as {userId:string;name:string}[]})),
   ]);
   const visibleIds = orders.results.map((row) => Number(row.id));
@@ -143,6 +154,8 @@ async function handleGET(request: Request) {
   const counts = {
     queue: Number(countRow?.queue || 0),
     confirmed: Number(countRow?.confirmed || 0),
+    confirmedPending: Number(countRow?.confirmed_pending || 0),
+    confirmedShipped: Number(countRow?.confirmed_shipped || 0),
     rejected: Number(countRow?.rejected || 0),
     approved: Number(countRow?.confirmed || 0),
   };

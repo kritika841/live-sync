@@ -10,6 +10,7 @@ type Attempt = { attemptNumber: number; outcome: string; note: string; rejection
 type ConfirmationOrder = {
   id: number; channelOrderId: string; customerName: string; customerPhone: string; customerCity: string;
   customerState: string; customerAddress: string; customerPincode: string; orderDate: string; status: string;
+  awb?: string; courier?: string; shippedAt?: string; deliveredAt?: string;
   paymentMethod: string; total: number; products: Array<{ name?: string; quantity?: number; sku?: string }>;
   confirmationStatus: string; campaignName?: string; confirmedAt?: string; rejectedAt?: string; phoneMasked?: boolean; tags: string[]; attempts: Attempt[];
   confirmationAssigneeId?: string; confirmationAssigneeName?: string;
@@ -20,13 +21,13 @@ type Campaign = {
 };
 type ConfirmationData = {
   queue: ConfirmationOrder[]; confirmed: ConfirmationOrder[]; rejected: ConfirmationOrder[]; candidates: ConfirmationOrder[];
-  campaigns: Campaign[]; availableTags: string[]; counts: { queue: number; confirmed: number; rejected: number; approved: number };
+  campaigns: Campaign[]; availableTags: string[]; counts: { queue: number; confirmed: number; confirmedPending?: number; confirmedShipped?: number; rejected: number; approved: number };
   agents: Array<{userId:string;name:string}>;
 };
 type Mode = "queue" | "confirmed" | "rejected";
 type OrderAction = "confirm" | "callback" | "unreachable" | "reject";
 
-const emptyData: ConfirmationData = { queue: [], confirmed: [], rejected: [], candidates: [], campaigns: [], availableTags: [], agents: [], counts: { queue: 0, confirmed: 0, rejected: 0, approved: 0 } };
+const emptyData: ConfirmationData = { queue: [], confirmed: [], rejected: [], candidates: [], campaigns: [], availableTags: [], agents: [], counts: { queue: 0, confirmed: 0, confirmedPending: 0, confirmedShipped: 0, rejected: 0, approved: 0 } };
 
 function when(value?: string) {
   if (!value) return "—";
@@ -36,6 +37,23 @@ function when(value?: string) {
 
 function productSummary(products: ConfirmationOrder["products"]) {
   return products.length ? products.map((product) => `${product.name || product.sku || "Product"}${product.quantity ? ` ×${product.quantity}` : ""}`).join(", ") : "—";
+}
+
+function fulfillmentBadge(order: ConfirmationOrder) {
+  const s = String(order.status || "").trim().toUpperCase();
+  if (s.includes("DELIVERED") && !s.includes("RTO")) {
+    return <div className="confirmed-badge delivered">✓ Delivered {order.deliveredAt ? `(${when(order.deliveredAt)})` : ""} {order.awb ? `· AWB ${order.awb}` : ""}</div>;
+  }
+  if (["SHIPPED", "IN TRANSIT", "IN TRANSIT-EN-ROUTE", "IN TRANSIT-AT DESTINATION HUB", "OUT FOR DELIVERY", "PICKED UP"].some((st) => s.includes(st))) {
+    return <div className="confirmed-badge shipped">🚚 {order.status} {order.courier ? `· ${order.courier}` : ""} {order.awb ? `· AWB ${order.awb}` : ""}</div>;
+  }
+  if (["READY TO SHIP", "AWB ASSIGNED", "PICKUP SCHEDULED", "MANIFEST GENERATED"].some((st) => s.includes(st))) {
+    return <div className="confirmed-badge ready">📦 Ready to ship {order.awb ? `· AWB ${order.awb}` : ""}</div>;
+  }
+  if (s.includes("CANCEL")) {
+    return <div className="confirmed-badge cancelled">✕ Cancelled in Shiprocket</div>;
+  }
+  return <div className="confirmed-badge pending">⏳ Pending warehouse fulfillment</div>;
 }
 
 export default function ConfirmationPanel({ active, section = "confirmation", preview = false, isAdmin = false }: { active: boolean; preview?: boolean; section?: "confirmation" | "campaigns"; isAdmin?: boolean }) {
@@ -65,6 +83,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   const [draggedCampaignId, setDraggedCampaignId] = useState("");
   const [openCampaignMenu, setOpenCampaignMenu] = useState("");
   const [confirmationSearch, setConfirmationSearch] = useState("");
+  const [fulfillmentFilter, setFulfillmentFilter] = useState<"all" | "pending" | "shipped">("all");
   const [confirmationFrom, setConfirmationFrom] = useState("");
   const [confirmationTo, setConfirmationTo] = useState("");
   const [confirmationAgent, setConfirmationAgent] = useState("");
@@ -87,6 +106,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
     if (!quiet) setLoading(true);
     try {
       const params = new URLSearchParams({ section, mode });
+      if (mode === "confirmed" && fulfillmentFilter !== "all") params.set("fulfillment", fulfillmentFilter);
       if (confirmationFrom) params.set("from", confirmationFrom);
       if (confirmationTo) params.set("to", confirmationTo);
       if (confirmationAgent) params.set("agent", confirmationAgent);
@@ -102,7 +122,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
       if (loadAbort.current === controller) loadAbort.current = null;
       if (!controller.signal.aborted && !quiet) setLoading(false);
     }
-  }, [mode, section, createOpen, confirmationFrom, confirmationTo, confirmationAgent]);
+  }, [mode, section, fulfillmentFilter, createOpen, confirmationFrom, confirmationTo, confirmationAgent]);
 
   useEffect(() => {
     if (!active || preview) return;
@@ -275,14 +295,21 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
       </article>}
 
       {!loading && section === "confirmation" && mode === "confirmed" && <article className="confirmation-card confirmed-card">
-        <header className="confirmation-header"><div><p className="eyebrow">CONFIRMED ORDERS</p><h2>Customer-approved orders</h2><p>Every order confirmed from the call queue is retained here.</p></div><span>{data.confirmed.length} approved</span></header>
+        <header className="confirmation-header">
+          <div><p className="eyebrow">CONFIRMED ORDERS</p><h2>Customer-approved orders</h2><p>Every order confirmed from the call queue is tracked here with live shipping status.</p></div>
+          <div className="confirmation-fulfillment-tabs" style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+            <button type="button" className={`sub-filter-tab ${fulfillmentFilter === "all" ? "active" : ""}`} onClick={() => setFulfillmentFilter("all")}>All ({data.counts.confirmed})</button>
+            <button type="button" className={`sub-filter-tab ${fulfillmentFilter === "pending" ? "active" : ""}`} onClick={() => setFulfillmentFilter("pending")}>Pending fulfillment ({data.counts.confirmedPending ?? 0})</button>
+            <button type="button" className={`sub-filter-tab ${fulfillmentFilter === "shipped" ? "active" : ""}`} onClick={() => setFulfillmentFilter("shipped")}>Shipped & delivered ({data.counts.confirmedShipped ?? 0})</button>
+          </div>
+        </header>
         {confirmationOrders.length ? <div className="confirmation-orders">{confirmationOrders.map((order) => { const latest = [...order.attempts].reverse().find((attempt) => attempt.outcome === "confirmed"); return <div className="confirmation-order confirmed-order" key={order.id}>
           <div className="confirmation-order-main"><strong>#{order.channelOrderId}</strong><small>Confirmed {when(order.confirmedAt)}</small><p>{productSummary(order.products)}</p></div>
           <div className="confirmation-customer"><strong>{order.customerName || "Customer"}</strong><small>{[order.customerCity, order.customerState].filter(Boolean).join(", ") || "No location"}</small></div>
           {phoneColumn(order)}
           <div className="confirmation-meta"><span>{order.campaignName || "Confirmation"}</span><small>{latest?.note || "No confirmation note"}</small></div>
-          <div className="confirmed-badge">✓ Customer confirmed {order.status && order.status !== "NEW" ? `· ${order.status}` : ""}</div>
-        </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No confirmed orders yet</h3><p>Approved orders will appear here as soon as a call is completed.</p></div>}
+          {fulfillmentBadge(order)}
+        </div>; })}</div> : <div className="confirmation-empty"><span>✓</span><h3>No confirmed orders match</h3><p>Approved orders will appear here as soon as a call is completed.</p></div>}
       </article>}
 
       {!loading && section === "confirmation" && mode === "rejected" && <article className="confirmation-card rejected-card">

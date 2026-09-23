@@ -247,10 +247,15 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           method: "POST",
           headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
           body: JSON.stringify({ mode, page }),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(90000),
         });
-        const payload = await readJson(response) as { error?: string; mode?: "incremental" | "full"; hasMore?: boolean; nextPage?: number };
+        const payload = await readJson(response) as { error?: string; mode?: "incremental" | "full"; hasMore?: boolean; nextPage?: number; message?: string };
         if (!response.ok) throw new Error(payload.error || "Sync failed");
+        if (payload.message === "Sync already in progress") {
+          await new Promise((resolve) => window.setTimeout(resolve, 3000));
+          await loadOrders();
+          return;
+        }
         if (payload.mode === "full") mode = "full";
         page = payload.hasMore ? payload.nextPage : undefined;
         await loadOrders();

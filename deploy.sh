@@ -24,6 +24,7 @@ npm ci --omit=dev
 echo "Reloading PM2 processes..."
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 describe satmi-orders >/dev/null 2>&1 || (echo "satmi-orders PM2 process is missing" && exit 1)
+pm2 describe satmi-scheduler >/dev/null 2>&1 || (echo "satmi-scheduler PM2 process is missing" && exit 1)
 pm2 save
 sleep 3
 

@@ -480,13 +480,13 @@ export async function syncShiprocketOrders(
   const syncState = Object.fromEntries(syncRows.results.map((row) => [row.key, row.value]));
   const lastStartedAt = Date.parse(syncState.last_sync_started_at || "");
   const isRunning = syncState.sync_status === "running";
-  if (isRunning && Number.isFinite(lastStartedAt) && Date.now() - lastStartedAt < 30000 && mode === "incremental") {
+  if (isRunning && Number.isFinite(lastStartedAt) && Date.now() - lastStartedAt < 45000 && mode === "incremental") {
     return { synced: 0, channelId: 0, channelName: "", mode, report: { mode, checked: 0, newOrders: 0, changedOrders: 0, unchangedOrders: 0, discrepanciesTotal: 0, ndrRecords: 0, ndrEnriched: 0, trackingOrders: 0, trackingEvents: 0, fields: {}, changes: [] }, hasMore: false, totalPages: 1, message: "Sync already in progress" };
   }
   const effectiveMode: SyncMode = mode === "incremental" && !syncState.initial_sync_completed_at ? "full" : mode;
   const storedPage = Math.max(1, Number(syncState.full_sync_next_page || 1));
   const startPage = effectiveMode === "full" ? Math.max(1, Number(options.startPage || storedPage)) : 1;
-  const maxPages = effectiveMode === "full" ? Math.min(10, Math.max(1, Number(options.maxPages || 4))) : Math.min(3, Math.max(1, Number(options.maxPages || 1)));
+  const maxPages = effectiveMode === "full" ? Math.min(10, Math.max(1, Number(options.maxPages || 4))) : Math.min(3, Math.max(1, Number(options.maxPages || 2)));
   await logActivity(db, source, "sync.started", `${effectiveMode === "full" ? "Full" : "Incremental"} Shiprocket sync started`, { mode: effectiveMode });
   await setSyncState(db, "sync_status", "running");
   await setSyncState(db, "last_sync_started_at", new Date().toISOString());
@@ -497,7 +497,7 @@ export async function syncShiprocketOrders(
     const fetchPage = (page: number) => {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
       if (effectiveMode === "incremental") {
-        const from = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+        const from = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const through = new Date(Date.now() + 24 * 60 * 60 * 1000);
         params.set("from", dateOnly(from));
         params.set("to", dateOnly(through));
@@ -517,30 +517,33 @@ export async function syncShiprocketOrders(
       for (const page of pages) orders.push(...(page.data || []));
     }
 
-    // Refresh active confirmed orders so their status changes (e.g. AWB assigned, shipped, delivered) persist immediately
+    // Refresh active unfulfilled & confirmed orders from the last 14 days so their status changes (AWB assigned, shipped, delivered) persist immediately
     const existingOrderIds = new Set(orders.map((o) => Number(o.id)).filter(Boolean));
-    const activeConfirmed = await db.prepare(`
+    const activeToRefresh = await db.prepare(`
       SELECT id FROM orders
-      WHERE confirmation_status = 'confirmed'
+      WHERE (confirmation_status = 'confirmed' OR UPPER(TRIM(status)) IN ('NEW', 'PENDING', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED'))
         AND UPPER(TRIM(status)) NOT IN ('DELIVERED', 'DELIVERED TO CUSTOMER', 'RTO DELIVERED', 'CANCELED', 'LOST')
+        AND COALESCE(NULLIF(order_date, ''), created_at)::timestamptz >= NOW() - INTERVAL '14 days'
       ORDER BY id DESC LIMIT 50
     `).all<{ id: number }>().catch(() => ({ results: [] as { id: number }[] }));
-    const confirmedToRefresh = activeConfirmed.results.filter((row) => !existingOrderIds.has(Number(row.id)));
-    if (confirmedToRefresh.length > 0) {
-      const refreshedOrders = await Promise.all(
-        confirmedToRefresh.slice(0, 15).map(async (row) => {
-          try {
+    const toRefresh = activeToRefresh.results.filter((row) => !existingOrderIds.has(Number(row.id))).slice(0, 30);
+    if (toRefresh.length > 0) {
+      for (let i = 0; i < toRefresh.length; i += 5) {
+        const chunk = toRefresh.slice(i, i + 5);
+        const settled = await Promise.allSettled(
+          chunk.map(async (row) => {
             const res = await apiJson<{ data?: ShiprocketOrder }>(`${API_ROOT}/orders/show/${row.id}`, {
               headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+              signal: AbortSignal.timeout(4000),
             });
             return res.data || null;
-          } catch {
-            return null;
+          })
+        );
+        for (const item of settled) {
+          if (item.status === "fulfilled" && item.value && item.value.id) {
+            orders.push(item.value);
           }
-        })
-      );
-      for (const refreshed of refreshedOrders) {
-        if (refreshed && refreshed.id) orders.push(refreshed);
+        }
       }
     }
 
@@ -609,6 +612,11 @@ export async function syncShiprocketOrders(
       mode: effectiveMode, error: error instanceof Error ? error.message : "Unknown sync error",
     }, "error");
     throw error;
+  } finally {
+    const current = await db.prepare("SELECT value FROM sync_state WHERE key='sync_status'").first<{ value: string }>().catch(() => null);
+    if (current?.value === "running") {
+      await setSyncState(db, "sync_status", "healthy").catch(() => null);
+    }
   }
 }
 
@@ -659,7 +667,7 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
     await setSyncState(db,"fast_sync_from",pending?from:new Date(Date.now()-2*86400000).toISOString().slice(0,10));
     await setSyncState(db,"fast_sync_error","");
     await setSyncState(db,"fast_sync_checked_at",new Date().toISOString());
-    if(!pending) await setSyncState(db,"fast_sync_last_at",new Date().toISOString());
+    await setSyncState(db,"fast_sync_last_at",new Date().toISOString());
     return {imported,pending,nextPage:pending?next:null};
   } catch(error) {
     await setSyncState(db,"fast_sync_error",error instanceof Error?error.message:"Sync failed");

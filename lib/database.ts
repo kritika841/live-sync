@@ -339,8 +339,11 @@ async function createSchema(db: PostgresDatabase) {
     `),
     db.prepare(`CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS webhook_events (id BIGSERIAL PRIMARY KEY, shiprocket_order_id BIGINT, channel_order_id TEXT, shipment_id BIGINT, awb TEXT, status TEXT, payload_json TEXT NOT NULL, event_at TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS activity_logs (id BIGSERIAL PRIMARY KEY, source TEXT NOT NULL, event_type TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', message TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS activity_logs (id BIGSERIAL PRIMARY KEY, source TEXT NOT NULL, event_type TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', message TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, actor_id TEXT NOT NULL DEFAULT '', actor_name TEXT NOT NULL DEFAULT '', actor_role TEXT NOT NULL DEFAULT '')`),
     db.prepare(`CREATE TABLE IF NOT EXISTS sync_reports (id BIGSERIAL PRIMARY KEY, mode TEXT NOT NULL, source TEXT NOT NULL, checked INTEGER NOT NULL DEFAULT 0, new_orders INTEGER NOT NULL DEFAULT 0, changed_orders INTEGER NOT NULL DEFAULT 0, unchanged_orders INTEGER NOT NULL DEFAULT 0, discrepancies_total INTEGER NOT NULL DEFAULT 0, ndr_records INTEGER NOT NULL DEFAULT 0, ndr_enriched INTEGER NOT NULL DEFAULT 0, fields_json TEXT NOT NULL DEFAULT '{}', changes_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL)`),
+    db.prepare("ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS actor_id TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_status TEXT NOT NULL DEFAULT 'not_required'"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_updated_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at TEXT NOT NULL DEFAULT ''"),
@@ -516,8 +519,43 @@ async function createSchema(db: PostgresDatabase) {
   ]);
 }
 
-export async function logActivity(db: PostgresDatabase, source: string, eventType: string, message: string, details: Record<string, unknown> = {}, level = "info") {
-  await db.prepare(`INSERT INTO activity_logs (source, event_type, level, message, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`).bind(source, eventType, level, message, JSON.stringify(details), new Date().toISOString()).run();
+export type ActivityActor = {
+  id?: string;
+  name?: string;
+  role?: string;
+};
+
+export async function logActivity(
+  db: PostgresDatabase,
+  source: string,
+  eventType: string,
+  message: string,
+  details: Record<string, unknown> = {},
+  level = "info",
+  actor?: ActivityActor,
+) {
+  const actorId = actor?.id || (typeof details.actorId === "string" ? details.actorId : (typeof details.actor_id === "string" ? details.actor_id : "system"));
+  const actorName = actor?.name || (typeof details.actorName === "string" ? details.actorName : (typeof details.actor_name === "string" ? details.actor_name : (source || "System")));
+  const actorRole = actor?.role || (typeof details.actorRole === "string" ? details.actorRole : (typeof details.actor_role === "string" ? details.actor_role : "system"));
+
+  const mergedDetails = {
+    ...details,
+    ...(actorId ? { actorId } : {}),
+    ...(actorName ? { actorName } : {}),
+    ...(actorRole ? { actorRole } : {}),
+  };
+
+  try {
+    await db.prepare(`
+      INSERT INTO activity_logs (source, event_type, level, message, details_json, created_at, actor_id, actor_name, actor_role)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(source, eventType, level, message, JSON.stringify(mergedDetails), new Date().toISOString(), actorId, actorName, actorRole).run();
+  } catch {
+    await db.prepare(`
+      INSERT INTO activity_logs (source, event_type, level, message, details_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(source, eventType, level, message, JSON.stringify(mergedDetails), new Date().toISOString()).run();
+  }
 }
 
 export async function setSyncState(db: PostgresDatabase, key: string, value: string) {

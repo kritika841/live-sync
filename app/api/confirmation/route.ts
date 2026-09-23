@@ -243,7 +243,7 @@ async function handlePOST(request: Request) {
           VALUES (?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET campaign_id=excluded.campaign_id,position=excluded.position,created_at=excluded.created_at`).bind(campaignId, orderId, index, now));
         statements.push(runtime.DB.prepare("UPDATE orders SET confirmation_status=CASE WHEN confirmation_status='not_required' THEN 'pending' ELSE confirmation_status END,confirmation_updated_at=? WHERE id=? AND confirmation_status NOT IN ('confirmed','rejected')").bind(now, orderId));
       });
-      statements.push(runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at) VALUES ('confirmation','campaign.created','info',?,?,?)").bind(`Campaign ${name} created`, JSON.stringify({ campaignId, orderCount: orderIds.length, autoAssign }), now));
+      statements.push(runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation','campaign.created','info',?,?,?,?,?,?)").bind(`Campaign ${name} created`, JSON.stringify({ campaignId, orderCount: orderIds.length, autoAssign, actorId: access.user.id, actorName: access.user.name, actorRole: access.user.role }), now, access.user.id, access.user.name, access.user.role));
       await runtime.DB.batch(statements);
       if (autoAssign) {
         const available = await runtime.DB.prepare(`SELECT id FROM orders WHERE ${ACTIONABLE_STATUS_SQL} AND confirmation_status NOT IN ('confirmed','rejected')`).all<{ id: number }>();
@@ -297,8 +297,8 @@ async function handlePOST(request: Request) {
         VALUES (?,?,?,?,?,?,?,?,?)`).bind(orderId, attemptNumber, outcome, note, action !== "unreachable", reason, callbackAt, nextActionAt, now),
       runtime.DB.prepare(`UPDATE orders SET confirmation_status=?,confirmation_updated_at=?,confirmed_at=CASE WHEN ?<>'' THEN ? ELSE confirmed_at END,
         rejected_at=CASE WHEN ?<>'' THEN ? ELSE rejected_at END WHERE id=?`).bind(outcome, now, confirmedAt, confirmedAt, rejectedAt, rejectedAt, orderId),
-      runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at) VALUES ('confirmation',?,'info',?,?,?)")
-        .bind(`order.${outcome}`, `Order ${order.channelOrderId} marked ${outcome}`, JSON.stringify({ orderId, note, rejectionReason: reason, nextActionAt }), now),
+      runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation',?,'info',?,?,?,?,?,?)")
+        .bind(`order.${outcome}`, `Order ${order.channelOrderId} marked ${outcome}`, JSON.stringify({ orderId, note, rejectionReason: reason, nextActionAt, actorId: access.user.id, actorName: access.user.name, actorRole: access.user.role }), now, access.user.id, access.user.name, access.user.role),
     ]);
     return Response.json({ ok: true, status: outcome });
   } catch (error) {

@@ -4,10 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isTransientRequestError, readJson } from "../lib/http";
 import Image from "next/image";
 import Link from "next/link";
-import { ChevronLeft, ChevronRight, PhoneCall, RotateCcw, Search, ShoppingBag, UsersRound } from "lucide-react";
+import { ChevronLeft, ChevronRight, PhoneCall, RotateCcw, Search, Settings, ShoppingBag, UsersRound } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import DateRangePicker from "./DateRangePicker";
 import ConfirmationPanel from "./ConfirmationPanel";
+import SettingsPanel from "./SettingsPanel";
 import AccountMenu from "./AccountMenu";
 import LiveStatus from "./LiveStatus";
 
@@ -28,12 +29,14 @@ type OrdersResponse = {
   total: number; page: number; perPage: number; totalPages: number;
   sync: Record<string, string>;
   filterOptions: { couriers: string[]; pickups: string[]; tags: string[] };
+  unshippedOrdersWindowDays?: number;
 };
 type ActivityLog = {
   id: number; source: string; eventType: string; level: string;
   message: string; details: Record<string, unknown>; createdAt: string;
+  actorId?: string; actorName?: string; actorRole?: string;
 };
-type LogsResponse = { logs: ActivityLog[]; sync: Record<string, string> };
+type LogsResponse = { logs: ActivityLog[]; sync: Record<string, string>; role?: string; userId?: string };
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "new", label: "New" }, { key: "ready", label: "Ready to ship" },
   { key: "shipped", label: "Shipped" }, { key: "out_for_delivery", label: "Out for delivery" },
@@ -66,7 +69,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmin, preview = false }: { userLabel: string; userEmail: string; userRole: string; isAdmin: boolean; preview?: boolean }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "logs">("orders");
+  const [view, setView] = useState<"orders" | "confirmation" | "logs" | "settings">("orders");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
@@ -359,6 +362,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
     orders: { eyebrow: "Order management", title: "Orders" },
     confirmation: { eyebrow: "Customer verification", title: "Confirmation" },
     logs: { eyebrow: "Live activity", title: "Activity log" },
+    settings: { eyebrow: "System preferences", title: "Settings" },
   }[view];
   return (
     <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -368,6 +372,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><ShoppingBag/><strong>Orders</strong></button>
         <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><PhoneCall/><strong>Confirmation</strong></button>
         <button title="Activity log" className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><RotateCcw/><strong>Activity log</strong></button>
+        {isAdmin && <button title="Settings" className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><Settings/><strong>Settings</strong></button>}
         {isAdmin && <Link href="/admin/users" title="Manage users"><UsersRound/><strong>Manage users</strong></Link>}
       </aside>
 
@@ -486,6 +491,13 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
 
         <ConfirmationPanel active={view === "confirmation"} preview={preview} isAdmin={isAdmin} />
 
+        <SettingsPanel
+          active={view === "settings"}
+          isAdmin={isAdmin}
+          initialDays={data.unshippedOrdersWindowDays || 30}
+          onSaved={() => void loadOrders()}
+        />
+
         <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">
             <div><p className="eyebrow">Live activity</p><h2>Sync & webhook logs</h2><p>Latest 200 changes received from Shiprocket and scheduled verification runs.</p></div>
@@ -501,10 +513,24 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
               <article key={log.id} className={`log-row ${log.level}`}>
                 <time>{formatDate(log.createdAt)}</time>
                 <span className="log-source">{log.source}</span>
-                <div><strong>{log.message}</strong><small>{log.eventType.replaceAll(".", " · ")}</small></div>
+                <div>
+                  {log.actorRole && (
+                    <span className={`log-actor-badge ${log.actorRole}`}>
+                      {log.actorRole === "system" ? "System" : `${log.actorRole.replaceAll("_", " ")}: ${log.actorName || log.actorId}`}
+                    </span>
+                  )}
+                  <strong>{log.message}</strong>
+                  <small>{log.eventType.replaceAll(".", " · ")}</small>
+                </div>
               </article>
             ))}
-            {!logsLoading && logsData.logs.length === 0 && <div className="logs-empty">No activity recorded yet. New syncs and webhook updates will appear here.</div>}
+            {!logsLoading && logsData.logs.length === 0 && (
+              <div className="logs-empty">
+                {isAdmin || userRole === "support_manager"
+                  ? "No activity recorded yet. New syncs and webhook updates will appear here."
+                  : "No activity recorded for your account yet. Actions you take on orders will appear here."}
+              </div>
+            )}
             {logsLoading && logsData.logs.length === 0 && <div className="logs-empty">Loading activity…</div>}
           </div>
         </section>

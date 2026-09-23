@@ -64,6 +64,17 @@ const DEFAULT_ORDER_TAGS = [
   const tag = url.searchParams.get("tag")?.trim();
 
   if (tag) { filters.push(`EXISTS (${tagRowsSql} WHERE LOWER(TRIM(tag_value))=LOWER(?))`); filterValues.push(tag); }
+  const windowDaysRow = await runtime.DB.prepare(
+    "SELECT value FROM sync_state WHERE key = 'unshipped_orders_window_days'"
+  ).first<{ value: string }>();
+  const unshippedOrdersWindowDays = Math.max(1, Math.min(365, parseInt(windowDaysRow?.value || "30", 10) || 30));
+  const cutoffDate = new Date(Date.now() - unshippedOrdersWindowDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  if (tab === "new" && !from) {
+    filters.push("SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) >= ?");
+    filterValues.push(cutoffDate);
+  }
+
   const highRiskSql = "is_high_risk";
   const riskSql = risk === "high" ? "is_high_risk = TRUE" : risk === "low" ? "is_high_risk = FALSE" : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? "(is_high_risk = FALSE OR confirmation_status = 'confirmed')" : "1 = 1";
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
@@ -95,10 +106,31 @@ const DEFAULT_ORDER_TAGS = [
   `).bind(...filterValues, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
 
   const groupedPromise = filterSql === "1 = 1"
-    ? cachedValue("order-grouped-counts", 30000, async () => {
-        return runtime.DB.prepare(`SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus", COUNT(*) AS total FROM orders GROUP BY status, is_high_risk, confirmation_status`).all<{status:string;isHigh:boolean;confirmationStatus:string;total:number}>();
+    ? cachedValue(`order-grouped-counts-${unshippedOrdersWindowDays}`, 30000, async () => {
+        return runtime.DB.prepare(`
+          SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus",
+            CASE 
+              WHEN UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')
+                   AND SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) < ?
+              THEN TRUE ELSE FALSE 
+            END AS "isHistoric",
+            COUNT(*) AS total 
+          FROM orders 
+          GROUP BY status, is_high_risk, confirmation_status, "isHistoric"
+        `).bind(cutoffDate).all<{status:string;isHigh:boolean;confirmationStatus:string;isHistoric:boolean;total:number}>();
       })
-    : runtime.DB.prepare(`SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus", COUNT(*) AS total FROM orders WHERE ${filterSql} GROUP BY status, is_high_risk, confirmation_status`).bind(...filterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;total:number}>();
+    : runtime.DB.prepare(`
+        SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus",
+          CASE 
+            WHEN UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')
+                 AND SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) < ?
+              THEN TRUE ELSE FALSE 
+          END AS "isHistoric",
+          COUNT(*) AS total 
+        FROM orders 
+        WHERE ${filterSql} 
+        GROUP BY status, is_high_risk, confirmation_status, "isHistoric"
+      `).bind(cutoffDate, ...filterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;isHistoric:boolean;total:number}>();
 
   const optionsPromise = cachedValue("order-options", 86400000, async () => {
     const [couriers,pickups] = await Promise.all([
@@ -115,6 +147,12 @@ const DEFAULT_ORDER_TAGS = [
   for(const row of grouped.results) {
     const count=Number(row.total), bucket=statusTab(row.status), confirmed=row.confirmationStatus==='confirmed';
     const matchesRisk=risk==='high' ? row.isHigh : risk==='low' ? !row.isHigh : risk==='approved' ? confirmed : risk==='low_approved' ? (!row.isHigh||confirmed) : true;
+    
+    // Omit prehistoric unshipped orders from the "new" count
+    if (bucket === "new" && row.isHistoric) {
+      continue;
+    }
+
     if(matchesRisk) {counts.all+=count;if(bucket!=='other')counts[bucket]+=count;}
     if(tab==='all'||bucket===tab) {
       riskCounts.all+=count; riskCounts[row.isHigh?'high':'low']+=count;
@@ -135,6 +173,7 @@ const DEFAULT_ORDER_TAGS = [
     totalPages: Math.max(1, Math.ceil(total / perPage)),
     sync,
     filterOptions,
+    unshippedOrdersWindowDays,
   });
 }
 

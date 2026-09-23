@@ -20,10 +20,14 @@ function messageOf(error: unknown, fallback: string) {
   return fallback;
 }
 
-async function audit(actorEmail: string, eventType: string, message: string, details: Record<string, unknown>) {
+async function audit(actor: { id: string; email: string; name: string; role: string }, eventType: string, message: string, details: Record<string, unknown>) {
   const runtime = getRuntimeEnv();
   await ensureSchema(runtime.DB);
-  await logActivity(runtime.DB, actorEmail, eventType, message, details);
+  await logActivity(runtime.DB, "admin", eventType, message, details, "info", {
+    id: actor.id,
+    name: actor.name || actor.email,
+    role: actor.role || "admin",
+  });
 }
 
 async function handleGET() {
@@ -71,7 +75,7 @@ async function handlePOST(request: Request) {
       return Response.json({ error: messageOf(created.error, "Could not create user") }, { status: created.error.status || 400 });
     }
 
-    await audit(access.user.email, "auth.user_created", `Added dashboard user ${email}`, {
+    await audit(access.user, "auth.user_created", `Added dashboard user ${email}`, {
       targetUserId: created.data?.user.id,
       targetEmail: email,
       role,
@@ -91,7 +95,7 @@ async function handlePOST(request: Request) {
     }
     const result = await supabaseAdmin.auth.admin.updateUserById(userId, { app_metadata: { role } });
     if (result.error) return Response.json({ error: messageOf(result.error, "Could not update role") }, { status: result.error.status || 400 });
-    await audit(access.user.email, "auth.role_changed", "Changed a dashboard user role", { targetUserId: userId, role });
+    await audit(access.user, "auth.role_changed", "Changed a dashboard user role", { targetUserId: userId, role });
     return Response.json({ ok: true, message: "Role updated." });
   }
 
@@ -100,14 +104,14 @@ async function handlePOST(request: Request) {
     const result = await supabaseAdmin.auth.admin.updateUserById(userId, { ban_duration: "876000h" });
     if (result.error) return Response.json({ error: messageOf(result.error, "Could not disable user") }, { status: result.error.status || 400 });
     await supabaseAdmin.auth.admin.signOut(userId, "global");
-    await audit(access.user.email, "auth.user_disabled", "Disabled a dashboard user", { targetUserId: userId });
+    await audit(access.user, "auth.user_disabled", "Disabled a dashboard user", { targetUserId: userId });
     return Response.json({ ok: true, message: "User disabled and active sessions revoked." });
   }
 
   if (action === "enable") {
     const result = await supabaseAdmin.auth.admin.updateUserById(userId, { ban_duration: "none" });
     if (result.error) return Response.json({ error: messageOf(result.error, "Could not enable user") }, { status: result.error.status || 400 });
-    await audit(access.user.email, "auth.user_enabled", "Enabled a dashboard user", { targetUserId: userId });
+    await audit(access.user, "auth.user_enabled", "Enabled a dashboard user", { targetUserId: userId });
     return Response.json({ ok: true, message: "User enabled." });
   }
 
@@ -117,7 +121,7 @@ async function handlePOST(request: Request) {
     const result = await supabaseAdmin.auth.admin.updateUserById(userId, { password: newPassword });
     if (result.error) return Response.json({ error: messageOf(result.error, "Could not set password") }, { status: result.error.status || 400 });
     await supabaseAdmin.auth.admin.signOut(userId, "global");
-    await audit(access.user.email, "auth.password_changed", "Assigned a new dashboard password", { targetUserId: userId });
+    await audit(access.user, "auth.password_changed", "Assigned a new dashboard password", { targetUserId: userId });
     return Response.json({ ok: true, message: "Password changed and existing sessions revoked." });
   }
 

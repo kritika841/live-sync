@@ -83,5 +83,7 @@ jobs:
               touch "$ENV_FILE"
             fi
 
-            chmod +x "$APP_DIR/deploy.sh"
-            bash "$APP_DIR/deploy.sh"
+            cd "$APP_DIR"
+            tar -xzf release.tar.gz
+            chmod +x deploy.sh
+            bash deploy.sh

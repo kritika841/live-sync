@@ -55,7 +55,7 @@ async function handlePOST(request: Request) {
   `).bind(shiprocketOrderId, channelOrderId || null, shipmentId, awb || null, status || null, JSON.stringify(payload), eventAt, now).run();
 
   const orderReference = channelOrderId || (shiprocketOrderId ? String(shiprocketOrderId) : awb) || "Unknown order";
-  await logActivity(runtime.DB, "Shiprocket webhook", "order.updated", status
+  await logActivity(runtime.DB, "Order webhook", "order.updated", status
     ? `Order ${orderReference} changed to ${status}`
     : `Webhook received for order ${orderReference}`, {
     shiprocketOrderId, channelOrderId, shipmentId, awb, status,
@@ -122,7 +122,7 @@ async function handlePOST(request: Request) {
 }
 
 async function handleGET() {
-  return Response.json({ ok: true, endpoint: "Shiprocket order status webhook" });
+  return Response.json({ ok: true, endpoint: "Order tracking & status webhook" });
 }
 
 export async function POST(...args: Parameters<typeof handlePOST>) { try { return await handlePOST(...args); } catch (error) { return errorResponse(error); } }

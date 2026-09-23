@@ -29,7 +29,7 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setWebhookUrl(`${window.location.origin}/api/webhooks/shiprocket`);
+      setWebhookUrl(`${window.location.origin}/api/webhooks/orders`);
     }
   }, []);
 
@@ -192,10 +192,10 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
           <div className="settings-section-header">
             <Copy size={20} className="section-icon" />
             <div>
-              <h3>Live Shiprocket Webhook Configuration</h3>
+              <h3>Live Order & Tracking Webhook Configuration</h3>
               <p>
-                For instant status updates (shipped, delivered, cancelled), configure this endpoint in your Shiprocket
-                account.
+                For real-time status updates (shipped, out for delivery, delivered, NDR, cancelled), configure this
+                webhook endpoint in your logistics or carrier dashboard.
               </p>
             </div>
           </div>
@@ -207,7 +207,7 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
                 <input
                   type="text"
                   readOnly
-                  value={webhookUrl || "https://satmi.in/api/webhooks/shiprocket"}
+                  value={webhookUrl || "https://satmi.in/api/webhooks/orders"}
                   className="webhook-url-input"
                 />
                 <button
@@ -223,21 +223,24 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
             </div>
 
             <div className="webhook-instructions">
-              <h4>Setup in Shiprocket Dashboard:</h4>
+              <h4>Setup in Logistics / Carrier Portal:</h4>
               <ol>
                 <li>
-                  Go to <strong>Settings</strong> → <strong>API</strong> → <strong>Webhooks</strong> in Shiprocket.
+                  Go to <strong>Settings</strong> → <strong>API</strong> → <strong>Webhooks</strong>.
                 </li>
                 <li>
-                  Click <strong>Add Webhook</strong> and paste the URL above.
+                  Click <strong>Add Webhook</strong> and paste the URL above (<code>/api/webhooks/orders</code>).
                 </li>
                 <li>
-                  Add header: <code>x-api-key: &lt;YOUR_SHIPROCKET_WEBHOOK_SECRET&gt;</code>.
+                  Add Authentication Header: <code>x-api-key: &lt;WEBHOOK_SECRET&gt;</code> (or append <code>?token=&lt;WEBHOOK_SECRET&gt;</code>).
                 </li>
                 <li>
-                  Select triggers: <code>Order Shipped</code>, <code>Order Delivered</code>, <code>Order Cancelled</code>, <code>AWB Assigned</code>.
+                  Select Triggers: <code>Order Shipped</code>, <code>Out For Delivery</code>, <code>Order Delivered</code>, <code>NDR / Undelivered</code>, <code>Order Cancelled</code>, <code>AWB Assigned</code>.
                 </li>
               </ol>
+              <div style={{ marginTop: "12px", fontSize: "12px", color: "rgba(255, 255, 255, 0.55)" }}>
+                <em>Alternative active endpoints:</em> <code>/api/webhooks/tracking</code> or <code>/api/events/order-status</code>
+              </div>
             </div>
           </div>
         </div>

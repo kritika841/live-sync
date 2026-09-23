@@ -4,15 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isTransientRequestError, readJson } from "../lib/http";
 import Image from "next/image";
 import Link from "next/link";
-import { Boxes, ChevronLeft, ChevronRight, LayoutDashboard, PackageSearch, PhoneCall, RotateCcw, Search, ShoppingBag, Truck, UsersRound, Warehouse } from "lucide-react";
+import { ChevronLeft, ChevronRight, PhoneCall, RotateCcw, Search, ShoppingBag, UsersRound } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import DateRangePicker from "./DateRangePicker";
-import AnalyticsPanel from "./AnalyticsPanel";
 import ConfirmationPanel from "./ConfirmationPanel";
-import ReportsPanel from "./ReportsPanel";
 import AccountMenu from "./AccountMenu";
-import InventoryPanel from "./InventoryPanel";
-import SupportPanel from "./SupportPanel";
 import LiveStatus from "./LiveStatus";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
@@ -70,8 +66,7 @@ const indiaDateValue = (date: Date) => {
 const todayValue = indiaDateValue(new Date());
 
 export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmin, preview = false }: { userLabel: string; userEmail: string; userRole: string; isAdmin: boolean; preview?: boolean }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "campaigns" | "inventory" | "support" | "analytics" | "today_ofd" | "reports" | "logs">(preview ? "inventory" : "orders");
-  useEffect(() => { const timer=setTimeout(() => { if (new URLSearchParams(window.location.search).get("view") === "support") setView("support"); },0); return () => clearTimeout(timer); }, []);
+  const [view, setView] = useState<"orders" | "confirmation" | "logs">("orders");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
@@ -229,7 +224,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         await loadOrders();
       } while (page);
       await Promise.all([loadOrders(), loadLogs()]);
-      setView("reports");
+      setView("logs");
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : "Sync failed");
     } finally {
@@ -327,12 +322,6 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders" },
     confirmation: { eyebrow: "Customer verification", title: "Confirmation" },
-    campaigns: { eyebrow: "Customer verification", title: "Campaigns" },
-    support: { eyebrow: "Customer care", title: "Customer support" },
-    inventory: { eyebrow: "Stock control", title: "Inventory" },
-    analytics: { eyebrow: "Performance intelligence", title: "Analytics" },
-    today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD" },
-    reports: { eyebrow: "Reconciliation archive", title: "Reports" },
     logs: { eyebrow: "Live activity", title: "Activity log" },
   }[view];
   return (
@@ -342,12 +331,6 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
         <div className="sidebar-heading"><p>Workspace</p><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "Expand side menu" : "Collapse side menu"} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronRight size={15}/> : <ChevronLeft size={15}/>}</button></div>
         <button title="Orders" className={view === "orders" ? "active" : ""} onClick={() => setView("orders")}><ShoppingBag/><strong>Orders</strong></button>
         <button title="Confirmation" className={view === "confirmation" ? "active" : ""} onClick={() => setView("confirmation")}><PhoneCall/><strong>Confirmation</strong></button>
-        <button title="Campaigns" className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}><Boxes/><strong>Campaigns</strong></button>
-        <button title="Inventory" className={view === "inventory" ? "active" : ""} onClick={() => setView("inventory")}><Warehouse/><strong>Inventory</strong></button>
-        {(isAdmin || ["support_agent", "support_manager"].includes(userRole)) && <button title="Customer support" className={view === "support" ? "active" : ""} onClick={() => setView("support")}><UsersRound/><strong>Customer support</strong></button>}
-        <button title="Analytics" className={view === "analytics" ? "active" : ""} onClick={() => setView("analytics")}><LayoutDashboard/><strong>Analytics</strong></button>
-        <button title="Today’s OFD" className={view === "today_ofd" ? "active" : ""} onClick={() => setView("today_ofd")}><Truck/><strong>Today’s OFD</strong></button>
-        <button title="Reports" className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><PackageSearch/><strong>Reports</strong></button>
         <button title="Activity log" className={view === "logs" ? "active" : ""} onClick={() => { setView("logs"); void loadLogs(); }}><RotateCcw/><strong>Activity log</strong></button>
         {isAdmin && <Link href="/admin/users" title="Manage users"><UsersRound/><strong>Manage users</strong></Link>}
       </aside>
@@ -465,14 +448,7 @@ export default function OrdersDashboard({ userLabel, userEmail, userRole, isAdmi
           )}
         </section>
 
-        <ConfirmationPanel active={view === "confirmation" || view === "campaigns"} section={view === "campaigns" ? "campaigns" : "confirmation"} preview={preview} isAdmin={isAdmin} />
-
-        <InventoryPanel active={view === "inventory"} isAdmin={isAdmin || ["operations", "warehouse"].includes(userRole)} preview={preview} />
-        <SupportPanel active={view === "support"} isAdmin={isAdmin} preview={preview} />
-
-        <AnalyticsPanel mode="overview" active={view === "analytics"} preview={preview} />
-        <AnalyticsPanel mode="today_ofd" active={view === "today_ofd"} preview={preview} />
-        <ReportsPanel active={view === "reports"} preview={preview} />
+        <ConfirmationPanel active={view === "confirmation"} preview={preview} isAdmin={isAdmin} />
 
         <section className={`logs-card ${view !== "logs" ? "view-hidden" : ""}`}>
           <header className="logs-heading">

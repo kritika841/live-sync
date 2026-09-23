@@ -38,7 +38,7 @@ function productSummary(products: ConfirmationOrder["products"]) {
   return products.length ? products.map((product) => `${product.name || product.sku || "Product"}${product.quantity ? ` ×${product.quantity}` : ""}`).join(", ") : "—";
 }
 
-export default function ConfirmationPanel({ active, section, preview=false, isAdmin=false }: { active: boolean; preview?:boolean; section: "confirmation" | "campaigns"; isAdmin?:boolean }) {
+export default function ConfirmationPanel({ active, section = "confirmation", preview = false, isAdmin = false }: { active: boolean; preview?: boolean; section?: "confirmation" | "campaigns"; isAdmin?: boolean }) {
   const [mode, setMode] = useState<Mode>("queue");
   const [data, setData] = useState<ConfirmationData>(emptyData);
   const [loading, setLoading] = useState(!preview);

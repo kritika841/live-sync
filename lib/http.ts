@@ -7,11 +7,14 @@ export class HttpError extends Error {
   }
 }
 export function isTransientRequestError(error: unknown) {
-  if (!(error instanceof Error)) return false;
+  if (!error) return false;
+  const name = error instanceof Error ? error.name : (error as { name?: string }).name || "";
+  const message = error instanceof Error ? error.message : (error as { message?: string }).message || String(error);
   return (
-    error.name === "TimeoutError" ||
-    /signal timed out|temporarily busy|did not return a usable response|failed to fetch|networkerror/i.test(
-      error.message,
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    /signal timed out|timeout|timed out|temporarily busy|did not return a usable response|failed to fetch|networkerror|the operation was aborted/i.test(
+      message,
     )
   );
 }

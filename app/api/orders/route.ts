@@ -1,6 +1,6 @@
 import {tagRowsSql} from "../../../lib/order-tags-sql";
 import { errorResponse } from "../../../lib/http";
-import { ensureSchema, getRuntimeEnv } from "../../../lib/database";
+import { ensureCopiedOrdersSchema, getRuntimeEnv } from "../../../lib/database";
 import { sqlForTab, statusTab, type OrderTab } from "../../../lib/order-status";
 import { requireApiUser } from "../../../lib/auth/access";
 
@@ -15,7 +15,7 @@ async function loadOrders(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
   const runtime = getRuntimeEnv();
-  await ensureSchema(runtime.DB);
+  await ensureCopiedOrdersSchema(runtime.DB);
   const url = new URL(request.url);
   const requestedTab = url.searchParams.get("tab") || "new";
   const tab = (["new", "ready", "shipped", "out_for_delivery", "undelivered", "delivered", "rto", "all"].includes(requestedTab) ? requestedTab : "new") as OrderTab;
@@ -24,7 +24,19 @@ async function loadOrders(request: Request) {
   const approved = risk === "approved";
   const page = Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1));
   const sort = url.searchParams.get("sort") === "oldest" ? "ASC" : "DESC";
-  const perPage = 50;
+  const requestedPerPage = Math.max(1, Math.min(400, Number(url.searchParams.get("perPage")) || 50));
+  const perPage = requestedPerPage;
+
+  // Proactively keep dashboard fresh: if > 90 seconds since last sync, trigger fast sync of newest orders
+  const lastSyncRow = await runtime.DB.prepare(
+    "SELECT value FROM sync_state WHERE key = 'last_sync_at'"
+  ).first<{ value: string }>().catch(() => null);
+  const lastSyncTime = Date.parse(lastSyncRow?.value || "");
+  if (!lastSyncTime || Date.now() - lastSyncTime > 90000) {
+    import("../../../lib/shiprocket").then(({ syncRecentOrders }) => {
+      syncRecentOrders(runtime).catch(() => {});
+    });
+  }
   const filters: string[] = [];
   const filterValues: unknown[] = [];
   const search = url.searchParams.get("search")?.trim();
@@ -64,6 +76,14 @@ const DEFAULT_ORDER_TAGS = [
   const tag = url.searchParams.get("tag")?.trim();
 
   if (tag) { filters.push(`EXISTS (${tagRowsSql} WHERE LOWER(TRIM(tag_value))=LOWER(?))`); filterValues.push(tag); }
+
+  const copied = url.searchParams.get("copied")?.trim();
+  if (copied === "yes" || copied === "true" || copied === "copied") {
+    filters.push("copied_at <> ''");
+  } else if (copied === "no" || copied === "false" || copied === "uncopied") {
+    filters.push("(copied_at IS NULL OR copied_at = '')");
+  }
+
   const windowDaysRow = await runtime.DB.prepare(
     "SELECT value FROM sync_state WHERE key = 'unshipped_orders_window_days'"
   ).first<{ value: string }>();
@@ -75,7 +95,6 @@ const DEFAULT_ORDER_TAGS = [
     filterValues.push(cutoffDate);
   }
 
-  const highRiskSql = "is_high_risk";
   const riskSql = risk === "high" ? "is_high_risk = TRUE" : risk === "low" ? "is_high_risk = FALSE" : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? "(is_high_risk = FALSE OR confirmation_status = 'confirmed')" : "1 = 1";
   const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
   const where = [sqlForTab(tab), riskSql, ...filters];
@@ -99,6 +118,7 @@ const DEFAULT_ORDER_TAGS = [
       pickup_location AS pickupLocation, awb, courier, products_json AS productsJson,
       synced_at AS syncedAt, confirmation_status AS confirmationStatus,
       confirmation_updated_at AS confirmationUpdatedAt, confirmed_at AS confirmedAt, rejected_at AS rejectedAt,
+      copied_at AS copiedAt, copied_by AS copiedBy, copied_by_name AS copiedByName, copied_count AS copiedCount,
       (SELECT note FROM confirmation_attempts a WHERE a.order_id=orders.id AND a.outcome='confirmed' ORDER BY a.created_at DESC,a.id DESC LIMIT 1) AS "confirmationNote"
     FROM orders WHERE ${whereSql}
     ORDER BY ${orderBy}

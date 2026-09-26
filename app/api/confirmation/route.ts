@@ -1,7 +1,7 @@
-import {completePhone} from "../../../lib/contact";
-import {shopifyOrderContacts} from "../../../lib/shopify";
+import { completePhone } from "../../../lib/contact";
+import { shopifyOrderContacts } from "../../../lib/shopify";
 import { errorResponse } from "../../../lib/http";
-import { ACTIONABLE_STATUS_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
+import { ACTIONABLE_STATUS_SQL, HIGH_RISK_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureConfirmationSchema, getRuntimeEnv } from "../../../lib/database";
 import { isAdmin, isSameOrigin, requireApiUser } from "../../../lib/auth/access";
 
@@ -24,8 +24,10 @@ const orderColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_nam
   o.awb, o.courier, o.shipped_at AS "shippedAt", o.delivered_at AS "deliveredAt",
   o.products_json AS productsJson, o.raw_json AS rawJson, o.confirmation_status AS confirmationStatus,
   o.confirmation_updated_at AS confirmationUpdatedAt, o.confirmed_at AS confirmedAt, o.rejected_at AS rejectedAt,
+  o.delay_reason AS "delayReason", o.delay_reason_updated_at AS "delayReasonUpdatedAt",
   o.confirmation_assignee_id AS confirmationAssigneeId, COALESCE(a.name, '') AS confirmationAssigneeName,
-  c.id AS campaignId, c.name AS campaignName, c.position AS campaignPosition, ca.position AS orderPosition`;
+  c.id AS campaignId, c.name AS campaignName, c.position AS campaignPosition, ca.position AS orderPosition,
+  ca.created_at AS assignedAt`;
 
 const candidateColumns = `o.id, o.channel_order_id AS channelOrderId, o.customer_name AS customerName,
   o.customer_phone AS customerPhone, o.order_date AS orderDate, o.payment_method AS paymentMethod,
@@ -69,13 +71,30 @@ async function handleGET(request: Request) {
   const runtime = getRuntimeEnv();
   await ensureConfirmationSchema(runtime.DB);
   const url = new URL(request.url);
-  const section = url.searchParams.get("section") === "campaigns" ? "campaigns" : "confirmation";
+  const section = url.searchParams.get("section") || "confirmation";
   const requestedMode = url.searchParams.get("mode");
   const mode = requestedMode === "confirmed" || requestedMode === "rejected" ? requestedMode : "queue";
   const now = new Date().toISOString();
   const dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? String(url.searchParams.get("from")) : "";
   const dateTo = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? String(url.searchParams.get("to")) : "";
   const agent = String(url.searchParams.get("agent") || "");
+  const monthFilter = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? String(url.searchParams.get("month")) : "";
+  const dateBasis = url.searchParams.get("dateBasis") === "allotted" ? "allotted" : "order";
+
+  if (section === "delay_logs") {
+    const orderId = Number(url.searchParams.get("orderId"));
+    if (!orderId) return Response.json({ logs: [] });
+    const logs = await runtime.DB.prepare(`
+      SELECT id, order_id AS "orderId", channel_order_id AS "channelOrderId",
+        reason_code AS "reasonCode", reason_text AS "reasonText", notes,
+        hours_delayed AS "hoursDelayed", actor_id AS "actorId", actor_name AS "actorName",
+        actor_role AS "actorRole", created_at AS "createdAt"
+      FROM confirmation_delay_logs
+      WHERE order_id = ?
+      ORDER BY created_at DESC, id DESC
+    `).bind(orderId).all<Record<string, unknown>>();
+    return Response.json({ logs: logs.results });
+  }
 
   if (section === "campaigns") {
     const [campaigns, candidates] = await Promise.all([
@@ -97,11 +116,22 @@ async function handleGET(request: Request) {
     });
   }
 
+  const limitParam = url.searchParams.get("limit");
+  const limit = limitParam ? Math.max(1, Math.min(1000, Number(limitParam) || 400)) : 400;
+  const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+
   const filters: string[] = [];
-  const filterValues: string[] = [];
+  const filterValues: unknown[] = [];
   const fulfillment = url.searchParams.get("fulfillment") || "all";
-  if (dateFrom) { filters.push("COALESCE(NULLIF(o.order_date,''),o.created_at)::date >= ?::date"); filterValues.push(dateFrom); }
-  if (dateTo) { filters.push("COALESCE(NULLIF(o.order_date,''),o.created_at)::date <= ?::date"); filterValues.push(dateTo); }
+
+  const dateCol = dateBasis === "allotted"
+    ? "COALESCE(NULLIF(ca.created_at, ''), NULLIF(o.order_date, ''), o.created_at)"
+    : "COALESCE(NULLIF(o.order_date, ''), o.created_at)";
+  const dateColumn = `SUBSTR(${dateCol}, 1, 10)`;
+
+  if (dateFrom) { filters.push(`${dateColumn} >= ?`); filterValues.push(dateFrom); }
+  if (dateTo) { filters.push(`${dateColumn} <= ?`); filterValues.push(dateTo); }
+  if (monthFilter) { filters.push(`SUBSTR(${dateColumn}, 1, 7) = ?`); filterValues.push(monthFilter); }
   if (agent === "unassigned") filters.push("o.confirmation_assignee_id='' ");
   else if (agent) { filters.push("o.confirmation_assignee_id=?"); filterValues.push(agent); }
   if (mode === "confirmed") {
@@ -113,25 +143,66 @@ async function handleGET(request: Request) {
   }
   const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
   const joins = "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id";
+  const queueCondition = `(o.confirmation_status IN ('pending','callback','unreachable') OR ((o.is_high_risk = TRUE OR ${HIGH_RISK_SQL}) AND o.confirmation_status NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
+
   const listQuery = mode === "confirmed"
     ? runtime.DB.prepare(`SELECT ${orderColumns}
       FROM orders o ${joins}
-      WHERE o.confirmation_status='confirmed'${extraWhere} ORDER BY o.confirmed_at DESC, o.id DESC`).bind(...filterValues)
+      WHERE o.confirmation_status='confirmed'${extraWhere} ORDER BY o.confirmed_at DESC, o.id DESC LIMIT ? OFFSET ?`).bind(...filterValues, limit, offset)
     : mode === "rejected"
       ? runtime.DB.prepare(`SELECT ${orderColumns}
         FROM orders o ${joins}
-        WHERE o.confirmation_status='rejected'${extraWhere} ORDER BY o.rejected_at DESC, o.id DESC`).bind(...filterValues)
+        WHERE o.confirmation_status='rejected'${extraWhere} ORDER BY o.rejected_at DESC, o.id DESC LIMIT ? OFFSET ?`).bind(...filterValues, limit, offset)
       : runtime.DB.prepare(`SELECT ${orderColumns}
-      FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id
-      WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
+      FROM orders o ${joins}
+      WHERE ${queueCondition}
         AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
           AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))${extraWhere}
-      ORDER BY c.position, ca.position, COALESCE(NULLIF(o.order_date,''),o.created_at), o.id`).bind(now, ...filterValues);
-  const [orders, countRow, agents] = await Promise.all([
+      ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC, o.id DESC LIMIT ? OFFSET ?`).bind(now, ...filterValues, limit, offset);
+
+  const totalMatchingPromise = mode === "confirmed"
+    ? runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${joins} WHERE o.confirmation_status='confirmed'${extraWhere}`).bind(...filterValues).first<{ total: number }>()
+    : mode === "rejected"
+      ? runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${joins} WHERE o.confirmation_status='rejected'${extraWhere}`).bind(...filterValues).first<{ total: number }>()
+      : runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${joins} WHERE ${queueCondition}
+          AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
+            AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))${extraWhere}`).bind(now, ...filterValues).first<{ total: number }>();
+
+  const dateGroupsPromise = mode === "confirmed"
+    ? runtime.DB.prepare(`SELECT ${dateColumn} AS date, COUNT(*)::int AS count
+        FROM orders o ${joins} WHERE o.confirmation_status='confirmed' GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).all<{date:string;count:number}>()
+    : mode === "rejected"
+      ? runtime.DB.prepare(`SELECT ${dateColumn} AS date, COUNT(*)::int AS count
+          FROM orders o ${joins} WHERE o.confirmation_status='rejected' GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).all<{date:string;count:number}>()
+      : runtime.DB.prepare(`SELECT ${dateColumn} AS date, COUNT(*)::int AS count
+          FROM orders o ${joins}
+          WHERE ${queueCondition}
+            AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
+              AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))
+          GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).bind(now).all<{date:string;count:number}>();
+
+  // Query confirmed orders sitting unfulfilled for > 24 hours after being confirmed
+  const delayedOrdersPromise = runtime.DB.prepare(`
+    SELECT o.id, o.channel_order_id AS "channelOrderId", o.customer_name AS "customerName",
+      o.customer_phone AS "customerPhone", o.customer_city AS "customerCity", o.customer_state AS "customerState",
+      o.total, o.status, o.confirmed_at AS "confirmedAt",
+      COALESCE(o.delay_reason, '') AS "delayReason",
+      COALESCE(o.delay_reason_updated_at, '') AS "delayReasonUpdatedAt"
+    FROM orders o
+    WHERE o.confirmation_status = 'confirmed'
+      AND UPPER(TRIM(o.status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING', 'CONFIRMED', 'READY TO SHIP', 'AWB ASSIGNED')
+      AND (o.shipped_at IS NULL OR o.shipped_at = '')
+      AND o.confirmed_at <> ''
+      AND o.confirmed_at::timestamptz <= NOW() - INTERVAL '24 hours'
+    ORDER BY o.confirmed_at ASC
+    LIMIT 100
+  `).all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] }));
+
+  const [orders, countRow, agents, dateGroups, totalMatchingRow, delayedOrdersRow] = await Promise.all([
     listQuery.all<Record<string, unknown>>(),
     runtime.DB.prepare(`SELECT
-      (SELECT COUNT(*) FROM orders o JOIN campaign_assignments ca ON ca.order_id=o.id
-        WHERE o.confirmation_status IN ('pending','callback','unreachable') AND ${ACTIONABLE_STATUS_SQL}
+      (SELECT COUNT(*) FROM orders o ${joins}
+        WHERE ${queueCondition}
           AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
             AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))) AS queue,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed') AS confirmed,
@@ -139,6 +210,9 @@ async function handleGET(request: Request) {
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed' AND UPPER(TRIM(status)) NOT IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')) AS confirmed_shipped,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; confirmed_pending: number; confirmed_shipped: number; rejected: number }>(),
     runtime.DB.prepare("SELECT user_id AS userId,name FROM support_agents WHERE available ORDER BY name").all<{userId:string;name:string}>().catch(() => ({results:[] as {userId:string;name:string}[]})),
+    dateGroupsPromise.catch(() => ({ results: [] as {date:string;count:number}[] })),
+    totalMatchingPromise.catch(() => ({ total: 0 })),
+    delayedOrdersPromise,
   ]);
   const visibleIds = orders.results.map((row) => Number(row.id));
   const attemptRows = visibleIds.length ? await runtime.DB.prepare(`SELECT id, order_id AS orderId, attempt_number AS attemptNumber,
@@ -159,10 +233,43 @@ async function handleGET(request: Request) {
     rejected: Number(countRow?.rejected || 0),
     approved: Number(countRow?.confirmed || 0),
   };
+
+  const delayedOrders = delayedOrdersRow.results.map((r) => {
+    const confirmedTime = Date.parse(String(r.confirmedAt || ""));
+    const hoursDelayed = Number.isFinite(confirmedTime) ? Math.max(24, Math.round((Date.now() - confirmedTime) / 3600000)) : 24;
+    const updatedAt = String(r.delayReasonUpdatedAt || "");
+    const updatedTime = Date.parse(updatedAt);
+    const requiresPrompt = !updatedAt || !Number.isFinite(updatedTime) || (Date.now() - updatedTime) >= 24 * 3600 * 1000;
+    return {
+      id: Number(r.id),
+      channelOrderId: String(r.channelOrderId || ""),
+      customerName: String(r.customerName || ""),
+      customerPhone: String(r.customerPhone || ""),
+      customerCity: String(r.customerCity || ""),
+      customerState: String(r.customerState || ""),
+      total: Number(r.total || 0),
+      status: String(r.status || "NEW"),
+      confirmedAt: String(r.confirmedAt || ""),
+      hoursDelayed,
+      delayReason: String(r.delayReason || ""),
+      delayReasonUpdatedAt: updatedAt,
+      requiresPrompt,
+    };
+  });
+
+  const totalMatching = Number(totalMatchingRow?.total || 0);
+
   return Response.json({
     [mode]: serialized,
     counts,
+    total: totalMatching,
+    limit,
+    offset,
+    hasMore: totalMatching > offset + serialized.length,
+    nextOffset: offset + serialized.length,
+    delayedOrders,
     agents: agents.results,
+    dateGroups: dateGroups.results,
   });
 }
 
@@ -178,6 +285,58 @@ async function handlePOST(request: Request) {
   const action = String(body.action || "");
   const now = new Date().toISOString();
   try {
+    if (action === "log_delay_reason") {
+      if (!isAdmin(access.user) && access.user.role !== "operations" && access.user.role !== "support_manager") {
+        return Response.json({ error: "Administrator access required" }, { status: 403 });
+      }
+      const orderId = Number(body.orderId);
+      const reasonCode = String(body.reasonCode || "").trim();
+      const reasonText = String(body.reasonText || "").trim();
+      const notes = String(body.notes || "").trim();
+      if (!orderId) throw new Error("Order ID is required");
+      if (!reasonCode) throw new Error("Delay reason category is required");
+      if (!notes && !reasonText) throw new Error("Detailed notes explaining the delay are required");
+
+      const order = await runtime.DB.prepare(`
+        SELECT id, channel_order_id AS "channelOrderId", status, confirmed_at AS "confirmedAt"
+        FROM orders WHERE id=?
+      `).bind(orderId).first<{ id: number; channelOrderId: string; status: string; confirmedAt: string }>();
+      if (!order) throw new Error("Order was not found");
+
+      const confirmedTime = Date.parse(order.confirmedAt || "");
+      const hoursDelayed = Number.isFinite(confirmedTime) ? Math.max(24, Math.round((Date.now() - confirmedTime) / 3600000)) : 24;
+      const summaryText = reasonText || reasonCode.replace(/_/g, " ");
+
+      await runtime.DB.batch([
+        runtime.DB.prepare(`
+          INSERT INTO confirmation_delay_logs
+            (order_id, channel_order_id, reason_code, reason_text, notes, hours_delayed, actor_id, actor_name, actor_role, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(orderId, order.channelOrderId, reasonCode, summaryText, notes, hoursDelayed, access.user.id, access.user.name, access.user.role, now),
+        runtime.DB.prepare(`
+          UPDATE orders SET delay_reason=?, delay_reason_updated_at=? WHERE id=?
+        `).bind(`${summaryText}${notes ? `: ${notes}` : ""}`, now, orderId),
+        runtime.DB.prepare(`
+          INSERT INTO activity_logs (source, event_type, level, message, details_json, created_at, actor_id, actor_name, actor_role)
+          VALUES ('confirmation', 'order.delay_reason', 'warning', ?, ?, ?, ?, ?, ?)
+        `).bind(
+          `Delay reason logged for order #${order.channelOrderId} (${hoursDelayed}h unfulfilled): ${summaryText}`,
+          JSON.stringify({
+            orderId,
+            channelOrderId: order.channelOrderId,
+            reasonCode,
+            summaryText,
+            notes,
+            hoursDelayed,
+            actorId: access.user.id,
+            actorName: access.user.name,
+            actorRole: access.user.role,
+          }),
+          now, access.user.id, access.user.name, access.user.role
+        ),
+      ]);
+      return Response.json({ ok: true, orderId, delayReason: `${summaryText}${notes ? `: ${notes}` : ""}`, delayReasonUpdatedAt: now });
+    }
     if (action === "assign_confirmation_agent") {
       if (!isAdmin(access.user)) return Response.json({error:"Administrator access required"},{status:403});
       const orderId = Number(body.orderId);

@@ -47,7 +47,7 @@ async function handleGET() {
   return Response.json({
     logs: rows.results.map((row) => {
       let details: Record<string, unknown> = {};
-      try { details = JSON.parse(String(row.detailsJson || "{}")); } catch {}
+      try { details = JSON.parse(String(row.detailsJson || "{}")); } catch { /* ignore */ }
       const actorId = String(row.actorId || details.actorId || "");
       const actorName = String(row.actorName || details.actorName || (actorId === "system" ? "System" : ""));
       const actorRole = String(row.actorRole || details.actorRole || (actorId === "system" ? "system" : ""));

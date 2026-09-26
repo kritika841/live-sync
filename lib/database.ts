@@ -88,6 +88,12 @@ const resultKeyAliases: Record<string, string> = {
   shopifyvariantid: "shopifyVariantId",
   varianttitle: "variantTitle",
   reorderlevel: "reorderLevel",
+  copiedat: "copiedAt",
+  copiedby: "copiedBy",
+  copiedbyname: "copiedByName",
+  copiedcount: "copiedCount",
+  channelorderids: "channelOrderIds",
+  orderidsjson: "orderIdsJson",
 };
 
 function normalizeRows(rows: Row[]) {
@@ -149,6 +155,9 @@ export class PostgresDatabase {
       // Supabase transaction pooling + Vercel functions: one client
       // connection per warm function instance avoids exhausting the pool.
       max: 7,
+      max_pipeline: 1, // Disable pipelining to prevent hangs over PgBouncer transaction mode
+      idle_timeout: 10, // Release idle connection back to pool promptly
+      max_lifetime: 60, // Regularly recycle connections to prevent stale pooled sockets
       connect_timeout: 15,
       // A slow or exhausted database must fail a dashboard request promptly.
       // Without these server-side limits, Vercel keeps requests alive for up
@@ -158,7 +167,7 @@ export class PostgresDatabase {
         lock_timeout: 5000,
         idle_in_transaction_session_timeout: 25000,
       },
-    });
+    } as never);
     this.query = (text, values) => this.execute(text, values);
   }
 
@@ -288,15 +297,57 @@ export async function ensureSchema(db: PostgresDatabase) {
   return schemaReady;
 }
 
-const confirmationSchemaRevision = "2026-09-23";
+const confirmationSchemaRevision = "2026-09-24-delay-logs";
 export async function ensureConfirmationSchema(db: PostgresDatabase) {
   await ensureSchema(db);
   const current = await db.prepare("SELECT value FROM sync_state WHERE key='confirmation_schema_revision'").first<{value:string}>().catch(() => null);
   if (current?.value === confirmationSchemaRevision) return;
 
   await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_assignee_id TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delay_reason TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delay_reason_updated_at TEXT NOT NULL DEFAULT ''").run().catch(() => null);
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_assignee ON orders (confirmation_assignee_id, confirmation_status, confirmation_updated_at DESC)").run().catch(() => null);
+  await db.prepare(`CREATE TABLE IF NOT EXISTS confirmation_delay_logs (
+    id BIGSERIAL PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    channel_order_id TEXT NOT NULL DEFAULT '',
+    reason_code TEXT NOT NULL,
+    reason_text TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    hours_delayed DOUBLE PRECISION NOT NULL DEFAULT 0,
+    actor_id TEXT NOT NULL DEFAULT '',
+    actor_name TEXT NOT NULL DEFAULT '',
+    actor_role TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`).run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_delay_logs_order ON confirmation_delay_logs(order_id, created_at DESC)").run().catch(() => null);
   await setSyncState(db, "confirmation_schema_revision", confirmationSchemaRevision).catch(() => null);
+}
+
+const copiedOrdersSchemaRevision = "2026-09-24-copied-logs-v1";
+export async function ensureCopiedOrdersSchema(db: PostgresDatabase) {
+  await ensureSchema(db);
+  const current = await db.prepare("SELECT value FROM sync_state WHERE key='copied_orders_schema_revision'").first<{value:string}>().catch(() => null);
+  if (current?.value === copiedOrdersSchemaRevision) return;
+
+  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_at TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_by TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_by_name TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_count INTEGER NOT NULL DEFAULT 0").run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_copied_at ON orders (copied_at)").run().catch(() => null);
+  await db.prepare(`CREATE TABLE IF NOT EXISTS order_copy_logs (
+    id BIGSERIAL PRIMARY KEY,
+    actor_id TEXT NOT NULL DEFAULT '',
+    actor_name TEXT NOT NULL DEFAULT '',
+    actor_role TEXT NOT NULL DEFAULT '',
+    order_count INTEGER NOT NULL DEFAULT 0,
+    channel_order_ids TEXT NOT NULL DEFAULT '',
+    order_ids_json TEXT NOT NULL DEFAULT '[]',
+    tab TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`).run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_order_copy_logs_created_at ON order_copy_logs (created_at DESC)").run().catch(() => null);
+  await setSyncState(db, "copied_orders_schema_revision", copiedOrdersSchemaRevision).catch(() => null);
 }
 
 // Avoid repeating ALTER TABLE on every serverless cold start while order writes run.
@@ -349,6 +400,21 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmed_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rejected_at TEXT NOT NULL DEFAULT ''"),
     db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_high_risk BOOLEAN NOT NULL DEFAULT FALSE"),
+    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_at TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_by TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_by_name TEXT NOT NULL DEFAULT ''"),
+    db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS copied_count INTEGER NOT NULL DEFAULT 0"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS order_copy_logs (
+      id BIGSERIAL PRIMARY KEY,
+      actor_id TEXT NOT NULL DEFAULT '',
+      actor_name TEXT NOT NULL DEFAULT '',
+      actor_role TEXT NOT NULL DEFAULT '',
+      order_count INTEGER NOT NULL DEFAULT 0,
+      channel_order_ids TEXT NOT NULL DEFAULT '',
+      order_ids_json TEXT NOT NULL DEFAULT '[]',
+      tab TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    )`),
     db.prepare("ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS event_at TEXT NOT NULL DEFAULT ''"),
     db.prepare(`CREATE TABLE IF NOT EXISTS campaigns (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
@@ -483,6 +549,8 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_awb ON orders (awb)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_events (received_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs (created_at DESC)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_copied_at ON orders (copied_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_order_copy_logs_created_at ON order_copy_logs (created_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_sync_reports_created_at ON sync_reports (created_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_status ON orders (confirmation_status, confirmed_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_campaigns_position ON campaigns (is_active, position)"),

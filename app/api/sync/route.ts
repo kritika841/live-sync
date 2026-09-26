@@ -36,7 +36,7 @@ async function handlePOST(request: Request) {
   try {
     const result = await syncShiprocketOrders(runtime, mode, "manual sync", {
       startPage: Number.isFinite(Number(body.page)) ? Math.max(1, Number(body.page)) : undefined,
-      maxPages: mode === "full" ? 4 : 2,
+      maxPages: mode === "full" ? 30 : 15,
     });
     invalidateCache();
     return Response.json(result);

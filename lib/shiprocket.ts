@@ -2,6 +2,7 @@ import {completePhone} from "./contact";
 import { reconcileInventorySafely } from "./operations/reconcile";
 import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type RuntimeEnv } from "./database";
 import { routeConfirmationOrders } from "./confirmation";
+import { invalidateCache } from "./server-cache";
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
@@ -476,7 +477,7 @@ export async function syncShiprocketOrders(
   const db = runtime.DB;
   if (!db) throw new Error("Database binding is unavailable");
   await ensureSchema(db);
-  const syncRows = await db.prepare("SELECT key, value FROM sync_state WHERE key IN ('initial_sync_completed_at', 'full_sync_next_page', 'sync_status', 'last_sync_started_at')").all<{ key: string; value: string }>();
+  const syncRows = await db.prepare("SELECT key, value FROM sync_state WHERE key IN ('initial_sync_completed_at', 'full_sync_next_page', 'sync_status', 'last_sync_started_at', 'last_sync_at')").all<{ key: string; value: string }>();
   const syncState = Object.fromEntries(syncRows.results.map((row) => [row.key, row.value]));
   const lastStartedAt = Date.parse(syncState.last_sync_started_at || "");
   const isRunning = syncState.sync_status === "running";
@@ -486,8 +487,17 @@ export async function syncShiprocketOrders(
   const effectiveMode: SyncMode = mode === "incremental" && !syncState.initial_sync_completed_at ? "full" : mode;
   const storedPage = Math.max(1, Number(syncState.full_sync_next_page || 1));
   const startPage = effectiveMode === "full" ? Math.max(1, Number(options.startPage || storedPage)) : 1;
-  const maxPages = effectiveMode === "full" ? Math.min(10, Math.max(1, Number(options.maxPages || 4))) : Math.min(3, Math.max(1, Number(options.maxPages || 2)));
-  await logActivity(db, source, "sync.started", `${effectiveMode === "full" ? "Full" : "Incremental"} Shiprocket sync started`, { mode: effectiveMode });
+
+  // Dynamically calculate lookback based on last_sync_at to guarantee zero gaps even after extended outages
+  const lastSyncTime = Date.parse(syncState.last_sync_at || "");
+  const daysSinceLastSync = Number.isFinite(lastSyncTime) ? Math.ceil((Date.now() - lastSyncTime) / 86400000) : 30;
+  const lookbackDays = Math.min(90, Math.max(14, daysSinceLastSync + 3));
+  const defaultIncrementalPages = Math.min(10, Math.max(2, Math.ceil((lookbackDays * 30) / 100)));
+  const maxPages = effectiveMode === "full"
+    ? Math.min(50, Math.max(1, Number(options.maxPages || 20)))
+    : Math.min(15, Math.max(2, Number(options.maxPages || defaultIncrementalPages)));
+
+  await logActivity(db, source, "sync.started", `${effectiveMode === "full" ? "Full" : "Incremental"} Shiprocket sync started`, { mode: effectiveMode, lookbackDays, maxPages });
   await setSyncState(db, "sync_status", "running");
   await setSyncState(db, "last_sync_started_at", new Date().toISOString());
   try {
@@ -497,10 +507,10 @@ export async function syncShiprocketOrders(
     const fetchPage = (page: number) => {
       const params = new URLSearchParams({ page: String(page), per_page: "100", sort: "DESC", sort_by: "id", channel_id: String(channel.id) });
       if (effectiveMode === "incremental") {
-        const from = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const from = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
         const through = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        params.set("from", dateOnly(from));
-        params.set("to", dateOnly(through));
+        params.set("updated_from", dateOnly(from));
+        params.set("updated_to", dateOnly(through));
       }
       return apiJson<{ data?: ShiprocketOrder[]; meta?: { pagination?: { total_pages?: number } } }>(
         `${API_ROOT}/orders?${params.toString()}`,
@@ -517,16 +527,16 @@ export async function syncShiprocketOrders(
       for (const page of pages) orders.push(...(page.data || []));
     }
 
-    // Refresh active unfulfilled & confirmed orders from the last 14 days so their status changes (AWB assigned, shipped, delivered) persist immediately
+    // Refresh active unfulfilled, in-transit, and confirmed orders from the last 30 days so delivery & RTO transitions persist reliably
     const existingOrderIds = new Set(orders.map((o) => Number(o.id)).filter(Boolean));
     const activeToRefresh = await db.prepare(`
       SELECT id FROM orders
-      WHERE (confirmation_status = 'confirmed' OR UPPER(TRIM(status)) IN ('NEW', 'PENDING', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED'))
+      WHERE (confirmation_status = 'confirmed' OR UPPER(TRIM(status)) IN ('NEW', 'PENDING', 'PROCESSING', 'READY TO SHIP', 'AWB ASSIGNED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'REACHED AT DESTINATION HUB', 'OUT FOR DELIVERY', 'UNDELIVERED'))
         AND UPPER(TRIM(status)) NOT IN ('DELIVERED', 'DELIVERED TO CUSTOMER', 'RTO DELIVERED', 'CANCELED', 'LOST')
-        AND COALESCE(NULLIF(order_date, ''), created_at)::timestamptz >= NOW() - INTERVAL '14 days'
-      ORDER BY id DESC LIMIT 50
+        AND COALESCE(NULLIF(order_date, ''), created_at)::timestamptz >= NOW() - INTERVAL '30 days'
+      ORDER BY id DESC LIMIT 150
     `).all<{ id: number }>().catch(() => ({ results: [] as { id: number }[] }));
-    const toRefresh = activeToRefresh.results.filter((row) => !existingOrderIds.has(Number(row.id))).slice(0, 30);
+    const toRefresh = activeToRefresh.results.filter((row) => !existingOrderIds.has(Number(row.id))).slice(0, 15);
     if (toRefresh.length > 0) {
       for (let i = 0; i < toRefresh.length; i += 5) {
         const chunk = toRefresh.slice(i, i + 5);
@@ -585,6 +595,7 @@ export async function syncShiprocketOrders(
     await setSyncState(db, "last_sync_mode", effectiveMode);
     await setSyncState(db, "last_sync_count", String(synced));
     await setSyncState(db, "last_sync_report_json", JSON.stringify(report));
+    invalidateCache();
     await db.prepare(`
       INSERT INTO sync_reports (
         mode, source, checked, new_orders, changed_orders, unchanged_orders,
@@ -638,15 +649,18 @@ export async function fetchSpecificOrder(runtime: RuntimeEnv, shiprocketOrderId:
 export async function syncRecentOrders(runtime: RuntimeEnv) {
   const db = runtime.DB;
   await ensureSchema(db);
-  const lease = new Date(Date.now() + 360000).toISOString();
+  const lease = new Date(Date.now() + 90000).toISOString();
   const acquired = await db.prepare(`INSERT INTO sync_state (key,value,updated_at) VALUES ('fast_sync_lease',?,?)
     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at
     WHERE sync_state.value < ? RETURNING key`).bind(lease,new Date().toISOString(),new Date().toISOString()).all();
   if (!acquired.results.length) return { skipped: true, reason: "Already running" };
   try {
-    const state = await db.prepare("SELECT key,value FROM sync_state WHERE key IN ('fast_sync_cursor','fast_sync_from')").all<{key:string;value:string}>();
+    const state = await db.prepare("SELECT key,value FROM sync_state WHERE key IN ('fast_sync_cursor','fast_sync_from','last_sync_at')").all<{key:string;value:string}>();
     const values = Object.fromEntries(state.results.map(r=>[r.key,r.value]));
-    const from = values.fast_sync_from || new Date(Date.now()-2*86400000).toISOString().slice(0,10);
+    const lastSyncTime = Date.parse(values.last_sync_at || "");
+    const daysSinceLastSync = Number.isFinite(lastSyncTime) ? Math.ceil((Date.now() - lastSyncTime) / 86400000) : 7;
+    const fallbackLookback = Math.min(30, Math.max(3, daysSinceLastSync + 2));
+    const from = values.fast_sync_from || new Date(Date.now() - fallbackLookback * 86400000).toISOString().slice(0, 10);
     const cursor = Math.max(1,Number(values.fast_sync_cursor)||1);
     const token = await getShiprocketToken(runtime);
     const channel = await resolveChannel(runtime,token);
@@ -661,13 +675,17 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
     const first = await page(1);
     let imported=first.count;
     let next=Math.max(2,cursor);
-    for(let i=0;i<1 && next<=first.total;i++,next++) imported+=(await page(next)).count;
+    for(let i=0;i<2 && next<=first.total;i++,next++) imported+=(await page(next)).count;
     const pending=next<=first.total;
+    const nowIso = new Date().toISOString();
     await setSyncState(db,"fast_sync_cursor",pending?String(next):"1");
-    await setSyncState(db,"fast_sync_from",pending?from:new Date(Date.now()-2*86400000).toISOString().slice(0,10));
+    await setSyncState(db,"fast_sync_from",pending?from:new Date(Date.now()-fallbackLookback*86400000).toISOString().slice(0,10));
     await setSyncState(db,"fast_sync_error","");
-    await setSyncState(db,"fast_sync_checked_at",new Date().toISOString());
-    await setSyncState(db,"fast_sync_last_at",new Date().toISOString());
+    await setSyncState(db,"fast_sync_checked_at",nowIso);
+    await setSyncState(db,"fast_sync_last_at",nowIso);
+    await setSyncState(db,"last_sync_at",nowIso);
+    await setSyncState(db,"sync_status","completed");
+    invalidateCache();
     return {imported,pending,nextPage:pending?next:null};
   } catch(error) {
     await setSyncState(db,"fast_sync_error",error instanceof Error?error.message:"Sync failed");

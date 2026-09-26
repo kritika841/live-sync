@@ -25,26 +25,23 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
   const [copied, setCopied] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
-  const [webhookUrl, setWebhookUrl] = useState("");
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      setWebhookUrl(`${window.location.origin}/api/webhooks/orders`);
-    }
-  }, []);
+  const [webhookUrl] = useState(() => (typeof window !== "undefined" ? `${window.location.origin}/api/webhooks/orders` : ""));
 
   useEffect(() => {
     if (!active || !isAdmin) return;
-    setLoading(true);
-    fetch("/api/settings")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.unshippedOrdersWindowDays) {
-          setDays(Number(data.unshippedOrdersWindowDays));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    const timer = setTimeout(() => {
+      setLoading(true);
+      fetch("/api/settings")
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.unshippedOrdersWindowDays) {
+            setDays(Number(data.unshippedOrdersWindowDays));
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }, 0);
+    return () => clearTimeout(timer);
   }, [active, isAdmin]);
 
   async function handleSave() {
@@ -132,7 +129,7 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
           </div>
 
           <div className="settings-body">
-            <label className="settings-label">Quick Presets</label>
+            <span className="settings-label block font-semibold mb-2">Quick Presets</span>
             <div className="settings-presets">
               {PRESET_OPTIONS.map((opt) => (
                 <button
@@ -202,9 +199,10 @@ export default function SettingsPanel({ active, isAdmin, initialDays = 30, onSav
 
           <div className="settings-body">
             <div className="webhook-box">
-              <label className="settings-label">Your Live Webhook URL</label>
+              <label htmlFor="live-webhook-url-input" className="settings-label">Your Live Webhook URL</label>
               <div className="copy-row">
                 <input
+                  id="live-webhook-url-input"
                   type="text"
                   readOnly
                   value={webhookUrl || "https://satmi.in/api/webhooks/orders"}

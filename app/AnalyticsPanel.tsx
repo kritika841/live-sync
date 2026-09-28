@@ -773,6 +773,19 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
             <p className="text-xs text-muted-foreground mt-1">
               Live delivery success rates, open & closed order cohorts, courier efficiency, attempt funnels and NDR recovery
             </p>
+            {metrics && (
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs font-semibold text-foreground">
+                  <span className="text-muted-foreground font-normal">Total Shipped:</span>
+                  {formatNumber(metrics.shipped.count)}
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                  <span className="text-emerald-600 dark:text-emerald-400 font-normal">Total Delivered:</span>
+                  {formatNumber(metrics.delivered.count)}
+                  <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">({metrics.openOrdersDeliveryRate}%)</span>
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -940,8 +953,23 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
           <div className="flex flex-wrap items-center gap-3">
             <span className="flex items-center gap-1.5 font-medium text-foreground">
               <span className="size-2 rounded-full bg-emerald-500" />
-              <strong>{formatNumber(data.dataQuality.orderCount)} real orders in this view</strong>
+              <strong>{formatNumber(data.dataQuality.orderCount)} orders in this view</strong>
             </span>
+            {metrics && (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1 font-medium text-foreground">
+                  <span className="text-muted-foreground">Shipped:</span>
+                  <strong>{formatNumber(metrics.shipped.count)}</strong>
+                </span>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400">
+                  <span className="text-muted-foreground">Delivered:</span>
+                  <strong className="text-emerald-700 dark:text-emerald-300 font-bold">{formatNumber(metrics.delivered.count)}</strong>
+                  <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">({metrics.openOrdersDeliveryRate}%)</span>
+                </span>
+              </>
+            )}
             <span>·</span>
             <span>{data.dataQuality.source}</span>
             <span>·</span>

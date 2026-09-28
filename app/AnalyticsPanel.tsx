@@ -1158,17 +1158,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   <strong className="text-xl font-bold text-foreground">{metrics.inTransit.percent}%</strong>
                   <span className="text-xs text-muted-foreground">({formatNumber(metrics.inTransit.count)} orders)</span>
                 </div>
-                <div className="mt-2.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/40 p-2.5 space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-indigo-700 dark:text-indigo-300">Fresh (0 prior attempts):</span>
-                    <strong className="text-indigo-900 dark:text-indigo-100">
-                      {formatNumber(metrics.inTransitZeroAttempts.count)} / {formatNumber(metrics.inTransit.count)} ({metrics.inTransitZeroAttempts.percent}%)
-                    </strong>
-                  </div>
-                  <p className="text-[10px] text-indigo-600 dark:text-indigo-400 leading-tight">
-                    {metrics.inTransitZeroAttempts.percent}% of in-transit orders are line-haul packages en route to destination hubs with zero delivery attempts so far.
-                  </p>
-                </div>
               </div>
 
               {/* Out for Delivery % */}

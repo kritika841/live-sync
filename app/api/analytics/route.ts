@@ -20,15 +20,14 @@ import { cachedValue } from "../../../lib/server-cache";
 export const dynamic = "force-dynamic";
 
 const isoDate = /^\d{4}-\d{2}-\d{2}$/;
-const indiaDateSql = (column: string) =>
-  `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
+const indiaDateSql = (column: string) => `SUBSTR(${column}, 1, 10)`;
 const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), created_at)");
 
 const orderAttemptNumberSql = `(
   CASE
     WHEN ndr_attempts >= 3 THEN 4
     WHEN ndr_attempts = 2 THEN 3
-    WHEN first_out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}' AND out_for_delivery_at ~ '^\\d{4}-\\d{2}-\\d{2}' THEN
+    WHEN LENGTH(first_out_for_delivery_at) >= 10 AND LENGTH(out_for_delivery_at) >= 10 THEN
       CASE
         WHEN SUBSTR(first_out_for_delivery_at, 1, 10) = SUBSTR(out_for_delivery_at, 1, 10) THEN
           CASE
@@ -46,6 +45,48 @@ const orderAttemptNumberSql = `(
     ELSE 1
   END
 )`;
+
+const DEFAULT_COURIERS = [
+  "Delhivery DS 1kg",
+  "Shadowfax DS 1kg",
+  "Delhivery DS 500gm",
+  "Shadowfax DS 500",
+  "Delhivery Surface",
+  "Shadowfax Surface",
+  "DTDC Surface",
+  "DTDC Surface 20kg",
+  "Blue Dart Surface",
+  "Blue Dart Air",
+  "Ekart Logistics Surface",
+  "India Post-Business Parcel_2.0",
+  "OTHER",
+];
+
+let filterOptionsCache: { couriers: string[]; states: string[]; expiresAt: number } | null = null;
+
+async function getFilterOptions(db: { prepare: (sql: string) => { all: <T>() => Promise<{ results: T[] }> } }): Promise<{ couriers: string[]; states: string[] }> {
+  const now = Date.now();
+  if (filterOptionsCache && filterOptionsCache.expiresAt > now) {
+    return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states };
+  }
+  try {
+    const [couriersRes, statesRes] = await Promise.all([
+      db.prepare("SELECT DISTINCT courier AS value FROM orders WHERE courier != '' AND courier IS NOT NULL ORDER BY courier").all<{ value: string }>(),
+      db.prepare("SELECT DISTINCT customer_state AS value FROM orders WHERE customer_state != '' AND customer_state IS NOT NULL ORDER BY customer_state").all<{ value: string }>(),
+    ]);
+    const couriers = (couriersRes?.results || []).map((r) => r.value).filter(Boolean);
+    const states = (statesRes?.results || []).map((r) => r.value).filter(Boolean);
+    filterOptionsCache = {
+      couriers: couriers.length ? couriers : DEFAULT_COURIERS,
+      states,
+      expiresAt: now + 15 * 60 * 1000,
+    };
+    return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states };
+  } catch {
+    if (filterOptionsCache) return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states };
+    return { couriers: DEFAULT_COURIERS, states: [] };
+  }
+}
 
 function indiaToday() {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -246,219 +287,231 @@ async function handleGET(request: Request) {
   const where = filters.length ? filters.join(" AND ") : "1 = 1";
   const cacheKey = `analytics-overview-${where}-${filterValues.join(":")}`;
 
-  const payload = await cachedValue(cacheKey, 30000, async () => {
-    // 1. Core Summary Metrics
-    const summary = await runtime.DB.prepare(`
-    SELECT 
-      COUNT(*) AS total,
-      SUM(CASE WHEN LOWER(payment_method) = 'prepaid' THEN 1 ELSE 0 END) AS prepaid,
-      SUM(CASE WHEN LOWER(payment_method) = 'cod' THEN 1 ELSE 0 END) AS cod,
-      SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
-      SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
-      SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS in_transit,
-      SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND (${orderAttemptNumberSql} = 1 OR first_out_for_delivery_at = '') AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND ndr_raised_at = '' THEN 1 ELSE 0 END) AS in_transit_zero_attempts,
-      SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND NOT ((${orderAttemptNumberSql} = 1 OR first_out_for_delivery_at = '') AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND ndr_raised_at = '') THEN 1 ELSE 0 END) AS in_transit_with_attempts,
-      SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS out_for_delivery,
-      SUM(CASE WHEN ${nonShippedSql} THEN 1 ELSE 0 END) AS non_shipped,
-      SUM(CASE WHEN ${cancelledSql} THEN 1 ELSE 0 END) AS cancelled,
-      SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed,
-      SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
-      SUM(CASE WHEN ${shippedHistorySql} THEN 1 ELSE 0 END) AS shipped_history,
-      SUM(CASE WHEN ${highRiskSql} THEN 1 ELSE 0 END) AS high_risk,
-      SUM(CASE WHEN ${lowRiskSql} THEN 1 ELSE 0 END) AS low_risk,
-      SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} = 1) THEN 1 ELSE 0 END) AS del_1st_attempt,
-      SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} = 2) THEN 1 ELSE 0 END) AS del_2nd_attempt,
-      SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} = 3) THEN 1 ELSE 0 END) AS del_3rd_attempt,
-      SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} >= 4) THEN 1 ELSE 0 END) AS del_later_attempt,
-      SUM(CASE WHEN LOWER(payment_method) = 'cod' AND ${openPopulationSql} THEN 1 ELSE 0 END) AS cod_shipped,
-      SUM(CASE WHEN LOWER(payment_method) = 'cod' AND ${deliveredSql} THEN 1 ELSE 0 END) AS cod_delivered,
-      SUM(CASE WHEN LOWER(payment_method) = 'cod' AND ${closedSql} THEN 1 ELSE 0 END) AS cod_closed,
-      SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${openPopulationSql} THEN 1 ELSE 0 END) AS prepaid_shipped,
-      SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${deliveredSql} THEN 1 ELSE 0 END) AS prepaid_delivered,
-      SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${closedSql} THEN 1 ELSE 0 END) AS prepaid_closed,
-      SUM(CASE WHEN (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL)) THEN 1 ELSE 0 END) AS total_ndr_experienced,
-      SUM(CASE WHEN ${deliveredSql} AND (ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS ndr_delivered,
-      AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_shipped_to_delivered_days,
-      AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(COALESCE(NULLIF(order_date, ''), created_at)) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - COALESCE(NULLIF(order_date, ''), created_at)::timestamptz)) / 86400 END) AS avg_order_to_delivered_days,
-      COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS "deliveredRevenue",
-      COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS delivered_revenue,
-      AVG(CASE WHEN ${deliveredSql} AND shipping_cost > 0 THEN shipping_cost END) AS "avgShippingCost",
-      AVG(CASE WHEN ${deliveredSql} AND shipping_cost > 0 THEN shipping_cost END) AS avg_shipping_cost,
-      COUNT(*) FILTER (WHERE ${deliveredSql} AND shipping_cost > 0) AS "deliveredShippingCostCount",
-      COUNT(*) FILTER (WHERE ${deliveredSql} AND shipping_cost > 0) AS delivered_shipping_cost_count,
-      AVG(CASE WHEN ${deliveredSql} THEN total END) AS "avgDeliveredOrderValue",
-      AVG(CASE WHEN ${deliveredSql} THEN total END) AS avg_delivered_order_value
-    FROM orders WHERE ${where}
-  `).bind(...filterValues).first<Record<string, unknown>>();
+  const payload = await cachedValue(cacheKey, 120000, async () => {
+    const ndrReasonSql = "COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')";
+    const whereO = where
+      .replaceAll("customer_state", "o.customer_state")
+      .replaceAll("payment_method", "o.payment_method")
+      .replaceAll("courier", "o.courier")
+      .replaceAll("order_date", "o.order_date")
+      .replaceAll("created_at", "o.created_at")
+      .replaceAll("status", "o.status");
 
-  const total = Number(summary?.total || 0);
-  const shipped = Number(summary?.shipped || 0);
-  const delivered = Number(summary?.delivered || 0);
-  const closed = Number(summary?.closed || 0);
-  const rto = Number(summary?.rto || 0);
-  const ndr = Number(summary?.ndr || 0);
-  const inTransit = Number(summary?.in_transit || 0);
-  const inTransitZeroAttempts = Number(summary?.in_transit_zero_attempts || 0);
-  const inTransitWithAttempts = Number(summary?.in_transit_with_attempts || 0);
-  const outForDelivery = Number(summary?.out_for_delivery || 0);
-  const nonShipped = Number(summary?.non_shipped || 0);
-  const cancelled = Number(summary?.cancelled || 0);
+    // Execute all analytical queries concurrently for maximum performance
+    const [
+      summary,
+      ndrReasons,
+      courierRows,
+      stateRows,
+      dateRows,
+      productRows,
+      statuses,
+      syncRows,
+      filterOptions,
+    ] = await Promise.all([
+      // 1. Core Summary Metrics
+      runtime.DB.prepare(`
+        SELECT 
+          COUNT(*) AS total,
+          SUM(CASE WHEN LOWER(payment_method) = 'prepaid' THEN 1 ELSE 0 END) AS prepaid,
+          SUM(CASE WHEN LOWER(payment_method) = 'cod' THEN 1 ELSE 0 END) AS cod,
+          SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
+          SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
+          SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
+          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS in_transit,
+          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND (${orderAttemptNumberSql} = 1 OR first_out_for_delivery_at = '') AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND ndr_raised_at = '' THEN 1 ELSE 0 END) AS in_transit_zero_attempts,
+          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND NOT ((${orderAttemptNumberSql} = 1 OR first_out_for_delivery_at = '') AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND ndr_raised_at = '') THEN 1 ELSE 0 END) AS in_transit_with_attempts,
+          SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS out_for_delivery,
+          SUM(CASE WHEN ${nonShippedSql} THEN 1 ELSE 0 END) AS non_shipped,
+          SUM(CASE WHEN ${cancelledSql} THEN 1 ELSE 0 END) AS cancelled,
+          SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed,
+          SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
+          SUM(CASE WHEN ${shippedHistorySql} THEN 1 ELSE 0 END) AS shipped_history,
+          SUM(CASE WHEN ${highRiskSql} THEN 1 ELSE 0 END) AS high_risk,
+          SUM(CASE WHEN ${lowRiskSql} THEN 1 ELSE 0 END) AS low_risk,
+          SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} = 1) THEN 1 ELSE 0 END) AS del_1st_attempt,
+          SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} = 2) THEN 1 ELSE 0 END) AS del_2nd_attempt,
+          SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} = 3) THEN 1 ELSE 0 END) AS del_3rd_attempt,
+          SUM(CASE WHEN ${deliveredSql} AND (${orderAttemptNumberSql} >= 4) THEN 1 ELSE 0 END) AS del_later_attempt,
+          SUM(CASE WHEN LOWER(payment_method) = 'cod' AND ${openPopulationSql} THEN 1 ELSE 0 END) AS cod_shipped,
+          SUM(CASE WHEN LOWER(payment_method) = 'cod' AND ${deliveredSql} THEN 1 ELSE 0 END) AS cod_delivered,
+          SUM(CASE WHEN LOWER(payment_method) = 'cod' AND ${closedSql} THEN 1 ELSE 0 END) AS cod_closed,
+          SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${openPopulationSql} THEN 1 ELSE 0 END) AS prepaid_shipped,
+          SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${deliveredSql} THEN 1 ELSE 0 END) AS prepaid_delivered,
+          SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${closedSql} THEN 1 ELSE 0 END) AS prepaid_closed,
+          SUM(CASE WHEN (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL)) THEN 1 ELSE 0 END) AS total_ndr_experienced,
+          SUM(CASE WHEN ${deliveredSql} AND (ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS ndr_delivered,
+          AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_shipped_to_delivered_days,
+          AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(COALESCE(NULLIF(order_date, ''), created_at)) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - COALESCE(NULLIF(order_date, ''), created_at)::timestamptz)) / 86400 END) AS avg_order_to_delivered_days,
+          COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS "deliveredRevenue",
+          COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS delivered_revenue,
+          AVG(CASE WHEN ${deliveredSql} AND shipping_cost > 0 THEN shipping_cost END) AS "avgShippingCost",
+          AVG(CASE WHEN ${deliveredSql} AND shipping_cost > 0 THEN shipping_cost END) AS avg_shipping_cost,
+          COUNT(*) FILTER (WHERE ${deliveredSql} AND shipping_cost > 0) AS "deliveredShippingCostCount",
+          COUNT(*) FILTER (WHERE ${deliveredSql} AND shipping_cost > 0) AS delivered_shipping_cost_count,
+          AVG(CASE WHEN ${deliveredSql} THEN total END) AS "avgDeliveredOrderValue",
+          AVG(CASE WHEN ${deliveredSql} THEN total END) AS avg_delivered_order_value
+        FROM orders WHERE ${where}
+      `).bind(...filterValues).first<Record<string, unknown>>(),
 
-  const del1stAttempt = Number(summary?.del_1st_attempt || 0);
-  const del2ndAttempt = Number(summary?.del_2nd_attempt || 0);
-  const del3rdAttempt = Number(summary?.del_3rd_attempt || 0);
-  const delLaterAttempt = Number(summary?.del_later_attempt || 0);
+      // 2. NDR Reasons
+      runtime.DB.prepare(`
+        SELECT ${ndrReasonSql} AS reason, COUNT(*) AS count
+        FROM orders
+        WHERE ${where} AND (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL))
+        GROUP BY reason
+        ORDER BY count DESC
+        LIMIT 12
+      `).bind(...filterValues).all<{ reason: string; count: number }>(),
 
-  const cod = Number(summary?.cod || 0);
-  const prepaid = Number(summary?.prepaid || 0);
-  const codShipped = Number(summary?.cod_shipped || 0);
-  const codDelivered = Number(summary?.cod_delivered || 0);
-  const codClosed = Number(summary?.cod_closed || 0);
-  const prepaidShipped = Number(summary?.prepaid_shipped || 0);
-  const prepaidDelivered = Number(summary?.prepaid_delivered || 0);
-  const prepaidClosed = Number(summary?.prepaid_closed || 0);
+      // 3. Courier-wise Delivery
+      runtime.DB.prepare(`
+        SELECT 
+          COALESCE(NULLIF(courier, ''), 'Not assigned') AS name,
+          COUNT(*) AS total,
+          SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
+          SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
+          SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
+          SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
+          SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed,
+          AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_tat
+        FROM orders WHERE ${where}
+        GROUP BY name
+        ORDER BY total DESC
+        LIMIT 15
+      `).bind(...filterValues).all<{
+        name: string;
+        total: number;
+        shipped: number;
+        delivered: number;
+        rto: number;
+        ndr: number;
+        closed: number;
+        avg_tat: number | null;
+      }>(),
 
-  const totalNdrExperienced = Number(summary?.total_ndr_experienced || 0);
-  const ndrDelivered = Number(summary?.ndr_delivered || 0);
+      // 4. State-wise Delivery
+      runtime.DB.prepare(`
+        SELECT 
+          COALESCE(NULLIF(customer_state, ''), 'Unknown state') AS state,
+          COUNT(*) AS total,
+          SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
+          SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
+          SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
+          SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed
+        FROM orders WHERE ${where}
+        GROUP BY state
+        ORDER BY total DESC
+        LIMIT 25
+      `).bind(...filterValues).all<{
+        state: string;
+        total: number;
+        shipped: number;
+        delivered: number;
+        rto: number;
+        closed: number;
+      }>(),
 
-  const avgShippedTatDays =
-    summary?.avg_shipped_to_delivered_days != null ? Number(summary.avg_shipped_to_delivered_days) : null;
-  const avgOrderTatDays =
-    summary?.avg_order_to_delivered_days != null ? Number(summary.avg_order_to_delivered_days) : null;
+      // 5. Date-wise Delivery
+      runtime.DB.prepare(`
+        SELECT 
+          ${orderAnalyticsDateSql} AS dt,
+          COUNT(*) AS total,
+          SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
+          SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
+          SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
+          SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
+          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS in_transit,
+          SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS out_for_delivery
+        FROM orders WHERE ${where}
+        GROUP BY dt
+        ORDER BY dt DESC
+        LIMIT 31
+      `).bind(...filterValues).all<{
+        dt: string;
+        total: number;
+        shipped: number;
+        delivered: number;
+        rto: number;
+        ndr: number;
+        in_transit: number;
+        out_for_delivery: number;
+      }>(),
 
-  // 2. NDR Reasons
-  const ndrReasonSql = "COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')";
-  const ndrReasons = await runtime.DB.prepare(`
-    SELECT ${ndrReasonSql} AS reason, COUNT(*) AS count
-    FROM orders
-    WHERE ${where} AND (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL))
-    GROUP BY reason
-    ORDER BY count DESC
-    LIMIT 12
-  `).bind(...filterValues).all<{ reason: string; count: number }>();
+      // 6. Product-wise Delivery
+      runtime.DB.prepare(`
+        SELECT 
+          elem->>'name' AS name,
+          COUNT(DISTINCT o.id) AS order_count,
+          COUNT(DISTINCT o.id) FILTER (WHERE ${deliveredSql.replaceAll("status", "o.status")}) AS delivered,
+          COUNT(DISTINCT o.id) FILTER (WHERE ${rtoSql.replaceAll("status", "o.status")}) AS rto,
+          COUNT(DISTINCT o.id) FILTER (WHERE ${openPopulationSql.replaceAll("status", "o.status")}) AS shipped
+        FROM orders o,
+        jsonb_array_elements(CASE WHEN o.products_json LIKE '[%' THEN o.products_json::jsonb ELSE '[]'::jsonb END) elem
+        WHERE ${whereO}
+          AND elem->>'name' IS NOT NULL AND elem->>'name' != ''
+        GROUP BY name
+        ORDER BY order_count DESC
+        LIMIT 20
+      `).bind(...filterValues).all<{
+        name: string;
+        order_count: number;
+        delivered: number;
+        rto: number;
+        shipped: number;
+      }>(),
 
-  // 3. Courier-wise Delivery
-  const courierRows = await runtime.DB.prepare(`
-    SELECT 
-      COALESCE(NULLIF(courier, ''), 'Not assigned') AS name,
-      COUNT(*) AS total,
-      SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
-      SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
-      SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
-      SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed,
-      AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_tat
-    FROM orders WHERE ${where}
-    GROUP BY name
-    ORDER BY total DESC
-    LIMIT 15
-  `).bind(...filterValues).all<{
-    name: string;
-    total: number;
-    shipped: number;
-    delivered: number;
-    rto: number;
-    ndr: number;
-    closed: number;
-    avg_tat: number | null;
-  }>();
+      // 7. Status breakdown
+      runtime.DB.prepare(`
+        SELECT UPPER(TRIM(status)) AS status, COUNT(*) AS count, ${closedSql} AS attempted, ${openPopulationSql} AS shipped
+        FROM orders WHERE ${where}
+        GROUP BY UPPER(TRIM(status))
+        ORDER BY COUNT(*) DESC
+      `).bind(...filterValues).all<{ status: string; count: number; attempted: boolean; shipped: boolean }>(),
 
-  // 4. State-wise Delivery
-  const stateRows = await runtime.DB.prepare(`
-    SELECT 
-      COALESCE(NULLIF(customer_state, ''), 'Unknown state') AS state,
-      COUNT(*) AS total,
-      SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
-      SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
-      SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed
-    FROM orders WHERE ${where}
-    GROUP BY state
-    ORDER BY total DESC
-    LIMIT 25
-  `).bind(...filterValues).all<{
-    state: string;
-    total: number;
-    shipped: number;
-    delivered: number;
-    rto: number;
-    closed: number;
-  }>();
+      // 8. Sync state
+      runtime.DB.prepare("SELECT key, value FROM sync_state WHERE key IN ('sync_status', 'last_sync_at', 'last_sync_count', 'last_sync_error')").all<{ key: string; value: string }>(),
 
-  // 5. Date-wise Delivery (Daily Trend)
-  const dateRows = await runtime.DB.prepare(`
-    SELECT 
-      ${orderAnalyticsDateSql} AS dt,
-      COUNT(*) AS total,
-      SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
-      SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
-      SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
-      SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS in_transit,
-      SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS out_for_delivery
-    FROM orders WHERE ${where}
-    GROUP BY dt
-    ORDER BY dt DESC
-    LIMIT 31
-  `).bind(...filterValues).all<{
-    dt: string;
-    total: number;
-    shipped: number;
-    delivered: number;
-    rto: number;
-    ndr: number;
-    in_transit: number;
-    out_for_delivery: number;
-  }>();
+      // 9. Cached filter options
+      getFilterOptions(runtime.DB)
+    ]);
 
-  // 6. Product-wise Delivery
-  const whereO = where
-    .replaceAll("customer_state", "o.customer_state")
-    .replaceAll("payment_method", "o.payment_method")
-    .replaceAll("courier", "o.courier")
-    .replaceAll("order_date", "o.order_date")
-    .replaceAll("created_at", "o.created_at")
-    .replaceAll("status", "o.status");
+    const total = Number(summary?.total || 0);
+    const shipped = Number(summary?.shipped || 0);
+    const delivered = Number(summary?.delivered || 0);
+    const closed = Number(summary?.closed || 0);
+    const rto = Number(summary?.rto || 0);
+    const ndr = Number(summary?.ndr || 0);
+    const inTransit = Number(summary?.in_transit || 0);
+    const inTransitZeroAttempts = Number(summary?.in_transit_zero_attempts || 0);
+    const inTransitWithAttempts = Number(summary?.in_transit_with_attempts || 0);
+    const outForDelivery = Number(summary?.out_for_delivery || 0);
+    const nonShipped = Number(summary?.non_shipped || 0);
+    const cancelled = Number(summary?.cancelled || 0);
 
-  const productRows = await runtime.DB.prepare(`
-    SELECT 
-      elem->>'name' AS name,
-      COUNT(DISTINCT o.id) AS order_count,
-      COUNT(DISTINCT o.id) FILTER (WHERE ${deliveredSql.replaceAll("status", "o.status")}) AS delivered,
-      COUNT(DISTINCT o.id) FILTER (WHERE ${rtoSql.replaceAll("status", "o.status")}) AS rto,
-      COUNT(DISTINCT o.id) FILTER (WHERE ${openPopulationSql.replaceAll("status", "o.status")}) AS shipped
-    FROM orders o,
-    jsonb_array_elements(CASE WHEN o.products_json ~ '^\\[.*\\]$' THEN o.products_json::jsonb ELSE '[]'::jsonb END) elem
-    WHERE ${whereO}
-      AND elem->>'name' IS NOT NULL AND elem->>'name' != ''
-    GROUP BY name
-    ORDER BY order_count DESC
-    LIMIT 20
-  `).bind(...filterValues).all<{
-    name: string;
-    order_count: number;
-    delivered: number;
-    rto: number;
-    shipped: number;
-  }>();
+    const del1stAttempt = Number(summary?.del_1st_attempt || 0);
+    const del2ndAttempt = Number(summary?.del_2nd_attempt || 0);
+    const del3rdAttempt = Number(summary?.del_3rd_attempt || 0);
+    const delLaterAttempt = Number(summary?.del_later_attempt || 0);
 
-  // 7. Status breakdown
-  const statuses = await runtime.DB.prepare(`
-    SELECT UPPER(TRIM(status)) AS status, COUNT(*) AS count, ${closedSql} AS attempted, ${openPopulationSql} AS shipped
-    FROM orders WHERE ${where}
-    GROUP BY UPPER(TRIM(status))
-    ORDER BY COUNT(*) DESC
-  `).bind(...filterValues).all<{ status: string; count: number; attempted: boolean; shipped: boolean }>();
+    const cod = Number(summary?.cod || 0);
+    const prepaid = Number(summary?.prepaid || 0);
+    const codShipped = Number(summary?.cod_shipped || 0);
+    const codDelivered = Number(summary?.cod_delivered || 0);
+    const codClosed = Number(summary?.cod_closed || 0);
+    const prepaidShipped = Number(summary?.prepaid_shipped || 0);
+    const prepaidDelivered = Number(summary?.prepaid_delivered || 0);
+    const prepaidClosed = Number(summary?.prepaid_closed || 0);
 
-  // 8. Filter options and sync state
-  const [courierOptions, stateOptions, syncRows] = await Promise.all([
-    runtime.DB.prepare("SELECT DISTINCT courier AS value FROM orders WHERE courier != '' ORDER BY courier").all<{ value: string }>(),
-    runtime.DB.prepare("SELECT DISTINCT customer_state AS value FROM orders WHERE customer_state != '' ORDER BY customer_state").all<{ value: string }>(),
-    runtime.DB.prepare("SELECT key, value FROM sync_state WHERE key IN ('sync_status', 'last_sync_at', 'last_sync_count', 'last_sync_error')").all<{ key: string; value: string }>(),
-  ]);
+    const totalNdrExperienced = Number(summary?.total_ndr_experienced || 0);
+    const ndrDelivered = Number(summary?.ndr_delivered || 0);
 
-  const syncState = Object.fromEntries(syncRows.results.map((r) => [r.key, r.value || ""]));
+    const avgShippedTatDays =
+      summary?.avg_shipped_to_delivered_days != null ? Number(summary.avg_shipped_to_delivered_days) : null;
+    const avgOrderTatDays =
+      summary?.avg_order_to_delivered_days != null ? Number(summary.avg_order_to_delivered_days) : null;
+
+    const syncState = Object.fromEntries(syncRows.results.map((r) => [r.key, r.value || ""]));
 
   return {
     statusBreakdown: statuses.results,
@@ -599,8 +652,8 @@ async function handleGET(request: Request) {
       closedDeliveryRate: percent(Number(r.delivered), Number(r.delivered) + Number(r.rto)),
     })),
     filterOptions: {
-      couriers: courierOptions.results.map((r) => r.value),
-      states: stateOptions.results.map((r) => r.value),
+      couriers: filterOptions.couriers,
+      states: filterOptions.states,
     },
     dataQuality: {
       source: "Shiprocket synced orders",

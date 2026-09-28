@@ -261,8 +261,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   const [payment, setPayment] = useState("");
   const [state, setState] = useState("");
 
-  const [activeTab, setActiveTab] = useState<"overview" | "couriers" | "dates" | "states" | "ndr" | "products">(
-    "overview"
+  const [activeTab, setActiveTab] = useState<"couriers" | "dates" | "states" | "ndr" | "products">(
+    "couriers"
   );
   const [subSearch, setSubSearch] = useState("");
 

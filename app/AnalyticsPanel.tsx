@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -11,6 +11,7 @@ import {
   Clock,
   CreditCard,
   Filter,
+  Info,
   Layers,
   MapPin,
   PackageCheck,
@@ -244,6 +245,129 @@ function getPastDateString(daysCount: number) {
   }).formatToParts(d);
   const values = Object.fromEntries(parts.map((p) => [p.type, p.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function MetricInfoButton({
+  title,
+  formula,
+  calculation,
+  explanation,
+  notes,
+  align = "right",
+}: {
+  title: string;
+  formula: string;
+  calculation?: string;
+  explanation: string;
+  notes?: string;
+  align?: "left" | "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative inline-flex items-center" ref={containerRef}>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((prev) => !prev);
+        }}
+        aria-label={`Formula details for ${title}`}
+        title={`View formula for ${title}`}
+        className={`inline-flex items-center justify-center size-5 rounded-full border transition-all ${
+          open
+            ? "border-primary bg-primary text-primary-foreground shadow-xs scale-105"
+            : "border-border/80 text-muted-foreground hover:border-primary/50 hover:text-primary hover:bg-primary/5"
+        }`}
+      >
+        <span className="text-[11px] font-bold font-serif leading-none italic select-none">i</span>
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label={title}
+          onClick={(e) => e.stopPropagation()}
+          className={`absolute ${
+            align === "left" ? "left-0" : "right-0"
+          } top-7 z-50 w-72 sm:w-80 rounded-xl border border-border bg-card/98 backdrop-blur-md p-3.5 shadow-2xl ring-1 ring-black/10 dark:ring-white/10 animate-in fade-in zoom-in-95 duration-150 text-left`}
+        >
+          <div className="flex items-center justify-between pb-2 border-b border-border/60">
+            <span className="text-xs font-bold text-foreground flex items-center gap-1.5">
+              <span className="inline-flex size-4 items-center justify-center rounded-full bg-primary/10 text-primary text-[10px] font-bold font-serif italic">
+                i
+              </span>
+              {title}
+            </span>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="text-muted-foreground hover:text-foreground p-0.5 rounded transition"
+              aria-label="Close formula details"
+            >
+              <X size={13} />
+            </button>
+          </div>
+
+          <div className="mt-2.5 space-y-2.5">
+            <div>
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block mb-1">
+                Formula
+              </span>
+              <div className="rounded-md bg-muted px-2.5 py-1.5 font-mono text-[11px] text-foreground font-semibold border border-border/70 select-all">
+                {formula}
+              </div>
+            </div>
+
+            {calculation && (
+              <div>
+                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block mb-1">
+                  Active Numbers
+                </span>
+                <div className="rounded-md bg-emerald-500/10 dark:bg-emerald-950/30 px-2.5 py-1.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-400 font-bold border border-emerald-500/20">
+                  {calculation}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block mb-1">
+                Definition
+              </span>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                {explanation}
+              </p>
+            </div>
+
+            {notes && (
+              <div className="pt-2 border-t border-border/50 text-[10px] text-muted-foreground/90 italic leading-snug">
+                {notes}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function AnalyticsPanel({ active, mode = "overview", preview = false }: AnalyticsPanelProps) {
@@ -1015,7 +1139,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
             {/* PRIMARY HEADLINE KPI CARDS */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* 1. Open Orders Delivery % */}
-              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative overflow-hidden group hover:border-primary/50 transition">
+              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-primary/50 transition">
                 <div className="flex items-start justify-between">
                   <div>
                     <span className="rounded bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary uppercase tracking-wider">
@@ -1023,8 +1147,17 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     </span>
                     <h3 className="text-xs font-semibold text-muted-foreground mt-2">Open Orders Delivery %</h3>
                   </div>
-                  <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                    <TrendingUp size={18} />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Open Orders Delivery %"
+                      formula="Delivered ÷ Total Shipped × 100"
+                      calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.openOrdersDeliveryRate}%`}
+                      explanation="Calculates delivery success across all packages handed over to couriers. Numerator is Delivered; denominator includes all active transit and finalized statuses (Delivered + In Transit + OFD + NDR + RTO)."
+                      notes="Fresh store orders placed today that are awaiting warehouse dispatch are excluded from shipped."
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <TrendingUp size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
@@ -1035,8 +1168,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <ArrowUpRight size={14} /> Delivered
                   </span>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1.5">
-                  Delivered ÷ (All shipped statuses) × 100 · Includes RTO, undelivered and lost
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  Delivery success across all dispatched shipments
                 </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
@@ -1049,7 +1182,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </article>
 
               {/* 2. Closed Orders Delivery % */}
-              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative overflow-hidden group hover:border-border/80 transition">
+              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-border/80 transition">
                 <div className="flex items-start justify-between">
                   <div>
                     <span className="rounded bg-sky-500/10 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-400 uppercase tracking-wider">
@@ -1057,8 +1190,17 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     </span>
                     <h3 className="text-xs font-semibold text-muted-foreground mt-2">Closed Orders Delivery %</h3>
                   </div>
-                  <div className="flex size-9 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600">
-                    <PackageCheck size={18} />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Closed Orders Delivery %"
+                      formula="Delivered ÷ (Delivered + RTO + Undelivered + OFD) × 100"
+                      calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.closed.count)} × 100 = ${metrics.closedOrdersDeliveryRate}%`}
+                      explanation="Measures delivery conversion strictly on resolved or attempted shipments. Early line-haul packages still travelling between hubs are excluded so newer cohorts aren't penalized."
+                      notes="Once an in-transit order gets attempted or delivered, it enters this cohort."
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600">
+                      <PackageCheck size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
@@ -1067,8 +1209,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </strong>
                   <span className="text-xs text-muted-foreground">conversion</span>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1.5">
-                  Delivered ÷ (Delivered + RTO + Undelivered + OFD) × 100
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  Conversion rate on resolved & attempted shipments
                 </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
@@ -1082,7 +1224,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </article>
 
               {/* 3. Overall Delivery % */}
-              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative overflow-hidden group hover:border-border/80 transition">
+              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-border/80 transition">
                 <div className="flex items-start justify-between">
                   <div>
                     <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
@@ -1090,8 +1232,17 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     </span>
                     <h3 className="text-xs font-semibold text-muted-foreground mt-2">Overall Delivered %</h3>
                   </div>
-                  <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
-                    <CheckCircle2 size={18} />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Overall Delivered %"
+                      formula="Delivered ÷ Total Cohort Orders × 100"
+                      calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.total.count)} × 100 = ${metrics.deliveryRate}%`}
+                      explanation="Calculates delivered packages as a percentage of all orders placed in this time window, including unfulfilled, cancelled, or pending orders."
+                      notes="Shows true store-to-door completion across the cohort."
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
+                      <CheckCircle2 size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
@@ -1100,8 +1251,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </strong>
                   <span className="text-xs text-muted-foreground">of all orders</span>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1.5">
-                  {formatNumber(metrics.delivered.count)} delivered out of {formatNumber(metrics.total.count)} cohort orders
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  Store-wide delivery rate across all orders placed
                 </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
@@ -1114,7 +1265,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </article>
 
               {/* 4. RTO % */}
-              <article className="rounded-xl border border-destructive/20 bg-card p-4 shadow-xs relative overflow-hidden group hover:border-destructive/40 transition">
+              <article className="rounded-xl border border-destructive/20 bg-card p-4 shadow-xs relative group hover:border-destructive/40 transition">
                 <div className="flex items-start justify-between">
                   <div>
                     <span className="rounded bg-destructive/10 px-2 py-0.5 text-[10px] font-bold text-destructive uppercase tracking-wider">
@@ -1122,8 +1273,17 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     </span>
                     <h3 className="text-xs font-semibold text-muted-foreground mt-2">RTO % (Return to Origin)</h3>
                   </div>
-                  <div className="flex size-9 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
-                    <TrendingDown size={18} />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="RTO % (Return to Origin)"
+                      formula="RTO ÷ Total Shipped × 100"
+                      calculation={`${formatNumber(metrics.rto.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.rtoRate}%`}
+                      explanation="The percentage of dispatched orders that could not be delivered and are marked for return to the origin warehouse."
+                      notes={`Total RTO share across all orders: ${metrics.rtoOfTotal.percent}%.`}
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
+                      <TrendingDown size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
@@ -1132,8 +1292,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <ArrowDownRight size={14} /> of shipped
                   </span>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1.5">
-                  RTO ÷ (All shipped statuses) × 100
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  Returned shipments out of total dispatched orders
                 </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
@@ -1148,23 +1308,42 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
             {/* SECONDARY PARAMETERS GRID: In Transit, OFD, NDR Recovery, Avg TAT */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* In Transit with 0 Attempts callout */}
-              <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+              {/* In Transit */}
+              <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground">In Transit</span>
-                  <Truck size={16} className="text-indigo-500" />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="In Transit Shipments"
+                      formula="In Transit Orders ÷ Total Shipped × 100"
+                      calculation={`${formatNumber(metrics.inTransit.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.inTransit.percent}%`}
+                      explanation="Packages currently en route across regional courier line-hauls and hubs that have not yet had a final delivery attempt or RTO."
+                    />
+                    <Truck size={16} className="text-indigo-500" />
+                  </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
                   <strong className="text-xl font-bold text-foreground">{metrics.inTransit.percent}%</strong>
                   <span className="text-xs text-muted-foreground">({formatNumber(metrics.inTransit.count)} orders)</span>
                 </div>
+                <p className="text-[11px] text-muted-foreground mt-1.5">
+                  Line-haul shipments en route between hubs
+                </p>
               </div>
 
               {/* Out for Delivery % */}
-              <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+              <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground">Out for Delivery</span>
-                  <PackageCheck size={16} className="text-sky-500" />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Out for Delivery (OFD)"
+                      formula="OFD Orders ÷ Total Shipped × 100"
+                      calculation={`${formatNumber(metrics.outForDelivery.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.outForDelivery.percent}%`}
+                      explanation="Parcels that have reached local delivery centers and are dispatched with riders for delivery attempts today."
+                    />
+                    <PackageCheck size={16} className="text-sky-500" />
+                  </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
                   <strong className="text-xl font-bold text-foreground">{metrics.outForDelivery.percent}%</strong>
@@ -1178,10 +1357,18 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </div>
 
               {/* NDR / Undelivered Delivery Percentage (Recovery Rate) */}
-              <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+              <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground">NDR Recovery Delivery %</span>
-                  <Percent size={16} className="text-emerald-500" />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="NDR Recovery Delivery %"
+                      formula="Delivered after NDR ÷ Total NDR Experienced × 100"
+                      calculation={`${formatNumber(metrics.ndrDelivered.count)} ÷ ${formatNumber(metrics.totalNdrExperienced.count)} × 100 = ${metrics.ndrDeliveryRate}%`}
+                      explanation="Success rate of re-attempting and successfully delivering orders that had previously failed delivery (customer unavailable, reschedule, etc.)."
+                    />
+                    <Percent size={16} className="text-emerald-500" />
+                  </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
                   <strong className="text-xl font-bold text-foreground">{metrics.ndrDeliveryRate}%</strong>
@@ -1200,10 +1387,19 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </div>
 
               {/* Avg Time to Deliver (TAT) */}
-              <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+              <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground">Avg Time to Deliver</span>
-                  <Clock size={16} className="text-amber-500" />
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Avg Turnaround Time (TAT)"
+                      formula="Mean of (Delivered Date - Shipped Date)"
+                      calculation={metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} days dispatch to door` : undefined}
+                      explanation="The average duration in days taken from carrier handover to doorstep delivery for completed orders."
+                      notes={`Order creation to delivery average: ${metrics.avgOrderTatDays != null ? `${metrics.avgOrderTatDays} days` : "—"}.`}
+                    />
+                    <Clock size={16} className="text-amber-500" />
+                  </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
                   <strong className="text-xl font-bold text-foreground">
@@ -1373,9 +1569,18 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 {/* Delivery Comparison Cards */}
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <div className="rounded-lg border border-border/80 bg-muted/30 p-3">
-                    <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
-                      COD Delivery %
-                    </span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
+                        COD Delivery %
+                      </span>
+                      <MetricInfoButton
+                        title="COD Delivery %"
+                        formula="COD Delivered ÷ COD Shipped × 100"
+                        calculation={`${formatNumber(metrics.codDelivered)} ÷ ${formatNumber(metrics.codShipped)} × 100 = ${metrics.codDeliveryRate}%`}
+                        explanation="Delivery success percentage specifically for Cash On Delivery (COD) orders."
+                        notes={`Closed delivery rate: ${metrics.codClosedDeliveryRate}%.`}
+                      />
+                    </div>
                     <div className="mt-1 flex items-baseline gap-1.5">
                       <strong className="text-xl font-bold text-foreground">{metrics.codDeliveryRate}%</strong>
                     </div>
@@ -1389,9 +1594,18 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </div>
 
                   <div className="rounded-lg border border-border/80 bg-muted/30 p-3">
-                    <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
-                      Prepaid Delivery %
-                    </span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
+                        Prepaid Delivery %
+                      </span>
+                      <MetricInfoButton
+                        title="Prepaid Delivery %"
+                        formula="Prepaid Delivered ÷ Prepaid Shipped × 100"
+                        calculation={`${formatNumber(metrics.prepaidDelivered)} ÷ ${formatNumber(metrics.prepaidShipped)} × 100 = ${metrics.prepaidDeliveryRate}%`}
+                        explanation="Delivery success percentage specifically for Prepaid orders."
+                        notes={`Closed delivery rate: ${metrics.prepaidClosedDeliveryRate}%.`}
+                      />
+                    </div>
                     <div className="mt-1 flex items-baseline gap-1.5">
                       <strong className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
                         {metrics.prepaidDeliveryRate}%
@@ -1478,7 +1692,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 <div className="overflow-x-auto p-4 space-y-3">
                   <div className="flex items-center justify-between border-b border-border/60 pb-2">
                     <h3 className="text-sm font-bold text-foreground">Delivery % by courier</h3>
-                    <p className="text-xs text-muted-foreground">Delivered ÷ final outcomes; highest-volume couriers first</p>
+                    <p className="text-xs text-muted-foreground">Sorted by highest shipment volume</p>
                   </div>
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-border bg-muted/40 font-semibold text-muted-foreground">

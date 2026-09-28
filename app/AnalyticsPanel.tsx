@@ -233,8 +233,9 @@ function getTodayString() {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-function getPastDateString(daysAgo: number) {
-  const d = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+function getPastDateString(daysCount: number) {
+  // Shiprocket uses inclusive calendar days ending on today (e.g., 30 days is today - 29 days through today)
+  const d = new Date(Date.now() - Math.max(0, daysCount - 1) * 24 * 60 * 60 * 1000);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
     year: "numeric",
@@ -253,7 +254,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   }, [mode]);
 
   const todayStr = useMemo(() => getTodayString(), []);
-  const [datePreset, setDatePreset] = useState<"7d" | "14d" | "30d" | "mtd" | "all" | "custom">("30d");
+  const [datePreset, setDatePreset] = useState<"today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "all" | "custom">("30d");
   const [from, setFrom] = useState(() => getPastDateString(30));
   const [to, setTo] = useState(todayStr);
 
@@ -309,9 +310,16 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   }, [active, activeMode, ofdDate]);
 
   // Handle Preset Change
-  const applyPreset = (preset: "7d" | "14d" | "30d" | "mtd" | "all" | "custom") => {
+  const applyPreset = (preset: "today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "all" | "custom") => {
     setDatePreset(preset);
-    if (preset === "7d") {
+    if (preset === "today") {
+      setFrom(todayStr);
+      setTo(todayStr);
+    } else if (preset === "yesterday") {
+      const yesterday = getPastDateString(2);
+      setFrom(yesterday);
+      setTo(yesterday);
+    } else if (preset === "7d") {
       setFrom(getPastDateString(7));
       setTo(todayStr);
     } else if (preset === "14d") {
@@ -828,6 +836,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
           <div className="flex flex-wrap items-center gap-1.5 p-1 bg-muted rounded-lg border border-border">
             {(
               [
+                { id: "today", label: "Today" },
+                { id: "yesterday", label: "Yesterday" },
                 { id: "7d", label: "7 Days" },
                 { id: "14d", label: "14 Days" },
                 { id: "30d", label: "30 Days" },

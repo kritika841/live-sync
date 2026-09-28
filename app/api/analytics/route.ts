@@ -170,81 +170,86 @@ async function handleGET(request: Request) {
     const requestedDate = url.searchParams.get("date") || currentIndiaDate;
     const selectedDate =
       isoDate.test(requestedDate) && requestedDate <= currentIndiaDate ? requestedDate : currentIndiaDate;
-    const history = await runtime.DB.prepare(
-      "SELECT key,value FROM sync_state WHERE key IN ('tracking_history_status','tracking_history_last_sync_at')"
-    ).all<{ key: string; value: string }>();
-    const historyState = Object.fromEntries(history.results.map((r) => [r.key, r.value]));
-    const trackingHistory = {
-      status: historyState.tracking_history_status || "pending",
-      lastSyncAt: historyState.tracking_history_last_sync_at || "",
-      cached: true,
-    };
-    const rows = await loadOfdRecords(runtime.DB, selectedDate);
-    const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> =
-      rows.results.map((row) => {
-        let status = String(row.latestKnownStatus || "");
-        if ((!status || isOpenDeliveryStatus(status)) && indiaDateFromValue(row.deliveredAt) === selectedDate)
-          status = "DELIVERED";
-        if (!status && indiaDateFromValue(row.ndrRaisedAt) === selectedDate) status = "UNDELIVERED";
-        if (!status) status = selectedDate === currentIndiaDate ? String(row.status || "") : "UNRESOLVED AFTER OFD";
-        if (selectedDate < currentIndiaDate && isOpenDeliveryStatus(status)) status = "UNRESOLVED AFTER OFD";
-        let attemptNumber = Number(row.attemptNumber || 0);
-        if (!attemptNumber) {
-          const firstOfdDate = indiaDateFromValue(row.firstOutForDeliveryAt);
-          const latestOfdDate = indiaDateFromValue(row.outForDeliveryAt);
-          if (firstOfdDate && firstOfdDate === selectedDate) {
-            attemptNumber = 1;
-          } else if (latestOfdDate && latestOfdDate === selectedDate && firstOfdDate && firstOfdDate !== selectedDate) {
-            const ndrAtt = Number(row.ndrAttempts || 0);
-            attemptNumber = Math.max(2, ndrAtt + (statusBucket(status) === "undelivered" ? 0 : 1));
-          } else {
-            attemptNumber = 1;
+
+    const payload = await cachedValue(`analytics-today-ofd-${selectedDate}`, 60000, async () => {
+      const history = await runtime.DB.prepare(
+        "SELECT key,value FROM sync_state WHERE key IN ('tracking_history_status','tracking_history_last_sync_at')"
+      ).all<{ key: string; value: string }>();
+      const historyState = Object.fromEntries(history.results.map((r) => [r.key, r.value]));
+      const trackingHistory = {
+        status: historyState.tracking_history_status || "pending",
+        lastSyncAt: historyState.tracking_history_last_sync_at || "",
+        cached: true,
+      };
+      const rows = await loadOfdRecords(runtime.DB, selectedDate);
+      const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> =
+        rows.results.map((row) => {
+          let status = String(row.latestKnownStatus || "");
+          if ((!status || isOpenDeliveryStatus(status)) && indiaDateFromValue(row.deliveredAt) === selectedDate)
+            status = "DELIVERED";
+          if (!status && indiaDateFromValue(row.ndrRaisedAt) === selectedDate) status = "UNDELIVERED";
+          if (!status) status = selectedDate === currentIndiaDate ? String(row.status || "") : "UNRESOLVED AFTER OFD";
+          if (selectedDate < currentIndiaDate && isOpenDeliveryStatus(status)) status = "UNRESOLVED AFTER OFD";
+          let attemptNumber = Number(row.attemptNumber || 0);
+          if (!attemptNumber) {
+            const firstOfdDate = indiaDateFromValue(row.firstOutForDeliveryAt);
+            const latestOfdDate = indiaDateFromValue(row.outForDeliveryAt);
+            if (firstOfdDate && firstOfdDate === selectedDate) {
+              attemptNumber = 1;
+            } else if (latestOfdDate && latestOfdDate === selectedDate && firstOfdDate && firstOfdDate !== selectedDate) {
+              const ndrAtt = Number(row.ndrAttempts || 0);
+              attemptNumber = Math.max(2, ndrAtt + (statusBucket(status) === "undelivered" ? 0 : 1));
+            } else {
+              attemptNumber = 1;
+            }
           }
-        }
-        return {
-          ...row,
-          status,
-          latestKnownStatus: undefined,
-          attemptNumber: Math.max(1, attemptNumber),
-          attemptBasis: "recorded_ofd_days",
-          previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
-        };
-      });
-    const total = orders.length;
-    const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, unresolved: 0, rto: 0, other: 0 };
-    const attemptCounts = { first: 0, second: 0, third: 0, later: 0, unknown: 0 };
-    for (const order of orders) {
-      const bucket = statusBucket(order.status);
-      bucketCounts[bucket] += 1;
-      const attempt = Number(order.attemptNumber);
-      if (!attempt) attemptCounts.unknown += 1;
-      else if (attempt === 1) attemptCounts.first += 1;
-      else if (attempt === 2) attemptCounts.second += 1;
-      else if (attempt === 3) attemptCounts.third += 1;
-      else attemptCounts.later += 1;
-    }
-    const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
-    return Response.json({
-      date: selectedDate,
-      metrics: {
-        total: metric(total, total),
-        delivered: metric(bucketCounts.delivered, total),
-        undelivered: metric(bucketCounts.undelivered, total),
-        stillOut: metric(bucketCounts.stillOut, total),
-        unresolved: metric(bucketCounts.unresolved, total),
-        firstAttemptOFD: metric(attemptCounts.first, total),
-        secondAttemptOFD: metric(attemptCounts.second, total),
-        unknownAttemptOFD: metric(attemptCounts.unknown, total),
-        thirdAttemptOFD: metric(attemptCounts.third, total),
-        laterAttemptOFD: metric(attemptCounts.later, total),
-        previousUndelivered: metric(previousUndelivered, total),
-        rto: metric(bucketCounts.rto, total),
-        other: metric(bucketCounts.other, total),
-      },
-      attemptBasis: "Recorded OFD days; courier attempt ordinals are not verified",
-      trackingHistory,
-      orders,
+          return {
+            ...row,
+            status,
+            latestKnownStatus: undefined,
+            attemptNumber: Math.max(1, attemptNumber),
+            attemptBasis: "recorded_ofd_days",
+            previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
+          };
+        });
+      const total = orders.length;
+      const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, unresolved: 0, rto: 0, other: 0 };
+      const attemptCounts = { first: 0, second: 0, third: 0, later: 0, unknown: 0 };
+      for (const order of orders) {
+        const bucket = statusBucket(order.status);
+        bucketCounts[bucket] += 1;
+        const attempt = Number(order.attemptNumber);
+        if (!attempt) attemptCounts.unknown += 1;
+        else if (attempt === 1) attemptCounts.first += 1;
+        else if (attempt === 2) attemptCounts.second += 1;
+        else if (attempt === 3) attemptCounts.third += 1;
+        else attemptCounts.later += 1;
+      }
+      const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
+      return {
+        date: selectedDate,
+        metrics: {
+          total: metric(total, total),
+          delivered: metric(bucketCounts.delivered, total),
+          undelivered: metric(bucketCounts.undelivered, total),
+          stillOut: metric(bucketCounts.stillOut, total),
+          unresolved: metric(bucketCounts.unresolved, total),
+          firstAttemptOFD: metric(attemptCounts.first, total),
+          secondAttemptOFD: metric(attemptCounts.second, total),
+          unknownAttemptOFD: metric(attemptCounts.unknown, total),
+          thirdAttemptOFD: metric(attemptCounts.third, total),
+          laterAttemptOFD: metric(attemptCounts.later, total),
+          previousUndelivered: metric(previousUndelivered, total),
+          rto: metric(bucketCounts.rto, total),
+          other: metric(bucketCounts.other, total),
+        },
+        attemptBasis: "Recorded OFD days; courier attempt ordinals are not verified",
+        trackingHistory,
+        orders,
+      };
     });
+
+    return Response.json(payload);
   }
 
   const filters: string[] = [];

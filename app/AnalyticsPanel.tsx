@@ -363,11 +363,11 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   }
 
   useEffect(() => {
-    if (active) {
+    if (active && activeMode === "overview") {
       void fetchAnalytics();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, queryParams]);
+  }, [active, activeMode, queryParams]);
 
   const metrics = data?.metrics;
 

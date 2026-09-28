@@ -1,21 +1,29 @@
 import type { PostgresDatabase } from "./database";
+
 const ndrSql = "(UPPER(TRIM(status)) IN ('UNDELIVERED', 'NDR', 'NDR PENDING') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%')";
-const indiaDateSql = (column: string) => `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
-const latestOfdDateSql=indiaDateSql("out_for_delivery_at");
-const firstOfdDateSql=indiaDateSql("first_out_for_delivery_at");
-export async function loadOfdRecords(db:PostgresDatabase,selectedDate:string){
-  return db.prepare(`
-      WITH matching_events AS (
-        SELECT orders.id AS order_id,
+const indiaDateSql = (column: string) =>
+  `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
+const latestOfdDateSql = indiaDateSql("out_for_delivery_at");
+const firstOfdDateSql = indiaDateSql("first_out_for_delivery_at");
+
+export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string) {
+  return db
+    .prepare(
+      `
+      WITH event_orders AS (
+        SELECT o.id AS order_id, e.id AS event_id FROM orders o JOIN webhook_events e ON e.shiprocket_order_id = o.id
+        UNION
+        SELECT o.id, e.id FROM orders o JOIN webhook_events e ON e.shipment_id = o.shipment_id
+        UNION
+        SELECT o.id, e.id FROM orders o JOIN webhook_events e ON e.awb = o.awb WHERE e.awb <> ''
+        UNION
+        SELECT o.id, e.id FROM orders o JOIN webhook_events e ON e.channel_order_id = o.channel_order_id WHERE e.channel_order_id <> ''
+      ), matching_events AS (
+        SELECT matched.order_id,
           COALESCE(NULLIF(events.event_at, ''), events.received_at) AS ofd_at,
           TO_CHAR(COALESCE(NULLIF(events.event_at, ''), events.received_at)::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS event_date,
           events.status
-        FROM orders
-        JOIN webhook_events events ON
-          (events.shiprocket_order_id IS NOT NULL AND events.shiprocket_order_id = orders.id)
-          OR (events.shipment_id IS NOT NULL AND events.shipment_id = orders.shipment_id)
-          OR (events.awb IS NOT NULL AND events.awb != '' AND events.awb = orders.awb)
-          OR (events.channel_order_id IS NOT NULL AND events.channel_order_id = orders.channel_order_id)
+        FROM event_orders matched JOIN webhook_events events ON events.id = matched.event_id
       ), matching_ofd_events AS (
         SELECT order_id, ofd_at, event_date AS ofd_date
         FROM matching_events
@@ -32,12 +40,15 @@ export async function loadOfdRecords(db:PostgresDatabase,selectedDate:string){
             CASE WHEN ${firstOfdDateSql} = ? THEN first_out_for_delivery_at END
           ) AS selected_ofd_at,
           NULLIF((SELECT COUNT(*) FROM deduped_ofd_days previous
-            WHERE previous.order_id = orders.id AND previous.ofd_date <= ?),0)::integer AS attempt_number,
+            WHERE previous.order_id = orders.id AND previous.ofd_date <= ?), 0)::integer AS attempt_number,
           EXISTS(SELECT 1 FROM matching_events failed
-            WHERE failed.order_id=orders.id AND failed.event_date < ? AND (${ndrSql})) AS previous_undelivered
+            WHERE failed.order_id = orders.id AND failed.event_date < ? AND (${ndrSql})) AS previous_undelivered
         FROM orders
         LEFT JOIN deduped_ofd_days selected_event
           ON selected_event.order_id = orders.id AND selected_event.ofd_date = ?
+        WHERE selected_event.ofd_at IS NOT NULL
+           OR ${latestOfdDateSql} = ?
+           OR ${firstOfdDateSql} = ?
       )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
         customer_city AS customerCity, customer_state AS customerState, selected_orders.status,
@@ -55,5 +66,17 @@ export async function loadOfdRecords(db:PostgresDatabase,selectedDate:string){
       FROM selected_orders
       WHERE selected_ofd_at IS NOT NULL AND selected_ofd_at != ''
       ORDER BY selected_ofd_at DESC, id DESC
-    `).bind(selectedDate, selectedDate, selectedDate, selectedDate, selectedDate, selectedDate).all<Record<string, unknown>>();
+    `
+    )
+    .bind(
+      selectedDate,
+      selectedDate,
+      selectedDate,
+      selectedDate,
+      selectedDate,
+      selectedDate,
+      selectedDate,
+      selectedDate
+    )
+    .all<Record<string, unknown>>();
 }

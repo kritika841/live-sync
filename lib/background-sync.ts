@@ -20,7 +20,9 @@ export function startBackgroundSync() {
     try {
       const runtime = getRuntimeEnv();
       const res = await syncRecentOrders(runtime);
-      invalidateCache();
+      invalidateCache("order-grouped-counts-30");
+      invalidateCache("order-grouped-counts-60");
+      invalidateCache("order-grouped-counts-90");
       if (process.env.NODE_ENV !== "production") {
         console.log(`[background-sync] Periodic 1m sync completed at ${new Date().toISOString()}:`, res);
       }

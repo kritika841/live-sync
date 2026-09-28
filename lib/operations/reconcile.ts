@@ -59,7 +59,11 @@ export async function reconcileInventory(orderIds?: number[]) {
     }
   }
 }
+let reconcileRunning = false;
+
 export async function reconcileInventorySafely(orderIds?: number[]) {
+  if (reconcileRunning) return;
+  reconcileRunning = true;
   try {
     await reconcileInventory(orderIds);
   } catch {
@@ -71,5 +75,7 @@ export async function reconcileInventorySafely(orderIds?: number[]) {
       {},
       "error",
     ).catch(() => {});
+  } finally {
+    reconcileRunning = false;
   }
 }

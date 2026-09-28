@@ -446,10 +446,15 @@ async function handleGET(request: Request) {
           COUNT(DISTINCT o.id) FILTER (WHERE ${deliveredSql.replaceAll("status", "o.status")}) AS delivered,
           COUNT(DISTINCT o.id) FILTER (WHERE ${rtoSql.replaceAll("status", "o.status")}) AS rto,
           COUNT(DISTINCT o.id) FILTER (WHERE ${openPopulationSql.replaceAll("status", "o.status")}) AS shipped
-        FROM orders o,
+        FROM (
+          SELECT id, status, products_json
+          FROM orders o
+          WHERE ${whereO}
+          ORDER BY COALESCE(NULLIF(order_date, ''), created_at) DESC
+          LIMIT 5000
+        ) o,
         jsonb_array_elements(CASE WHEN o.products_json LIKE '[%' THEN o.products_json::jsonb ELSE '[]'::jsonb END) elem
-        WHERE ${whereO}
-          AND elem->>'name' IS NOT NULL AND elem->>'name' != ''
+        WHERE elem->>'name' IS NOT NULL AND elem->>'name' != ''
         GROUP BY name
         ORDER BY order_count DESC
         LIMIT 20

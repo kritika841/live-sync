@@ -168,7 +168,7 @@ export class PostgresDatabase {
       onnotice: () => {},
       // Supabase transaction pooling + Vercel functions: one client
       // connection per warm function instance avoids exhausting the pool.
-      max: 7,
+      max: 6,
       max_pipeline: 1, // Disable pipelining to prevent hangs over PgBouncer transaction mode
       idle_timeout: 10, // Release idle connection back to pool promptly
       max_lifetime: 60, // Regularly recycle connections to prevent stale pooled sockets

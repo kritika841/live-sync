@@ -144,12 +144,26 @@ export class PostgresDatabase {
   private reconnecting: Promise<void> | undefined;
   private lastLiveCheck = 0;
 
+  private activeConnectionString: string;
+
   constructor(private readonly connectionString: string) {
+    this.activeConnectionString = connectionString;
     this.connect();
   }
 
-  private connect() {
-    this.sql = postgres(this.connectionString, {
+  private connect(useDirectPort = false) {
+    let connStr = this.activeConnectionString;
+    if (useDirectPort) {
+      try {
+        const u = new URL(connStr);
+        if (u.port === "6543") {
+          u.port = "5432";
+          connStr = u.toString();
+          this.activeConnectionString = connStr;
+        }
+      } catch {}
+    }
+    this.sql = postgres(connStr, {
       prepare: false,
       onnotice: () => {},
       // Supabase transaction pooling + Vercel functions: one client
@@ -191,6 +205,11 @@ export class PostgresDatabase {
       return normalizeRows(await run(active));
     } catch (error) {
       const code = (error as { code?: string }).code;
+      const msg = String((error as Error)?.message || "");
+      if (code === "XX000" && (msg.includes("EMAXCONN") || msg.includes("max client connections reached"))) {
+        this.connect(true);
+        return normalizeRows(await run(this.sql));
+      }
       // Retrying reads is safe and lets a warm serverless instance recover
       // from a pooler-side reset without showing a dashboard error. Writes
       // are deliberately not retried: their result can be ambiguous.
@@ -208,7 +227,13 @@ export class PostgresDatabase {
     ]);
     try {
       await preflight();
-    } catch {
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      const msg = String((error as Error)?.message || "");
+      if (code === "XX000" && (msg.includes("EMAXCONN") || msg.includes("max client connections reached"))) {
+        this.connect(true);
+        return;
+      }
       // A frozen serverless instance can retain a socket that Supabase's
       // pooler has already dropped. Recycle it before serving the request.
       await this.replaceClient(active);

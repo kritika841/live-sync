@@ -17,10 +17,13 @@ import {
   SlidersHorizontal,
   UsersRound,
   X,
+  BarChart3,
+  Truck,
 } from "lucide-react";
 import { statusTab } from "../lib/order-status";
 import DateRangePicker from "./DateRangePicker";
 import ConfirmationPanel from "./ConfirmationPanel";
+import AnalyticsPanel from "./AnalyticsPanel";
 import SettingsPanel from "./SettingsPanel";
 import CopiedLogsPanel from "./CopiedLogsPanel";
 import AccountMenu from "./AccountMenu";
@@ -170,7 +173,7 @@ export default function OrdersDashboard({
   isAdmin: boolean;
   preview?: boolean;
 }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "logs" | "settings" | "copied_logs">("orders");
+  const [view, setView] = useState<"orders" | "confirmation" | "analytics" | "today_ofd" | "logs" | "settings" | "copied_logs">("orders");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
@@ -659,6 +662,8 @@ export default function OrdersDashboard({
   const viewCopy = {
     orders: { eyebrow: "Order management", title: "Orders" },
     confirmation: { eyebrow: "Customer verification", title: "Confirmation" },
+    analytics: { eyebrow: "Performance insights", title: "Analytics" },
+    today_ofd: { eyebrow: "Delivery operations", title: "Today’s OFD" },
     logs: { eyebrow: "Live activity", title: "Activity log" },
     copied_logs: { eyebrow: "Copy tracking", title: "Copied logs" },
     settings: { eyebrow: "System preferences", title: "Settings" },
@@ -725,6 +730,34 @@ export default function OrdersDashboard({
                   <div className="flex items-center gap-3 min-w-0">
                     <PhoneCall size={18} className={view === "confirmation" ? "text-primary" : "text-muted-foreground"} />
                     <span className="truncate">Confirmation</span>
+                  </div>
+                </button>
+                <button
+                  title="Analytics"
+                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                    view === "analytics"
+                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                  onClick={() => setView("analytics")}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <BarChart3 size={18} className={view === "analytics" ? "text-primary" : "text-muted-foreground"} />
+                    <span className="truncate">Analytics</span>
+                  </div>
+                </button>
+                <button
+                  title="Today’s OFD"
+                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                    view === "today_ofd"
+                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                  onClick={() => setView("today_ofd")}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Truck size={18} className={view === "today_ofd" ? "text-primary" : "text-muted-foreground"} />
+                    <span className="truncate">Today’s OFD</span>
                   </div>
                 </button>
                 <button
@@ -869,6 +902,30 @@ export default function OrdersDashboard({
                 >
                   <PhoneCall size={17} />
                   <span>Confirmation</span>
+                </button>
+                <button
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                    view === "analytics" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                  }`}
+                  onClick={() => {
+                    setView("analytics");
+                    setMobileNavOpen(false);
+                  }}
+                >
+                  <BarChart3 size={17} />
+                  <span>Analytics</span>
+                </button>
+                <button
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                    view === "today_ofd" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                  }`}
+                  onClick={() => {
+                    setView("today_ofd");
+                    setMobileNavOpen(false);
+                  }}
+                >
+                  <Truck size={17} />
+                  <span>Today’s OFD</span>
                 </button>
                 <button
                   className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
@@ -1683,6 +1740,14 @@ export default function OrdersDashboard({
 
           {/* CONFIRMATION PANEL */}
           <ConfirmationPanel active={view === "confirmation"} preview={preview} isAdmin={isAdmin} />
+
+          {/* ANALYTICS & TODAY'S OFD PANEL */}
+          <AnalyticsPanel
+            active={view === "analytics" || view === "today_ofd"}
+            mode={view === "today_ofd" ? "today_ofd" : "overview"}
+            preview={preview}
+            isAdmin={isAdmin}
+          />
 
           {/* SETTINGS PANEL */}
           <SettingsPanel

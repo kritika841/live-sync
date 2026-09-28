@@ -43,12 +43,18 @@ function normalizeDate(str: string): string {
   return s;
 }
 
+function getLatestReportFile(): string {
+  const dir = "report";
+  if (!fs.existsSync(dir)) throw new Error(`Directory ${dir} not found`);
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".csv"));
+  if (!files.length) throw new Error("No report file found in report/");
+  files.sort((a, b) => fs.statSync(`${dir}/${b}`).mtimeMs - fs.statSync(`${dir}/${a}`).mtimeMs);
+  return `${dir}/${files[0]}`;
+}
+
 export async function reconcileSourceOfTruth() {
-  console.log("=== STARTING RECONCILIATION FROM SOURCE OF TRUTH CSV ===");
-  const csvPath = "report/secure_9341191_reports_1790575633890111120-c7b025a55516361c509e389fc7ca23ca-.csv";
-  if (!fs.existsSync(csvPath)) {
-    throw new Error(`CSV not found at: ${csvPath}`);
-  }
+  const csvPath = getLatestReportFile();
+  console.log(`=== STARTING RECONCILIATION FROM SOURCE OF TRUTH CSV: ${csvPath} ===`);
 
   const fileStream = fs.createReadStream(csvPath, { encoding: "utf-8" });
   const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });

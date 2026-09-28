@@ -33,7 +33,7 @@ export function startBackgroundSync() {
     }
   };
 
-  // Run initial sync after 3 seconds, then every 60 seconds (1 minute)
+  // Run initial sync after 3 seconds, then every 60 seconds (1 minute) for recent orders
   const initialTimeout = setTimeout(() => {
     void runSync();
   }, 3000);
@@ -42,9 +42,36 @@ export function startBackgroundSync() {
     void runSync();
   }, 60000);
 
+  // 30-minute comprehensive sync to refresh logistics statuses and precompute cache
+  const run30mSync = async () => {
+    try {
+      const runtime = getRuntimeEnv();
+      const { syncShiprocketOrders } = await import("./shiprocket");
+      const { loadOfdRecords } = await import("./ofd");
+      console.log(`[background-sync] Running scheduled 30m comprehensive sync...`);
+      await syncShiprocketOrders(runtime, "incremental", "daemon-30m");
+      const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+      await loadOfdRecords(runtime.DB, todayStr);
+      console.log(`[background-sync] 30m sync completed and cache refreshed.`);
+    } catch (err) {
+      console.error("[background-sync] 30m sync error:", err instanceof Error ? err.message : err);
+    }
+  };
+
+  // Run first 30m sync after 20 seconds, then every 30 minutes
+  const initial30mTimeout = setTimeout(() => {
+    void run30mSync();
+  }, 20000);
+
+  const timer30m = setInterval(() => {
+    void run30mSync();
+  }, 30 * 60 * 1000);
+
   // Avoid keeping test runners alive
   if (initialTimeout.unref) initialTimeout.unref();
+  if (initial30mTimeout.unref) initial30mTimeout.unref();
   if (globalThis.__satmi_background_sync_timer.unref) globalThis.__satmi_background_sync_timer.unref();
+  if (timer30m.unref) timer30m.unref();
 
-  console.log(`[background-sync] Live order sync daemon initialized (every 60s).`);
+  console.log(`[background-sync] Live order sync daemon initialized (every 60s & 30m).`);
 }

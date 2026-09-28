@@ -650,9 +650,12 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
   const db = runtime.DB;
   await ensureSchema(db);
   const lease = new Date(Date.now() + 90000).toISOString();
-  const acquired = await db.prepare(`INSERT INTO sync_state (key,value,updated_at) VALUES ('fast_sync_lease',?,?)
-    ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at
-    WHERE sync_state.value < ? RETURNING key`).bind(lease,new Date().toISOString(),new Date().toISOString()).all();
+  const acquired = await db.prepare(`
+    INSERT INTO sync_state (key, value, updated_at) VALUES ('fast_sync_lease', ?, NOW()::text)
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()::text
+    WHERE sync_state.value < ? OR sync_state.updated_at::timestamptz < NOW() - INTERVAL '2 minutes'
+    RETURNING key
+  `).bind(lease, new Date().toISOString()).all();
   if (!acquired.results.length) return { skipped: true, reason: "Already running" };
   try {
     const state = await db.prepare("SELECT key,value FROM sync_state WHERE key IN ('fast_sync_cursor','fast_sync_from','last_sync_at')").all<{key:string;value:string}>();

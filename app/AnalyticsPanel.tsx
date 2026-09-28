@@ -1507,23 +1507,29 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                             {formatNumber(c.delivered)}
                           </td>
                           <td className="py-3 px-4 text-right">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                c.deliveryRate >= 70
-                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : c.deliveryRate >= 50
-                                  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                  : "bg-destructive/10 text-destructive"
-                              }`}
-                            >
-                              {c.deliveryRate}%
-                            </span>
+                            {c.shipped === 0 ? (
+                              <span className="text-muted-foreground font-mono">—</span>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                                  c.deliveryRate >= 70
+                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                    : c.deliveryRate >= 50
+                                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                    : "bg-destructive/10 text-destructive"
+                                }`}
+                              >
+                                {c.deliveryRate}%
+                              </span>
+                            )}
                           </td>
                           <td className="py-3 px-4 text-right text-muted-foreground font-medium">
-                            {c.closedDeliveryRate}%
+                            {c.closed === 0 ? "—" : `${c.closedDeliveryRate}%`}
                           </td>
                           <td className="py-3 px-4 text-right text-destructive">{formatNumber(c.rto)}</td>
-                          <td className="py-3 px-4 text-right font-medium text-destructive">{c.rtoRate}%</td>
+                          <td className="py-3 px-4 text-right font-medium text-destructive">
+                            {c.shipped === 0 ? "—" : `${c.rtoRate}%`}
+                          </td>
                           <td className="py-3 px-4 text-right text-foreground font-mono">
                             {c.avgTatDays != null ? `${c.avgTatDays} d` : "—"}
                           </td>
@@ -1543,64 +1549,81 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
               {/* 2. DATE-WISE TREND % */}
               {activeTab === "dates" && (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-border bg-muted/40 font-semibold text-muted-foreground">
-                      <tr>
-                        <th className="py-3 px-4">Date</th>
-                        <th className="py-3 px-4 text-right">Orders</th>
-                        <th className="py-3 px-4 text-right">Shipped</th>
-                        <th className="py-3 px-4 text-right">Delivered</th>
-                        <th className="py-3 px-4 text-right">Delivery %</th>
-                        <th className="py-3 px-4 text-right">RTO Count</th>
-                        <th className="py-3 px-4 text-right">RTO %</th>
-                        <th className="py-3 px-4 text-right">NDR</th>
-                        <th className="py-3 px-4 text-right">In Transit</th>
-                        <th className="py-3 px-4 text-right">OFD</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border">
-                      {filteredDates.map((d) => (
-                        <tr key={d.date} className="hover:bg-muted/30 transition">
-                          <td className="py-3 px-4 font-mono font-medium text-foreground">{formatDate(d.date)}</td>
-                          <td className="py-3 px-4 text-right text-muted-foreground">{formatNumber(d.total)}</td>
-                          <td className="py-3 px-4 text-right text-foreground font-medium">{formatNumber(d.shipped)}</td>
-                          <td className="py-3 px-4 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
-                            {formatNumber(d.delivered)}
-                          </td>
-                          <td className="py-3 px-4 text-right">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                d.deliveryRate >= 70
-                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : d.deliveryRate >= 50
-                                  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                  : "bg-destructive/10 text-destructive"
-                              }`}
-                            >
-                              {d.deliveryRate}%
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-right text-destructive">{formatNumber(d.rto)}</td>
-                          <td className="py-3 px-4 text-right text-destructive font-medium">{d.rtoRate}%</td>
-                          <td className="py-3 px-4 text-right text-amber-600 dark:text-amber-400">{formatNumber(d.ndr)}</td>
-                          <td className="py-3 px-4 text-right text-indigo-600 dark:text-indigo-400 font-medium">
-                            {formatNumber(d.inTransit)}
-                          </td>
-                          <td className="py-3 px-4 text-right text-sky-600 dark:text-sky-400 font-medium">
-                            {formatNumber(d.outForDelivery)}
-                          </td>
-                        </tr>
-                      ))}
-                      {filteredDates.length === 0 && (
+                <div>
+                  <div className="p-3 bg-muted/30 border-b border-border text-xs text-muted-foreground">
+                    <strong className="text-foreground">Order Cohort Maturation:</strong> Each row tracks orders placed on that calendar date. Recent orders (0–2 days old) are in fulfillment & line-haul transit, maturing into deliveries over 2–4 days.
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-border bg-muted/40 font-semibold text-muted-foreground">
                         <tr>
-                          <td colSpan={10} className="py-8 text-center text-xs text-muted-foreground">
-                            No date rows found for the selected range.
-                          </td>
+                          <th className="py-3 px-4">Order Date (Cohort)</th>
+                          <th className="py-3 px-4 text-right">Orders</th>
+                          <th className="py-3 px-4 text-right">Shipped</th>
+                          <th className="py-3 px-4 text-right">Delivered</th>
+                          <th className="py-3 px-4 text-right">Delivery %</th>
+                          <th className="py-3 px-4 text-right">RTO Count</th>
+                          <th className="py-3 px-4 text-right">RTO %</th>
+                          <th className="py-3 px-4 text-right">NDR</th>
+                          <th className="py-3 px-4 text-right">In Transit</th>
+                          <th className="py-3 px-4 text-right">OFD</th>
                         </tr>
-                      )}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {filteredDates.map((d) => (
+                          <tr key={d.date} className="hover:bg-muted/30 transition">
+                            <td className="py-3 px-4 font-mono font-medium text-foreground">{formatDate(d.date)}</td>
+                            <td className="py-3 px-4 text-right text-muted-foreground">{formatNumber(d.total)}</td>
+                            <td className="py-3 px-4 text-right text-foreground font-medium">{formatNumber(d.shipped)}</td>
+                            <td className="py-3 px-4 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
+                              {formatNumber(d.delivered)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              {d.shipped === 0 ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-muted text-muted-foreground">
+                                  Unfulfilled
+                                </span>
+                              ) : d.delivered === 0 ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                                  In Transit
+                                </span>
+                              ) : (
+                                <span
+                                  className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                                    d.deliveryRate >= 70
+                                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                      : d.deliveryRate >= 50
+                                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                      : "bg-destructive/10 text-destructive"
+                                  }`}
+                                >
+                                  {d.deliveryRate}%
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right text-destructive">{formatNumber(d.rto)}</td>
+                            <td className="py-3 px-4 text-right text-destructive font-medium">
+                              {d.shipped === 0 ? "—" : `${d.rtoRate}%`}
+                            </td>
+                            <td className="py-3 px-4 text-right text-amber-600 dark:text-amber-400">{formatNumber(d.ndr)}</td>
+                            <td className="py-3 px-4 text-right text-indigo-600 dark:text-indigo-400 font-medium">
+                              {formatNumber(d.inTransit)}
+                            </td>
+                            <td className="py-3 px-4 text-right text-sky-600 dark:text-sky-400 font-medium">
+                              {formatNumber(d.outForDelivery)}
+                            </td>
+                          </tr>
+                        ))}
+                        {filteredDates.length === 0 && (
+                          <tr>
+                            <td colSpan={10} className="py-8 text-center text-xs text-muted-foreground">
+                              No date rows found for the selected range.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -1633,23 +1656,29 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                             {formatNumber(s.delivered)}
                           </td>
                           <td className="py-3 px-4 text-right">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                s.deliveryRate >= 70
-                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : s.deliveryRate >= 50
-                                  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                  : "bg-destructive/10 text-destructive"
-                              }`}
-                            >
-                              {s.deliveryRate}%
-                            </span>
+                            {s.shipped === 0 ? (
+                              <span className="text-muted-foreground font-mono">—</span>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                                  s.deliveryRate >= 70
+                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                    : s.deliveryRate >= 50
+                                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                    : "bg-destructive/10 text-destructive"
+                                }`}
+                              >
+                                {s.deliveryRate}%
+                              </span>
+                            )}
                           </td>
                           <td className="py-3 px-4 text-right text-muted-foreground font-medium">
-                            {s.closedDeliveryRate}%
+                            {s.closed === 0 ? "—" : `${s.closedDeliveryRate}%`}
                           </td>
                           <td className="py-3 px-4 text-right text-destructive">{formatNumber(s.rto)}</td>
-                          <td className="py-3 px-4 text-right text-destructive font-medium">{s.rtoRate}%</td>
+                          <td className="py-3 px-4 text-right text-destructive font-medium">
+                            {s.shipped === 0 ? "—" : `${s.rtoRate}%`}
+                          </td>
                         </tr>
                       ))}
                       {filteredStates.length === 0 && (
@@ -1732,20 +1761,24 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                             {formatNumber(p.delivered)}
                           </td>
                           <td className="py-3 px-4 text-right">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                p.deliveryRate >= 70
-                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : p.deliveryRate >= 50
-                                  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                                  : "bg-destructive/10 text-destructive"
-                              }`}
-                            >
-                              {p.deliveryRate}%
-                            </span>
+                            {p.shipped === 0 ? (
+                              <span className="text-muted-foreground font-mono">—</span>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                                  p.deliveryRate >= 70
+                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                    : p.deliveryRate >= 50
+                                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                    : "bg-destructive/10 text-destructive"
+                                }`}
+                              >
+                                {p.deliveryRate}%
+                              </span>
+                            )}
                           </td>
                           <td className="py-3 px-4 text-right text-muted-foreground font-medium">
-                            {p.closedDeliveryRate}%
+                            {p.shipped === 0 || p.delivered + p.rto === 0 ? "—" : `${p.closedDeliveryRate}%`}
                           </td>
                           <td className="py-3 px-4 text-right text-destructive font-medium">{formatNumber(p.rto)}</td>
                         </tr>

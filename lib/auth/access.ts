@@ -27,9 +27,14 @@ export function isAdmin(user: { role?: unknown }) {
 
 export async function currentDashboardUser(): Promise<DashboardUser | null> {
   try {
-    const supabase = await createSupabaseServerClient();
-    const { data } = await supabase.auth.getUser();
-    if (data.user) return dashboardUser(data.user);
+    const { cookies } = await import("next/headers");
+    const cookieStore = await cookies();
+    const hasAuthCookie = cookieStore.getAll().some((c) => c.name.includes("-auth-token") || c.name.startsWith("sb-"));
+    if (hasAuthCookie) {
+      const supabase = await createSupabaseServerClient();
+      const { data } = await supabase.auth.getUser();
+      if (data.user) return dashboardUser(data.user);
+    }
   } catch {}
   if (process.env.NODE_ENV === "development") {
     return {

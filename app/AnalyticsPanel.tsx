@@ -280,12 +280,12 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   const [ofdLoading, setOfdLoading] = useState(false);
   const [ofdError, setOfdError] = useState("");
 
-  async function fetchOfd() {
+  async function fetchOfd(refresh = false) {
     if (preview) return;
     setOfdLoading(true);
     setOfdError("");
     try {
-      const res = await fetch(`/api/analytics?mode=today_ofd&date=${ofdDate}`, {
+      const res = await fetch(`/api/analytics?mode=today_ofd&date=${ofdDate}${refresh ? "&refresh=1" : ""}`, {
         cache: "no-store",
         headers: { "x-requested-with": "satmi-analytics" },
       });
@@ -348,12 +348,12 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
     return params.toString();
   }, [from, to, courier, payment, state]);
 
-  async function fetchAnalytics() {
+  async function fetchAnalytics(refresh = false) {
     if (preview) return;
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/analytics?${queryParams}`, {
+      const res = await fetch(`/api/analytics?${queryParams}${refresh ? "&refresh=1" : ""}`, {
         cache: "no-store",
         headers: { "x-requested-with": "satmi-analytics" },
       });
@@ -471,7 +471,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
               <button
                 type="button"
-                onClick={() => void fetchOfd()}
+                onClick={() => void fetchOfd(true)}
                 disabled={ofdLoading}
                 className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-xs disabled:opacity-50"
                 title="Refresh OFD Activity"
@@ -819,7 +819,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
             <button
               type="button"
-              onClick={() => void fetchAnalytics()}
+              onClick={() => void fetchAnalytics(true)}
               disabled={loading}
               className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-xs disabled:opacity-50"
               title="Refresh Analytics"

@@ -25,23 +25,11 @@ const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), cre
 
 const orderAttemptNumberSql = `(
   CASE
-    WHEN ndr_attempts >= 3 THEN 4
-    WHEN ndr_attempts = 2 THEN 3
-    WHEN LENGTH(first_out_for_delivery_at) >= 10 AND LENGTH(out_for_delivery_at) >= 10 THEN
-      CASE
-        WHEN SUBSTR(first_out_for_delivery_at, 1, 10) = SUBSTR(out_for_delivery_at, 1, 10) THEN
-          CASE
-            WHEN ndr_attempts = 1 OR ndr_raised_at != '' OR ndr_reason != '' THEN 2
-            ELSE 1
-          END
-        ELSE
-          CASE
-            WHEN (SUBSTR(out_for_delivery_at, 1, 10)::date - SUBSTR(first_out_for_delivery_at, 1, 10)::date) = 1 THEN 2
-            WHEN (SUBSTR(out_for_delivery_at, 1, 10)::date - SUBSTR(first_out_for_delivery_at, 1, 10)::date) = 2 THEN 3
-            ELSE 4
-          END
-      END
-    WHEN ndr_attempts = 1 OR ndr_raised_at != '' OR ndr_reason != '' THEN 2
+    WHEN ndr_attempts >= 4 THEN 4
+    WHEN ndr_attempts = 3 THEN 3
+    WHEN ndr_attempts = 2 THEN 2
+    WHEN ndr_attempts = 1 THEN 1
+    WHEN first_out_for_delivery_at != '' AND out_for_delivery_at != '' AND SUBSTR(first_out_for_delivery_at, 1, 10) != SUBSTR(out_for_delivery_at, 1, 10) THEN 2
     ELSE 1
   END
 )`;
@@ -171,7 +159,23 @@ async function handleGET(request: Request) {
     const selectedDate =
       isoDate.test(requestedDate) && requestedDate <= currentIndiaDate ? requestedDate : currentIndiaDate;
 
-    const payload = await cachedValue(`analytics-today-ofd-${selectedDate}`, 60000, async () => {
+    const forceRefresh = url.searchParams.get("refresh") === "1";
+    const dbCacheKey = `today_ofd_${selectedDate}`;
+
+    if (!forceRefresh) {
+      const cached = await runtime.DB.prepare(
+        "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
+      )
+        .bind(dbCacheKey)
+        .first<{ payload: any }>()
+        .catch(() => null);
+      if (cached?.payload) {
+        const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
+        return Response.json(parsed);
+      }
+    }
+
+    const payload = await cachedValue(`analytics-today-ofd-${selectedDate}`, forceRefresh ? 0 : 60000, async () => {
       const history = await runtime.DB.prepare(
         "SELECT key,value FROM sync_state WHERE key IN ('tracking_history_status','tracking_history_last_sync_at')"
       ).all<{ key: string; value: string }>();
@@ -249,6 +253,15 @@ async function handleGET(request: Request) {
       };
     });
 
+    await runtime.DB.prepare(
+      `INSERT INTO analytics_cache (cache_key, payload, updated_at)
+       VALUES (?, ?::jsonb, NOW())
+       ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`
+    )
+      .bind(dbCacheKey, JSON.stringify(payload))
+      .run()
+      .catch(() => null);
+
     return Response.json(payload);
   }
 
@@ -291,8 +304,23 @@ async function handleGET(request: Request) {
 
   const where = filters.length ? filters.join(" AND ") : "1 = 1";
   const cacheKey = `analytics-overview-${where}-${filterValues.join(":")}`;
+  const forceRefresh = url.searchParams.get("refresh") === "1";
+  const dbCacheKey = `overview_${cacheKey}`;
 
-  const payload = await cachedValue(cacheKey, 120000, async () => {
+  if (!forceRefresh) {
+    const cached = await runtime.DB.prepare(
+      "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
+    )
+      .bind(dbCacheKey)
+      .first<{ payload: any }>()
+      .catch(() => null);
+    if (cached?.payload) {
+      const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
+      return Response.json(parsed);
+    }
+  }
+
+  const payload = await cachedValue(cacheKey, forceRefresh ? 0 : 120000, async () => {
     const ndrReasonSql = "COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')";
     const whereO = where
       .replaceAll("customer_state", "o.customer_state")
@@ -456,7 +484,7 @@ async function handleGET(request: Request) {
           FROM orders o
           WHERE ${whereO}
           ORDER BY COALESCE(NULLIF(order_date, ''), created_at) DESC
-          LIMIT 5000
+          LIMIT 1500
         ) o,
         jsonb_array_elements(CASE WHEN o.products_json LIKE '[%' THEN o.products_json::jsonb ELSE '[]'::jsonb END) elem
         WHERE elem->>'name' IS NOT NULL AND elem->>'name' != ''
@@ -677,6 +705,15 @@ async function handleGET(request: Request) {
     syncState,
     };
   });
+
+  await runtime.DB.prepare(
+    `INSERT INTO analytics_cache (cache_key, payload, updated_at)
+     VALUES (?, ?::jsonb, NOW())
+     ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`
+  )
+    .bind(dbCacheKey, JSON.stringify(payload))
+    .run()
+    .catch(() => null);
 
   return Response.json(payload);
 }

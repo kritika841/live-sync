@@ -4,6 +4,39 @@ import { loadOfdRecords } from "./ofd";
 import fs from "fs";
 import path from "path";
 
+
+export interface AuditTableRow {
+  id?: number | string;
+  ofd_date?: string;
+  order_id?: string;
+  channel_order_id?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_city?: string;
+  customer_state?: string;
+  courier?: string;
+  awb?: string;
+  payment_method?: string;
+  total?: number;
+  initial_ofd_time?: string;
+  latest_ofd_time?: string;
+  current_status?: string;
+  delivery_outcome?: string;
+  delivered_at?: string;
+  attempt_number?: number;
+  ndr_reason?: string;
+  ndr_attempts?: number;
+  webhook_count?: number;
+  last_webhook_at?: string;
+  events_log_json?: string;
+  verified_status?: string;
+  verified_by?: string;
+  verified_at?: string;
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface OfdAuditRecord {
   id: string;
   ofdDate: string;
@@ -190,7 +223,7 @@ export async function syncTodayOfdAudit(
   let totalUndelivered = 0;
   let totalRto = 0;
   let totalWebhooks = 0;
-  const preparedValues: (string | number | null)[][] = [];
+  const preparedValues: unknown[][] = [];
 
   for (const o of orderList) {
     const oIdStr = String(o.id);
@@ -359,18 +392,6 @@ export async function recordOfdWebhookArrival(
   const isRto = status.startsWith("RTO");
 
   // Lookup matching order in today_ofd_audit
-  interface AuditTableRow {
-    id?: number | string;
-    ofd_date?: string;
-    order_id?: string;
-    channel_order_id?: string;
-    awb?: string;
-    delivered_at?: string;
-    ndr_reason?: string;
-    events_log_json?: string;
-    webhook_count?: number;
-    delivery_outcome?: string;
-  }
   let existingAudit: AuditTableRow | null = null;
   if (event.shiprocketOrderId) {
     existingAudit = await db.prepare("SELECT * FROM today_ofd_audit WHERE ofd_date = ? AND order_id = ?").bind(targetDate, event.shiprocketOrderId).first();

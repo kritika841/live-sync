@@ -51,6 +51,7 @@ export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string)
            OR ${firstOfdDateSql} = ?
       )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
+        customer_phone AS customerPhone,
         customer_city AS customerCity, customer_state AS customerState, selected_orders.status,
         payment_method AS paymentMethod, total, awb, courier,
         shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,

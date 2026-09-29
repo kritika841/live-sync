@@ -34,6 +34,7 @@ const orderAttemptNumberSql = `(
   END
 )`;
 
+
 const DEFAULT_COURIERS = [
   "Delhivery DS 1kg",
   "Shadowfax DS 1kg",
@@ -167,7 +168,7 @@ async function handleGET(request: Request) {
         "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
       )
         .bind(dbCacheKey)
-        .first<{ payload: any }>()
+        .first<{ payload: string | Record<string, unknown> }>()
         .catch(() => null);
       if (cached?.payload) {
         const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
@@ -185,6 +186,16 @@ async function handleGET(request: Request) {
         lastSyncAt: historyState.tracking_history_last_sync_at || "",
         cached: true,
       };
+
+      // Also ensure OFD audit is synchronized for today
+      const { syncTodayOfdAudit } = await import("../../../lib/ofd-audit");
+      await syncTodayOfdAudit(runtime.DB, selectedDate).catch(() => null);
+
+      const auditRows = await runtime.DB.prepare(
+        "SELECT order_id, webhook_count, events_log_json, verified_status, notes FROM today_ofd_audit WHERE ofd_date = ?"
+      ).bind(selectedDate).all<{ order_id: string; webhook_count: number; events_log_json: string; verified_status: string; notes: string }>().catch(() => ({ results: [] }));
+      const auditByOrder = new Map(auditRows.results.map((r) => [String(r.order_id), r]));
+
       const rows = await loadOfdRecords(runtime.DB, selectedDate);
       const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> =
         rows.results.map((row) => {
@@ -207,6 +218,15 @@ async function handleGET(request: Request) {
               attemptNumber = 1;
             }
           }
+
+          const audit = auditByOrder.get(String(row.id));
+          let eventsLog = [];
+          try {
+            eventsLog = audit?.events_log_json ? JSON.parse(audit.events_log_json) : [];
+          } catch {
+            eventsLog = [];
+          }
+
           return {
             ...row,
             status,
@@ -214,6 +234,10 @@ async function handleGET(request: Request) {
             attemptNumber: Math.max(1, attemptNumber),
             attemptBasis: "recorded_ofd_days",
             previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
+            webhookCount: Number(audit?.webhook_count || 0),
+            eventsLog,
+            verifiedStatus: audit?.verified_status || "pending",
+            notes: audit?.notes || "",
           };
         });
       const total = orders.length;
@@ -312,7 +336,7 @@ async function handleGET(request: Request) {
       "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
     )
       .bind(dbCacheKey)
-      .first<{ payload: any }>()
+      .first<{ payload: string | Record<string, unknown> }>()
       .catch(() => null);
     if (cached?.payload) {
       const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
@@ -341,6 +365,7 @@ async function handleGET(request: Request) {
       statuses,
       syncRows,
       filterOptions,
+      todayOfdSummary,
     ] = await Promise.all([
       // 1. Core Summary Metrics
       runtime.DB.prepare(`
@@ -352,8 +377,8 @@ async function handleGET(request: Request) {
           SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
           SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS ndr,
           SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS in_transit,
-          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND (${orderAttemptNumberSql} = 1 OR first_out_for_delivery_at = '') AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND ndr_raised_at = '' THEN 1 ELSE 0 END) AS in_transit_zero_attempts,
-          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND NOT ((${orderAttemptNumberSql} = 1 OR first_out_for_delivery_at = '') AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND ndr_raised_at = '') THEN 1 ELSE 0 END) AS in_transit_with_attempts,
+          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND (first_out_for_delivery_at = '' OR first_out_for_delivery_at IS NULL) AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND (ndr_raised_at = '' OR ndr_raised_at IS NULL) THEN 1 ELSE 0 END) AS in_transit_zero_attempts,
+          SUM(CASE WHEN ${inTransitSql} AND UPPER(TRIM(status)) != 'OUT FOR DELIVERY' AND NOT ((first_out_for_delivery_at = '' OR first_out_for_delivery_at IS NULL) AND (ndr_attempts = 0 OR ndr_attempts IS NULL) AND (ndr_raised_at = '' OR ndr_raised_at IS NULL)) THEN 1 ELSE 0 END) AS in_transit_with_attempts,
           SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS out_for_delivery,
           SUM(CASE WHEN ${nonShippedSql} THEN 1 ELSE 0 END) AS non_shipped,
           SUM(CASE WHEN ${cancelledSql} THEN 1 ELSE 0 END) AS cancelled,
@@ -372,8 +397,8 @@ async function handleGET(request: Request) {
           SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${openPopulationSql} THEN 1 ELSE 0 END) AS prepaid_shipped,
           SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${deliveredSql} THEN 1 ELSE 0 END) AS prepaid_delivered,
           SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${closedSql} THEN 1 ELSE 0 END) AS prepaid_closed,
-          SUM(CASE WHEN (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL)) THEN 1 ELSE 0 END) AS total_ndr_experienced,
-          SUM(CASE WHEN ${deliveredSql} AND (ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS ndr_delivered,
+          SUM(CASE WHEN (${ndrSql} OR ndr_attempts > 1 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS total_ndr_experienced,
+          SUM(CASE WHEN ${deliveredSql} AND (ndr_attempts > 1 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS ndr_delivered,
           AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_shipped_to_delivered_days,
           AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(COALESCE(NULLIF(order_date, ''), created_at)) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - COALESCE(NULLIF(order_date, ''), created_at)::timestamptz)) / 86400 END) AS avg_order_to_delivered_days,
           COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS "deliveredRevenue",
@@ -394,7 +419,7 @@ async function handleGET(request: Request) {
         WHERE ${where} AND (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL))
         GROUP BY reason
         ORDER BY count DESC
-        LIMIT 12
+        LIMIT 50
       `).bind(...filterValues).all<{ reason: string; count: number }>(),
 
       // 3. Courier-wise Delivery
@@ -411,7 +436,7 @@ async function handleGET(request: Request) {
         FROM orders WHERE ${where}
         GROUP BY name
         ORDER BY total DESC
-        LIMIT 15
+        LIMIT 50
       `).bind(...filterValues).all<{
         name: string;
         total: number;
@@ -435,7 +460,7 @@ async function handleGET(request: Request) {
         FROM orders WHERE ${where}
         GROUP BY state
         ORDER BY total DESC
-        LIMIT 25
+        LIMIT 100
       `).bind(...filterValues).all<{
         state: string;
         total: number;
@@ -459,7 +484,7 @@ async function handleGET(request: Request) {
         FROM orders WHERE ${where}
         GROUP BY dt
         ORDER BY dt DESC
-        LIMIT 31
+        LIMIT 400
       `).bind(...filterValues).all<{
         dt: string;
         total: number;
@@ -478,24 +503,24 @@ async function handleGET(request: Request) {
           COUNT(DISTINCT o.id) AS order_count,
           COUNT(DISTINCT o.id) FILTER (WHERE ${deliveredSql.replaceAll("status", "o.status")}) AS delivered,
           COUNT(DISTINCT o.id) FILTER (WHERE ${rtoSql.replaceAll("status", "o.status")}) AS rto,
+          COUNT(DISTINCT o.id) FILTER (WHERE ${closedSql.replaceAll("status", "o.status")}) AS closed,
           COUNT(DISTINCT o.id) FILTER (WHERE ${openPopulationSql.replaceAll("status", "o.status")}) AS shipped
         FROM (
           SELECT id, status, products_json
           FROM orders o
           WHERE ${whereO}
-          ORDER BY COALESCE(NULLIF(order_date, ''), created_at) DESC
-          LIMIT 1500
         ) o,
         jsonb_array_elements(CASE WHEN o.products_json LIKE '[%' THEN o.products_json::jsonb ELSE '[]'::jsonb END) elem
         WHERE elem->>'name' IS NOT NULL AND elem->>'name' != ''
         GROUP BY name
         ORDER BY order_count DESC
-        LIMIT 20
+        LIMIT 100
       `).bind(...filterValues).all<{
         name: string;
         order_count: number;
         delivered: number;
         rto: number;
+        closed: number;
         shipped: number;
       }>(),
 
@@ -511,7 +536,19 @@ async function handleGET(request: Request) {
       runtime.DB.prepare("SELECT key, value FROM sync_state WHERE key IN ('sync_status', 'last_sync_at', 'last_sync_count', 'last_sync_error')").all<{ key: string; value: string }>(),
 
       // 9. Cached filter options
-      getFilterOptions(runtime.DB)
+      getFilterOptions(runtime.DB),
+
+      // 10. Live Today's OFD activity summary
+      runtime.DB.prepare(`
+        SELECT 
+          COUNT(*) AS today_total,
+          SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS today_still_out,
+          SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS today_delivered,
+          SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS today_undelivered,
+          SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS today_rto
+        FROM orders 
+        WHERE (SUBSTR(out_for_delivery_at, 1, 10) = ? OR SUBSTR(first_out_for_delivery_at, 1, 10) = ?)
+      `).bind(indiaToday(), indiaToday()).first<Record<string, unknown>>()
     ]);
 
     const total = Number(summary?.total || 0);
@@ -686,8 +723,9 @@ async function handleGET(request: Request) {
       shipped: Number(r.shipped),
       delivered: Number(r.delivered),
       rto: Number(r.rto),
+      closed: Number(r.closed),
       deliveryRate: percent(Number(r.delivered), Number(r.shipped)),
-      closedDeliveryRate: percent(Number(r.delivered), Number(r.delivered) + Number(r.rto)),
+      closedDeliveryRate: percent(Number(r.delivered), Number(r.closed)),
     })),
     filterOptions: {
       couriers: filterOptions.couriers,
@@ -701,6 +739,14 @@ async function handleGET(request: Request) {
       syncStatus: syncState.sync_status || "unknown",
       lastSyncCount: Number(syncState.last_sync_count || 0),
       lastSyncError: syncState.last_sync_error || "",
+    },
+    todayOfd: {
+      date: indiaToday(),
+      total: Number(todayOfdSummary?.today_total || 0),
+      stillOut: Number(todayOfdSummary?.today_still_out || 0),
+      delivered: Number(todayOfdSummary?.today_delivered || 0),
+      undelivered: Number(todayOfdSummary?.today_undelivered || 0),
+      rto: Number(todayOfdSummary?.today_rto || 0),
     },
     syncState,
     };

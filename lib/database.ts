@@ -94,6 +94,17 @@ const resultKeyAliases: Record<string, string> = {
   copiedcount: "copiedCount",
   channelorderids: "channelOrderIds",
   orderidsjson: "orderIdsJson",
+  ofddate: "ofdDate",
+  initialofdtime: "initialOfdTime",
+  latestofdtime: "latestOfdTime",
+  currentstatus: "currentStatus",
+  deliveryoutcome: "deliveryOutcome",
+  webhookcount: "webhookCount",
+  lastwebhookat: "lastWebhookAt",
+  eventslogjson: "eventsLogJson",
+  verifiedstatus: "verifiedStatus",
+  verifiedby: "verifiedBy",
+  verifiedat: "verifiedAt",
 };
 
 function normalizeRows(rows: Row[]) {
@@ -161,7 +172,9 @@ export class PostgresDatabase {
           connStr = u.toString();
           this.activeConnectionString = connStr;
         }
-      } catch {}
+      } catch {
+        // Ignore URL parsing errors and preserve connection string
+      }
     }
     this.sql = postgres(connStr, {
       prepare: false,
@@ -373,6 +386,53 @@ export async function ensureCopiedOrdersSchema(db: PostgresDatabase) {
   )`).run().catch(() => null);
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_order_copy_logs_created_at ON order_copy_logs (created_at DESC)").run().catch(() => null);
   await setSyncState(db, "copied_orders_schema_revision", copiedOrdersSchemaRevision).catch(() => null);
+}
+
+const ofdAuditSchemaRevision = "2026-09-29-ofd-audit-v1";
+export async function ensureTodayOfdAuditSchema(db: PostgresDatabase) {
+  await ensureSchema(db);
+  const current = await db.prepare("SELECT value FROM sync_state WHERE key='ofd_audit_schema_revision'").first<{value:string}>().catch(() => null);
+  if (current?.value === ofdAuditSchemaRevision) return;
+
+  await db.prepare(`CREATE TABLE IF NOT EXISTS today_ofd_audit (
+    id BIGSERIAL PRIMARY KEY,
+    ofd_date TEXT NOT NULL,
+    order_id BIGINT NOT NULL,
+    channel_order_id TEXT NOT NULL DEFAULT '',
+    customer_name TEXT NOT NULL DEFAULT '',
+    customer_phone TEXT NOT NULL DEFAULT '',
+    customer_city TEXT NOT NULL DEFAULT '',
+    customer_state TEXT NOT NULL DEFAULT '',
+    courier TEXT NOT NULL DEFAULT '',
+    awb TEXT NOT NULL DEFAULT '',
+    payment_method TEXT NOT NULL DEFAULT '',
+    total REAL NOT NULL DEFAULT 0,
+    initial_ofd_time TEXT NOT NULL DEFAULT '',
+    latest_ofd_time TEXT NOT NULL DEFAULT '',
+    current_status TEXT NOT NULL DEFAULT 'OUT FOR DELIVERY',
+    delivery_outcome TEXT NOT NULL DEFAULT 'still_ofd',
+    delivered_at TEXT NOT NULL DEFAULT '',
+    attempt_number INTEGER NOT NULL DEFAULT 1,
+    ndr_reason TEXT NOT NULL DEFAULT '',
+    ndr_attempts INTEGER NOT NULL DEFAULT 0,
+    webhook_count INTEGER NOT NULL DEFAULT 0,
+    last_webhook_at TEXT NOT NULL DEFAULT '',
+    events_log_json TEXT NOT NULL DEFAULT '[]',
+    verified_status TEXT NOT NULL DEFAULT 'pending',
+    verified_by TEXT NOT NULL DEFAULT '',
+    verified_at TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ofd_date, order_id)
+  )`).run().catch(() => null);
+
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_today_ofd_audit_date ON today_ofd_audit(ofd_date, delivery_outcome)").run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_today_ofd_audit_order ON today_ofd_audit(order_id)").run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_today_ofd_audit_channel ON today_ofd_audit(channel_order_id)").run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_today_ofd_audit_awb ON today_ofd_audit(awb)").run().catch(() => null);
+
+  await setSyncState(db, "ofd_audit_schema_revision", ofdAuditSchemaRevision).catch(() => null);
 }
 
 // Avoid repeating ALTER TABLE on every serverless cold start while order writes run.

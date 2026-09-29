@@ -7,18 +7,21 @@ import {
   ArrowUpRight,
   BarChart3,
   Calendar,
+  Check,
   CheckCircle2,
   Clock,
+  Copy,
   CreditCard,
-  Filter,
-  Info,
+  Download,
+  ExternalLink,
+  FileSpreadsheet,
   Layers,
   MapPin,
   PackageCheck,
   Percent,
   RefreshCw,
   Search,
-  SlidersHorizontal,
+  ShieldCheck,
   TrendingDown,
   TrendingUp,
   Truck,
@@ -139,6 +142,7 @@ interface AnalyticsData {
     shipped: number;
     delivered: number;
     rto: number;
+    closed: number;
     deliveryRate: number;
     closedDeliveryRate: number;
   }>;
@@ -154,6 +158,14 @@ interface AnalyticsData {
     syncStatus: string;
     lastSyncCount: number;
     lastSyncError: string;
+  };
+  todayOfd?: {
+    date: string;
+    total: number;
+    stillOut: number;
+    delivered: number;
+    undelivered: number;
+    rto: number;
   };
 }
 
@@ -178,6 +190,11 @@ export interface OfdOrder {
   shippingCost: number;
   attemptNumber: number;
   previousUndelivered: boolean;
+  customerPhone?: string;
+  webhookCount?: number;
+  eventsLog?: Array<{ status: string; eventAt: string; receivedAt: string; source: string }>;
+  verifiedStatus?: "pending" | "verified" | "discrepant";
+  notes?: string;
 }
 
 export interface OfdData {
@@ -305,7 +322,9 @@ function MetricInfoButton({
       {open && (
         <div
           role="dialog"
+          aria-modal="false"
           aria-label={title}
+          onKeyDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
           className={`absolute ${
             align === "left" ? "left-0" : "right-0"
@@ -378,7 +397,9 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   }, [mode]);
 
   const todayStr = useMemo(() => getTodayString(), []);
-  const [datePreset, setDatePreset] = useState<"today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "all" | "custom">("30d");
+  const [datePreset, setDatePreset] = useState<
+    "today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "last_month" | "all" | "custom"
+  >("30d");
   const [from, setFrom] = useState(() => getPastDateString(30));
   const [to, setTo] = useState(todayStr);
 
@@ -403,6 +424,44 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   const [ofdData, setOfdData] = useState<OfdData | null>(null);
   const [ofdLoading, setOfdLoading] = useState(false);
   const [ofdError, setOfdError] = useState("");
+  const [ofdSearch, setOfdSearch] = useState("");
+  const [selectedOrderEvents, setSelectedOrderEvents] = useState<OfdOrder | null>(null);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [verifyingId, setVerifyingId] = useState<number | null>(null);
+
+  const sheetsOrigin = typeof window !== "undefined" ? window.location.origin : "https://satmi.in";
+  const googleSheetsFormula = `=IMPORTDATA("${sheetsOrigin}/api/export/today-ofd?format=csv&date=${ofdDate}")`;
+
+  function handleCopyFormula() {
+    navigator.clipboard.writeText(googleSheetsFormula).then(() => {
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2500);
+    });
+  }
+
+  async function handleVerify(orderId: number, status: "verified" | "discrepant") {
+    setVerifyingId(orderId);
+    try {
+      await fetch("/api/analytics/today-ofd/audit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId, date: ofdDate, verifiedStatus: status }),
+      });
+      setOfdData((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          orders: prev.orders.map((o) =>
+            o.id === orderId ? { ...o, verifiedStatus: status } : o
+          ),
+        };
+      });
+    } catch {
+      // ignore
+    } finally {
+      setVerifyingId(null);
+    }
+  }
 
   async function fetchOfd(refresh = false) {
     if (preview) return;
@@ -434,7 +493,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   }, [active, activeMode, ofdDate]);
 
   // Handle Preset Change
-  const applyPreset = (preset: "today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "all" | "custom") => {
+  const applyPreset = (preset: "today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "last_month" | "all" | "custom") => {
     setDatePreset(preset);
     if (preset === "today") {
       setFrom(todayStr);
@@ -456,6 +515,15 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
       const startOfMonth = `${todayStr.slice(0, 7)}-01`;
       setFrom(startOfMonth);
       setTo(todayStr);
+    } else if (preset === "last_month") {
+      const currentYear = Number(todayStr.slice(0, 4));
+      const currentMonth = Number(todayStr.slice(5, 7));
+      const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+      const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+      const prevMonthStr = String(prevMonth).padStart(2, "0");
+      const lastDay = new Date(prevYear, prevMonth, 0).getDate();
+      setFrom(`${prevYear}-${prevMonthStr}-01`);
+      setTo(`${prevYear}-${prevMonthStr}-${String(lastDay).padStart(2, "0")}`);
     } else if (preset === "all") {
       setFrom("");
       setTo("");
@@ -503,56 +571,74 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
   const metrics = data?.metrics;
 
+  const courierWise = data?.courierWise;
+  const stateWise = data?.stateWise;
+  const productWise = data?.productWise;
+  const dateWise = data?.dateWise;
+  const ndrReasons = data?.ndrReasons;
+
   // Filtered lists for sub-tables
   const filteredCouriers = useMemo(() => {
-    if (!data?.courierWise) return [];
-    if (!subSearch.trim()) return data.courierWise;
+    if (!courierWise) return [];
+    if (!subSearch.trim()) return courierWise;
     const term = subSearch.toLowerCase();
-    return data.courierWise.filter((c) => c.name.toLowerCase().includes(term));
-  }, [data?.courierWise, subSearch]);
+    return courierWise.filter((c) => c.name.toLowerCase().includes(term));
+  }, [courierWise, subSearch]);
 
   const filteredStates = useMemo(() => {
-    if (!data?.stateWise) return [];
-    if (!subSearch.trim()) return data.stateWise;
+    if (!stateWise) return [];
+    if (!subSearch.trim()) return stateWise;
     const term = subSearch.toLowerCase();
-    return data.stateWise.filter((s) => s.state.toLowerCase().includes(term));
-  }, [data?.stateWise, subSearch]);
+    return stateWise.filter((s) => s.state.toLowerCase().includes(term));
+  }, [stateWise, subSearch]);
 
   const filteredProducts = useMemo(() => {
-    if (!data?.productWise) return [];
-    if (!subSearch.trim()) return data.productWise;
+    if (!productWise) return [];
+    if (!subSearch.trim()) return productWise;
     const term = subSearch.toLowerCase();
-    return data.productWise.filter((p) => p.name.toLowerCase().includes(term));
-  }, [data?.productWise, subSearch]);
+    return productWise.filter((p) => p.name.toLowerCase().includes(term));
+  }, [productWise, subSearch]);
 
   const filteredDates = useMemo(() => {
-    if (!data?.dateWise) return [];
-    if (!subSearch.trim()) return data.dateWise;
+    if (!dateWise) return [];
+    if (!subSearch.trim()) return dateWise;
     const term = subSearch.toLowerCase();
-    return data.dateWise.filter((d) => d.date.includes(term));
-  }, [data?.dateWise, subSearch]);
+    return dateWise.filter((d) => d.date.includes(term));
+  }, [dateWise, subSearch]);
 
   const filteredNdrReasons = useMemo(() => {
-    if (!data?.ndrReasons) return [];
-    if (!subSearch.trim()) return data.ndrReasons;
+    if (!ndrReasons) return [];
+    if (!subSearch.trim()) return ndrReasons;
     const term = subSearch.toLowerCase();
-    return data.ndrReasons.filter((r) => r.reason.toLowerCase().includes(term));
-  }, [data?.ndrReasons, subSearch]);
+    return ndrReasons.filter((r) => r.reason.toLowerCase().includes(term));
+  }, [ndrReasons, subSearch]);
 
   const maxNdrCount = useMemo(() => {
-    if (!data?.ndrReasons || data.ndrReasons.length === 0) return 1;
-    return Math.max(...data.ndrReasons.map((r) => r.count), 1);
-  }, [data?.ndrReasons]);
+    if (!ndrReasons || ndrReasons.length === 0) return 1;
+    return Math.max(...ndrReasons.map((r) => r.count), 1);
+  }, [ndrReasons]);
 
   if (activeMode === "today_ofd") {
     const ofdMetrics = ofdData?.metrics || {};
     const historical = ofdDate < todayStr;
     const shownOrders = (ofdData?.orders || []).filter((order) => {
-      if (ofdOutcome === "delivered") return /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(order.status);
-      if (ofdOutcome === "undelivered") return /UNDELIVERED|NDR|RTO|RETURN TO ORIGIN/i.test(order.status);
-      if (ofdOutcome === "out") return /^OUT FOR DELIVERY$/i.test(order.status);
-      if (ofdOutcome === "unresolved") return /^UNRESOLVED AFTER OFD$/i.test(order.status);
-      if (ofdOutcome.startsWith("attempt")) return order.attemptNumber === Number(ofdOutcome.slice(-1));
+      if (ofdOutcome === "delivered" && !/^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(order.status)) return false;
+      if (ofdOutcome === "undelivered" && !/UNDELIVERED|NDR|RTO|RETURN TO ORIGIN/i.test(order.status)) return false;
+      if (ofdOutcome === "out" && !/^OUT FOR DELIVERY$/i.test(order.status)) return false;
+      if (ofdOutcome === "unresolved" && !/^UNRESOLVED AFTER OFD$/i.test(order.status)) return false;
+      if (ofdOutcome.startsWith("attempt") && order.attemptNumber !== Number(ofdOutcome.slice(-1))) return false;
+      if (ofdSearch.trim()) {
+        const q = ofdSearch.toLowerCase();
+        const matches =
+          String(order.channelOrderId || "").toLowerCase().includes(q) ||
+          String(order.id).includes(q) ||
+          String(order.customerName || "").toLowerCase().includes(q) ||
+          String(order.customerPhone || "").includes(q) ||
+          String(order.awb || "").toLowerCase().includes(q) ||
+          String(order.courier || "").toLowerCase().includes(q) ||
+          String(order.customerCity || "").toLowerCase().includes(q);
+        if (!matches) return false;
+      }
       return true;
     });
 
@@ -593,6 +679,28 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </button>
               </div>
 
+              {/* Google Sheets Live Formula Button */}
+              <button
+                type="button"
+                onClick={handleCopyFormula}
+                className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition shadow-xs"
+                title="Copy live auto-sync formula for Google Sheets"
+              >
+                {copySuccess ? <Check size={14} className="text-emerald-600" /> : <FileSpreadsheet size={14} />}
+                <span>{copySuccess ? "Formula Copied!" : "Auto-Sync to Google Sheet"}</span>
+              </button>
+
+              {/* One-Click Download CSV */}
+              <a
+                href={`/api/export/today-ofd?format=csv&date=${ofdDate}`}
+                download={`satmi-today-ofd-${ofdDate}.csv`}
+                className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-xs"
+                title="Download today's OFD CSV"
+              >
+                <Download size={14} className="text-muted-foreground" />
+                <span>Export CSV</span>
+              </a>
+
               <button
                 type="button"
                 onClick={() => void fetchOfd(true)}
@@ -631,15 +739,62 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               )}
             </div>
 
-            <div className="text-xs text-muted-foreground">
+            <div className="text-xs text-muted-foreground flex items-center gap-3">
               {historical ? (
                 <span className="text-amber-600 dark:text-amber-400 font-medium">Historical OFD archive</span>
               ) : (
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
                   <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Live today scans
+                  Live today scans & webhooks
                 </span>
               )}
+            </div>
+          </div>
+
+          {/* GOOGLE SHEETS LIVE AUTO-SYNC BANNER */}
+          <div className="mt-4 rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-4 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5 max-w-3xl">
+              <div className="size-10 rounded-xl bg-emerald-500/15 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5 shadow-xs">
+                <FileSpreadsheet size={20} />
+              </div>
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-xs font-bold text-foreground">Automated Google Sheets Live Sync</h4>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                    <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Auto-Refreshes On Its Own
+                  </span>
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <ShieldCheck size={13} className="text-emerald-500" />
+                    EOD Snapshot Auto-Saved to Disk
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Paste this formula in cell <strong>A1</strong> of your Google Sheet. It will automatically load all OFD orders and keep all delivery statuses updated throughout the day without manual downloads:
+                </p>
+                <div className="pt-1 flex flex-wrap items-center gap-2">
+                  <div className="flex items-center bg-card border border-border rounded-lg px-3 py-1.5 max-w-lg min-w-[280px] shadow-xs">
+                    <code className="text-[11px] font-mono text-primary select-all truncate">
+                      {googleSheetsFormula}
+                    </code>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyFormula}
+                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 transition shadow-xs cursor-pointer active:scale-95"
+                  >
+                    {copySuccess ? <Check size={13} /> : <Copy size={13} />}
+                    <span>{copySuccess ? "Copied Formula!" : "Copy Formula for Sheet"}</span>
+                  </button>
+                  <a
+                    href={`/api/export/today-ofd?format=csv&date=${ofdDate}`}
+                    download={`satmi-today-ofd-${ofdDate}.csv`}
+                    className="text-xs font-medium text-muted-foreground hover:text-foreground underline px-1 flex items-center gap-1"
+                  >
+                    Direct CSV link <ExternalLink size={11} />
+                  </a>
+                </div>
+              </div>
             </div>
           </div>
         </header>
@@ -770,19 +925,18 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </span>
                 </div>
 
-                {/* Outcome filter tabs */}
-                <div className="border-b border-border px-5 py-2.5 bg-muted/10">
+                {/* Outcome filter tabs & Search */}
+                <div className="border-b border-border px-5 py-2.5 bg-muted/10 flex flex-wrap items-center justify-between gap-3">
                   <nav className="outcome-tabs flex flex-wrap gap-1.5" aria-label="Filter OFD outcomes">
                     {(
                       [
-                        ["all", "All"],
-                        ["delivered", "Delivered"],
-                        ["undelivered", "Undelivered / RTO"],
-                        ["out", "Still OFD"],
-                        ["unresolved", "Unresolved after OFD"],
-                        ["attempt1", "1st attempt OFD"],
-                        ["attempt2", "2nd attempt OFD"],
-                        ["attempt3", "3rd attempt OFD"],
+                        ["all", `All (${ofdMetrics.total?.count || 0})`],
+                        ["delivered", `Delivered (${ofdMetrics.delivered?.count || 0})`],
+                        ["undelivered", `Undelivered / RTO (${(ofdMetrics.undelivered?.count || 0) + (ofdMetrics.rto?.count || 0)})`],
+                        ["out", `Still OFD (${ofdMetrics.stillOut?.count || 0})`],
+                        ["attempt1", `1st Attempt (${ofdMetrics.firstAttemptOFD?.count || 0})`],
+                        ["attempt2", `2nd Attempt (${ofdMetrics.secondAttemptOFD?.count || 0})`],
+                        ["attempt3", `3rd Attempt (${ofdMetrics.thirdAttemptOFD?.count || 0})`],
                       ] as const
                     ).map(([key, label]) => (
                       <button
@@ -799,6 +953,26 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       </button>
                     ))}
                   </nav>
+
+                  <div className="relative min-w-[200px] max-w-xs flex-1">
+                    <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      type="text"
+                      value={ofdSearch}
+                      onChange={(e) => setOfdSearch(e.target.value)}
+                      placeholder="Search order, customer, AWB..."
+                      className="w-full bg-card border border-border rounded-lg pl-8 pr-3 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    {ofdSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setOfdSearch("")}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto">
@@ -807,75 +981,134 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       <tr>
                         <th className="py-3 px-4">Order</th>
                         <th className="py-3 px-4">Attempt</th>
-                        <th className="py-3 px-4">Recorded OFD day</th>
                         <th className="py-3 px-4">Customer</th>
-                        <th className="py-3 px-4">OFD time</th>
-                        <th className="py-3 px-4">First OFD</th>
-                        <th className="py-3 px-4">Current outcome</th>
-                        <th className="py-3 px-4">NDR reason</th>
+                        <th className="py-3 px-4">OFD Time</th>
+                        <th className="py-3 px-4">Outcome & Status</th>
                         <th className="py-3 px-4">AWB / Courier</th>
-                        <th className="py-3 px-4 text-right">Amount</th>
+                        <th className="py-3 px-4">Amount</th>
+                        <th className="py-3 px-4">Webhooks</th>
+                        <th className="py-3 px-4 text-center">Manual Audit</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                      {shownOrders.map((order) => (
-                        <tr key={order.id} className="hover:bg-muted/30 transition">
-                          <td className="py-3 px-4">
-                            <strong className="text-foreground">#{order.channelOrderId || order.id}</strong>
-                            {order.previousUndelivered && (
-                              <span className="block text-[10px] text-amber-600 dark:text-amber-400 font-medium">
-                                Previously undelivered
+                      {shownOrders.map((order) => {
+                        const isDelivered = /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(order.status);
+                        const isUndelivered = /UNDELIVERED|NDR/i.test(order.status);
+                        const isRto = /RTO/i.test(order.status);
+                        const isStillOut = /^OUT FOR DELIVERY$/i.test(order.status);
+
+                        return (
+                          <tr key={order.id} className="hover:bg-muted/30 transition">
+                            <td className="py-3 px-4">
+                              <strong className="text-foreground">#{order.channelOrderId || order.id}</strong>
+                              {order.previousUndelivered && (
+                                <span className="block text-[10px] text-amber-600 dark:text-amber-400 font-medium">
+                                  Prior failed attempt
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-muted text-foreground">
+                                Attempt {order.attemptNumber || 1}
                               </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-muted text-foreground">
-                              Attempt {order.attemptNumber}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-muted-foreground font-medium">
-                            {order.attemptNumber ? `${order.attemptNumber} recorded OFD day` : "—"}
-                          </td>
-                          <td className="py-3 px-4">
-                            <strong className="text-foreground">{order.customerName || "—"}</strong>
-                            <span className="block text-[10px] text-muted-foreground">
-                              {[order.customerCity, order.customerState].filter(Boolean).join(", ")}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-muted-foreground">{formatDateTime(order.outForDeliveryAt)}</td>
-                          <td className="py-3 px-4 text-muted-foreground">{formatDateTime(order.firstOutForDeliveryAt)}</td>
-                          <td className="py-3 px-4">
-                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-muted text-foreground">
-                              {order.status || "Unknown"}
-                            </span>
-                            {order.deliveredAt && (
-                              <span className="block text-[10px] text-emerald-600 dark:text-emerald-400">
-                                Delivered {formatDateTime(order.deliveredAt)}
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4">
-                            <strong className="text-foreground">{order.ndrReason || "—"}</strong>
-                            {order.ndrRaisedAt && (
+                            </td>
+                            <td className="py-3 px-4">
+                              <strong className="text-foreground">{order.customerName || "—"}</strong>
                               <span className="block text-[10px] text-muted-foreground">
-                                {formatDateTime(order.ndrRaisedAt)}
+                                {[order.customerCity, order.customerState].filter(Boolean).join(", ")}
                               </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4">
-                            <strong className="text-foreground">{order.awb || "—"}</strong>
-                            <span className="block text-[10px] text-muted-foreground">
-                              {order.courier || "Not assigned"}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-right font-semibold text-foreground">
-                            {formatCurrency(order.total)}
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                            <td className="py-3 px-4 text-muted-foreground">
+                              <span>{formatDateTime(order.outForDeliveryAt)}</span>
+                              {order.firstOutForDeliveryAt && order.firstOutForDeliveryAt !== order.outForDeliveryAt && (
+                                <span className="block text-[10px] text-muted-foreground/80">
+                                  1st: {formatDateTime(order.firstOutForDeliveryAt)}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              {isDelivered && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                  <Check size={12} /> Delivered
+                                </span>
+                              )}
+                              {isStillOut && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                                  <Truck size={12} /> Still OFD
+                                </span>
+                              )}
+                              {isUndelivered && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-destructive/15 text-destructive">
+                                  <AlertTriangle size={12} /> Undelivered
+                                </span>
+                              )}
+                              {isRto && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                                  <TrendingDown size={12} /> RTO
+                                </span>
+                              )}
+                              {!isDelivered && !isStillOut && !isUndelivered && !isRto && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-muted text-foreground">
+                                  {order.status || "Unknown"}
+                                </span>
+                              )}
+
+                              {order.deliveredAt && (
+                                <span className="block text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                  {formatDateTime(order.deliveredAt)}
+                                </span>
+                              )}
+                              {order.ndrReason && (
+                                <span className="block text-[10px] text-destructive mt-0.5">
+                                  {order.ndrReason}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <strong className="text-foreground">{order.awb || "—"}</strong>
+                              <span className="block text-[10px] text-muted-foreground">
+                                {order.courier || "Not assigned"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 font-semibold text-foreground">
+                              <span>{formatCurrency(order.total)}</span>
+                              <span className="block text-[10px] text-muted-foreground uppercase font-normal">
+                                {order.paymentMethod || "COD"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedOrderEvents(order)}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline bg-primary/10 hover:bg-primary/20 px-2 py-1 rounded transition"
+                                title="Inspect webhook events for this order"
+                              >
+                                <span>{order.webhookCount || 0} events</span>
+                              </button>
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              {order.verifiedStatus === "verified" ? (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 px-2.5 py-1 rounded-md">
+                                  <Check size={12} /> Verified
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleVerify(order.id, "verified")}
+                                  disabled={verifyingId === order.id}
+                                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-muted-foreground hover:text-emerald-600 border border-border hover:border-emerald-500/40 bg-card hover:bg-emerald-500/10 px-2.5 py-1 rounded-md transition shadow-xs disabled:opacity-50"
+                                >
+                                  <Check size={12} />
+                                  <span>Verify</span>
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                       {shownOrders.length === 0 && (
                         <tr>
-                          <td colSpan={10} className="py-12 text-center text-xs text-muted-foreground">
+                          <td colSpan={9} className="py-12 text-center text-xs text-muted-foreground">
                             No orders went out for delivery matching this filter on this date.
                           </td>
                         </tr>
@@ -884,6 +1117,100 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </table>
                 </div>
               </div>
+
+              {/* WEBHOOK EVENTS TIMELINE MODAL */}
+              {selectedOrderEvents && (
+                <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+                  <div className="bg-card border border-border rounded-xl shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                    <div className="p-4 border-b border-border flex items-center justify-between bg-muted/20">
+                      <div>
+                        <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
+                          <span>Webhook Stream — #{selectedOrderEvents.channelOrderId || selectedOrderEvents.id}</span>
+                          <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary font-semibold">
+                            {selectedOrderEvents.status}
+                          </span>
+                        </h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {selectedOrderEvents.customerName} • {selectedOrderEvents.courier} ({selectedOrderEvents.awb})
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedOrderEvents(null)}
+                        className="size-7 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+
+                    <div className="p-5 overflow-y-auto space-y-4 text-xs">
+                      <div>
+                        <h4 className="font-bold text-foreground mb-2 text-xs uppercase tracking-wider">OFD & Status Scans</h4>
+                        <div className="space-y-2 bg-muted/20 border border-border rounded-lg p-3">
+                          <div className="flex justify-between py-1 border-b border-border/50">
+                            <span className="text-muted-foreground">Initial OFD Time:</span>
+                            <span className="font-semibold text-foreground">{formatDateTime(selectedOrderEvents.firstOutForDeliveryAt || selectedOrderEvents.outForDeliveryAt)}</span>
+                          </div>
+                          <div className="flex justify-between py-1 border-b border-border/50">
+                            <span className="text-muted-foreground">Latest OFD Time:</span>
+                            <span className="font-semibold text-foreground">{formatDateTime(selectedOrderEvents.outForDeliveryAt)}</span>
+                          </div>
+                          {selectedOrderEvents.deliveredAt && (
+                            <div className="flex justify-between py-1 border-b border-border/50 text-emerald-600 dark:text-emerald-400">
+                              <span className="font-medium">Delivered Timestamp:</span>
+                              <span className="font-bold">{formatDateTime(selectedOrderEvents.deliveredAt)}</span>
+                            </div>
+                          )}
+                          {selectedOrderEvents.ndrReason && (
+                            <div className="flex justify-between py-1 text-destructive">
+                              <span className="font-medium">NDR Reason:</span>
+                              <span className="font-bold">{selectedOrderEvents.ndrReason}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="font-bold text-foreground mb-2 text-xs uppercase tracking-wider">
+                          Live Webhook Ingestion Events ({selectedOrderEvents.eventsLog?.length || 0})
+                        </h4>
+                        {selectedOrderEvents.eventsLog && selectedOrderEvents.eventsLog.length > 0 ? (
+                          <div className="space-y-2">
+                            {selectedOrderEvents.eventsLog.map((ev, idx) => (
+                              <div key={idx} className="p-2.5 rounded-lg border border-border bg-card flex items-start justify-between gap-3">
+                                <div>
+                                  <span className="font-bold text-foreground text-xs">{ev.status}</span>
+                                  <span className="block text-[11px] text-muted-foreground mt-0.5">
+                                    Source: {ev.source || "webhook"}
+                                  </span>
+                                </div>
+                                <span className="text-[11px] text-muted-foreground font-mono">
+                                  {formatDateTime(ev.eventAt || ev.receivedAt)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="p-4 rounded-lg bg-muted/20 border border-dashed border-border text-center text-muted-foreground">
+                            <p>No individual webhook events logged for this order today yet.</p>
+                            <p className="text-[11px] mt-1 text-muted-foreground/80">Status was captured via real-time Shiprocket sync.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="p-4 border-t border-border flex justify-end bg-muted/20">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedOrderEvents(null)}
+                        className="px-4 py-1.5 rounded-lg bg-primary text-primary-foreground font-semibold text-xs hover:bg-primary/90 transition shadow-xs"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -905,19 +1232,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
             <p className="text-xs text-muted-foreground mt-1">
               Live delivery success rates, open & closed order cohorts, courier efficiency, attempt funnels and NDR recovery
             </p>
-            {metrics && (
-              <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs font-semibold text-foreground">
-                  <span className="text-muted-foreground font-normal">Total Shipped:</span>
-                  {formatNumber(metrics.shipped.count)}
-                </span>
-                <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-                  <span className="text-emerald-600 dark:text-emerald-400 font-normal">Total Delivered:</span>
-                  {formatNumber(metrics.delivered.count)}
-                  <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">({metrics.openOrdersDeliveryRate}%)</span>
-                </span>
-              </div>
-            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -966,6 +1280,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 { id: "14d", label: "14 Days" },
                 { id: "30d", label: "30 Days" },
                 { id: "mtd", label: "This Month" },
+                { id: "last_month", label: "Last Month" },
                 { id: "all", label: "All Time" },
               ] as const
             ).map((preset) => (
@@ -1089,21 +1404,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               <span className="size-2 rounded-full bg-emerald-500" />
               <strong>{formatNumber(data.dataQuality.orderCount)} orders in this view</strong>
             </span>
-            {metrics && (
-              <>
-                <span>·</span>
-                <span className="inline-flex items-center gap-1 font-medium text-foreground">
-                  <span className="text-muted-foreground">Shipped:</span>
-                  <strong>{formatNumber(metrics.shipped.count)}</strong>
-                </span>
-                <span>·</span>
-                <span className="inline-flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400">
-                  <span className="text-muted-foreground">Delivered:</span>
-                  <strong className="text-emerald-700 dark:text-emerald-300 font-bold">{formatNumber(metrics.delivered.count)}</strong>
-                  <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">({metrics.openOrdersDeliveryRate}%)</span>
-                </span>
-              </>
-            )}
             <span>·</span>
             <span>{data.dataQuality.source}</span>
             <span>·</span>
@@ -1137,8 +1437,89 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
         {data && metrics && (
           <>
             {/* PRIMARY HEADLINE KPI CARDS */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* 1. Open Orders Delivery % */}
+            {/* PRIMARY HEADLINE KPI CARDS */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+              {/* 1. Total Shipped Orders */}
+              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-primary/50 transition">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <span className="rounded bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary uppercase tracking-wider">
+                      Fulfillment
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-2">Total Shipped Orders</h3>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Total Shipped Orders"
+                      formula="Delivered + RTO + NDR/Undelivered + In Transit + OFD + Lost"
+                      calculation={`${formatNumber(metrics.shipped.count)} shipped out of ${formatNumber(metrics.total.count)} total orders (${metrics.shipped.percent}%)`}
+                      explanation="Total orders physically manifested, dispatched, and handed over to courier carriers across active transit and finalized statuses. Fresh unfulfilled orders awaiting warehouse pick-pack are excluded."
+                      notes="Forms the population base for Open Delivery % and RTO %."
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <Truck size={18} />
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">
+                    {formatNumber(metrics.shipped.count)}
+                  </strong>
+                  <span className="text-xs font-semibold text-primary flex items-center">
+                    {metrics.shipped.percent}% cohort
+                  </span>
+                </div>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    Delivered: <strong className="text-foreground">{formatNumber(metrics.delivered.count)}</strong>
+                  </span>
+                  <span>
+                    En Route: <strong className="text-foreground">{formatNumber(metrics.inTransit.count + metrics.outForDelivery.count)}</strong>
+                  </span>
+                </div>
+              </article>
+
+              {/* 2. Total Delivered Orders */}
+              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-emerald-500/50 transition">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                      Completed
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-2">Total Delivered Orders</h3>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Total Delivered Orders"
+                      formula="Orders confirmed DELIVERED to customer"
+                      calculation={`${formatNumber(metrics.delivered.count)} delivered (${metrics.openOrdersDeliveryRate}% of shipped, ${metrics.deliveryRate}% of cohort)`}
+                      explanation="Total shipments successfully delivered to end customers with verified courier delivery scan confirmation. Total store-to-door delivery success."
+                      notes={`Delivered revenue: ${formatCurrency(data.financials.deliveredRevenue)}. Average delivered order value: ${formatCurrency(data.financials.avgDeliveredOrderValue)}.`}
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
+                      <CheckCircle2 size={18} />
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <strong className="text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400">
+                    {formatNumber(metrics.delivered.count)}
+                  </strong>
+                  <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center">
+                    <ArrowUpRight size={14} /> {metrics.openOrdersDeliveryRate}%
+                  </span>
+                </div>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    1st Attempt: <strong className="text-foreground">{metrics.firstAttemptDelivered.percent}%</strong>
+                  </span>
+                  <span>
+                    Revenue: <strong className="text-foreground">{formatCurrency(data.financials.deliveredRevenue)}</strong>
+                  </span>
+                </div>
+              </article>
+
+              {/* 3. Open Orders Delivery % */}
               <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-primary/50 transition">
                 <div className="flex items-start justify-between">
                   <div>
@@ -1150,9 +1531,9 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   <div className="flex items-center gap-1.5">
                     <MetricInfoButton
                       title="Open Orders Delivery %"
-                      formula="Delivered ÷ Total Shipped × 100"
+                      formula="Delivered ÷ Total Shipped (Date Range) × 100"
                       calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.openOrdersDeliveryRate}%`}
-                      explanation="Calculates delivery success across all packages handed over to couriers. Numerator is Delivered; denominator includes all active transit and finalized statuses (Delivered + In Transit + OFD + NDR + RTO)."
+                      explanation="Calculates delivery success across all packages handed over to couriers in the date range. Numerator is Delivered; denominator includes all active transit and finalized statuses (Delivered + In Transit + OFD + NDR + RTO). Delivery success across all dispatched shipments."
                       notes="Fresh store orders placed today that are awaiting warehouse dispatch are excluded from shipped."
                     />
                     <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -1168,9 +1549,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <ArrowUpRight size={14} /> Delivered
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1.5">
-                  Delivery success across all dispatched shipments
-                </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
                     Delivered: <strong className="text-foreground">{formatNumber(metrics.delivered.count)}</strong>
@@ -1181,7 +1559,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               </article>
 
-              {/* 2. Closed Orders Delivery % */}
+              {/* 4. Closed Orders Delivery % */}
               <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-border/80 transition">
                 <div className="flex items-start justify-between">
                   <div>
@@ -1193,10 +1571,10 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   <div className="flex items-center gap-1.5">
                     <MetricInfoButton
                       title="Closed Orders Delivery %"
-                      formula="Delivered ÷ (Delivered + RTO + Undelivered + OFD) × 100"
-                      calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.closed.count)} × 100 = ${metrics.closedOrdersDeliveryRate}%`}
-                      explanation="Measures delivery conversion strictly on resolved or attempted shipments. Early line-haul packages still travelling between hubs are excluded so newer cohorts aren't penalized."
-                      notes="Once an in-transit order gets attempted or delivered, it enters this cohort."
+                      formula="Delivered ÷ (Delivered + RTO + Undelivered) × 100"
+                      calculation={`${formatNumber(metrics.delivered.count)} ÷ (${formatNumber(metrics.delivered.count)} + ${formatNumber(metrics.rto.count)} + ${formatNumber(metrics.ndr.count)}) × 100 = ${metrics.closedOrdersDeliveryRate}%`}
+                      explanation="Measures delivery conversion strictly on resolved and attempted shipments (Delivered ÷ [Delivered + RTO + Undelivered] × 100). Conversion rate on resolved & attempted shipments. Line-haul packages still travelling between hubs with 0 attempts are excluded so newer cohorts aren't penalized."
+                      notes={`Total closed outcomes in cohort: ${formatNumber(metrics.closed.count)}.`}
                     />
                     <div className="flex size-9 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600">
                       <PackageCheck size={18} />
@@ -1209,9 +1587,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </strong>
                   <span className="text-xs text-muted-foreground">conversion</span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1.5">
-                  Conversion rate on resolved & attempted shipments
-                </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
                     Outcomes: <strong className="text-foreground">{formatNumber(metrics.closed.count)}</strong>
@@ -1223,48 +1598,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               </article>
 
-              {/* 3. Overall Delivery % */}
-              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-border/80 transition">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
-                      Cohort Total
-                    </span>
-                    <h3 className="text-xs font-semibold text-muted-foreground mt-2">Overall Delivered %</h3>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <MetricInfoButton
-                      title="Overall Delivered %"
-                      formula="Delivered ÷ Total Cohort Orders × 100"
-                      calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.total.count)} × 100 = ${metrics.deliveryRate}%`}
-                      explanation="Calculates delivered packages as a percentage of all orders placed in this time window, including unfulfilled, cancelled, or pending orders."
-                      notes="Shows true store-to-door completion across the cohort."
-                    />
-                    <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
-                      <CheckCircle2 size={18} />
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-2 flex items-baseline gap-2">
-                  <strong className="text-2xl font-bold tracking-tight text-foreground">
-                    {metrics.deliveryRate}%
-                  </strong>
-                  <span className="text-xs text-muted-foreground">of all orders</span>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1.5">
-                  Store-wide delivery rate across all orders placed
-                </p>
-                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
-                  <span>
-                    Total: <strong className="text-foreground">{formatNumber(metrics.total.count)}</strong>
-                  </span>
-                  <span>
-                    Delivered: <strong className="text-foreground">{formatNumber(metrics.delivered.count)}</strong>
-                  </span>
-                </div>
-              </article>
-
-              {/* 4. RTO % */}
+              {/* 5. RTO % */}
               <article className="rounded-xl border border-destructive/20 bg-card p-4 shadow-xs relative group hover:border-destructive/40 transition">
                 <div className="flex items-start justify-between">
                   <div>
@@ -1278,7 +1612,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       title="RTO % (Return to Origin)"
                       formula="RTO ÷ Total Shipped × 100"
                       calculation={`${formatNumber(metrics.rto.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.rtoRate}%`}
-                      explanation="The percentage of dispatched orders that could not be delivered and are marked for return to the origin warehouse."
+                      explanation="The percentage of dispatched orders that could not be delivered and are marked for return to origin warehouse. Returned shipments out of total dispatched orders."
                       notes={`Total RTO share across all orders: ${metrics.rtoOfTotal.percent}%.`}
                     />
                     <div className="flex size-9 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
@@ -1292,9 +1626,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <ArrowDownRight size={14} /> of shipped
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1.5">
-                  Returned shipments out of total dispatched orders
-                </p>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
                     RTO Count: <strong className="text-destructive">{formatNumber(metrics.rto.count)}</strong>
@@ -1304,122 +1635,199 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </span>
                 </div>
               </article>
+
+              {/* 6. Overall Delivery % */}
+              <article className="rounded-xl border border-border bg-card p-4 shadow-xs relative group hover:border-border/80 transition">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                      Cohort Total
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-2">Overall Delivered %</h3>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Overall Delivered %"
+                      formula="Delivered ÷ Total Cohort Orders × 100"
+                      calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.total.count)} × 100 = ${metrics.deliveryRate}%`}
+                      explanation="Calculates delivered packages as a percentage of all orders placed in this time window, including unfulfilled, cancelled, or pending orders. Store-wide delivery rate across all orders placed."
+                      notes="Shows true store-to-door completion across the cohort."
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
+                      <CheckCircle2 size={18} />
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">
+                    {metrics.deliveryRate}%
+                  </strong>
+                  <span className="text-xs text-muted-foreground">of all orders</span>
+                </div>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    Total: <strong className="text-foreground">{formatNumber(metrics.total.count)}</strong>
+                  </span>
+                  <span>
+                    Delivered: <strong className="text-foreground">{formatNumber(metrics.delivered.count)}</strong>
+                  </span>
+                </div>
+              </article>
             </div>
 
             {/* SECONDARY PARAMETERS GRID: In Transit, OFD, NDR Recovery, Avg TAT */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* In Transit */}
+              {/* In Transit (0 Attempts) */}
               <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-muted-foreground">In Transit</span>
+                  <div>
+                    <span className="rounded bg-indigo-500/10 px-2 py-0.5 text-[10px] font-bold text-indigo-700 dark:text-indigo-400 uppercase tracking-wider">
+                      Line-Haul
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-1.5">In Transit (0 Attempts)</h3>
+                  </div>
                   <div className="flex items-center gap-1.5">
                     <MetricInfoButton
-                      title="In Transit Shipments"
-                      formula="In Transit Orders ÷ Total Shipped × 100"
+                      title="In Transit Shipments (0 Attempts)"
+                      formula="In Transit Orders (0 Delivery Attempts) ÷ Total Shipped × 100"
                       calculation={`${formatNumber(metrics.inTransit.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.inTransit.percent}%`}
-                      explanation="Packages currently en route across regional courier line-hauls and hubs that have not yet had a final delivery attempt or RTO."
+                      explanation="Line-haul packages currently en route between fulfillment hubs and destination centers with zero delivery attempts. Once a courier rider attempts delivery, the parcel enters Out for Delivery or NDR."
+                      notes={`Strict 0-attempt shipments: ${formatNumber(metrics.inTransitZeroAttempts.count)} of ${formatNumber(metrics.inTransit.count)} in-transit orders.`}
                     />
-                    <Truck size={16} className="text-indigo-500" />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-600">
+                      <Truck size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
-                  <strong className="text-xl font-bold text-foreground">{metrics.inTransit.percent}%</strong>
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">{metrics.inTransit.percent}%</strong>
                   <span className="text-xs text-muted-foreground">({formatNumber(metrics.inTransit.count)} orders)</span>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1.5">
-                  Line-haul shipments en route between hubs
-                </p>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    Zero Attempts: <strong className="text-foreground">{formatNumber(metrics.inTransitZeroAttempts.count)}</strong>
+                  </span>
+                  <span>
+                    Status: <strong className="text-foreground">In Transit</strong>
+                  </span>
+                </div>
               </div>
 
               {/* Out for Delivery % */}
               <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-muted-foreground">Out for Delivery</span>
+                  <div>
+                    <span className="rounded bg-sky-500/10 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-400 uppercase tracking-wider">
+                      Last-Mile
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-1.5">Out for Delivery (OFD)</h3>
+                  </div>
                   <div className="flex items-center gap-1.5">
                     <MetricInfoButton
                       title="Out for Delivery (OFD)"
-                      formula="OFD Orders ÷ Total Shipped × 100"
+                      formula="Active OFD Orders in Cohort ÷ Total Shipped × 100"
                       calculation={`${formatNumber(metrics.outForDelivery.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.outForDelivery.percent}%`}
-                      explanation="Parcels that have reached local delivery centers and are dispatched with riders for delivery attempts today."
+                      explanation={`Parcels currently assigned to courier riders for active doorstep delivery attempts. Active in this order cohort: ${formatNumber(metrics.outForDelivery.count)} orders (${metrics.outForDelivery.percent}% of shipped). Real-time today scans across all orders: ${data.todayOfd?.total ?? '—'} dispatched today (${data.todayOfd?.stillOut ?? '—'} active with riders, ${data.todayOfd?.delivered ?? '—'} delivered today, ${data.todayOfd?.undelivered ?? '—'} undelivered).`}
+                      notes="Click the live badge or the 'Today\'s OFD' tab above to view real-time courier attempts for today's scans."
                     />
-                    <PackageCheck size={16} className="text-sky-500" />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600">
+                      <PackageCheck size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
-                  <strong className="text-xl font-bold text-foreground">{metrics.outForDelivery.percent}%</strong>
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">{metrics.outForDelivery.percent}%</strong>
                   <span className="text-xs text-muted-foreground">
-                    ({formatNumber(metrics.outForDelivery.count)} orders out today)
+                    ({formatNumber(metrics.outForDelivery.count)} active)
                   </span>
                 </div>
-                <div className="mt-2.5 rounded-lg bg-muted/50 p-2 text-xs text-muted-foreground">
-                  <p className="text-[11px]">Active last-mile attempts currently with delivery agents.</p>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <button
+                    type="button"
+                    onClick={() => setActiveMode("today_ofd")}
+                    className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-600 dark:text-sky-400 hover:underline"
+                    title="Switch to Today's OFD register"
+                  >
+                    <span className="size-1.5 rounded-full bg-sky-500 animate-pulse" />
+                    Today: {data.todayOfd?.total || 0} OFD ({data.todayOfd?.stillOut || 0} out) →
+                  </button>
+                  <span className="text-muted-foreground">
+                    Active: <strong className="text-foreground">{formatNumber(metrics.outForDelivery.count)}</strong>
+                  </span>
                 </div>
               </div>
 
               {/* NDR / Undelivered Delivery Percentage (Recovery Rate) */}
               <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-muted-foreground">NDR Recovery Delivery %</span>
+                  <div>
+                    <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                      Recovery
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-1.5">NDR Recovery Delivery %</h3>
+                  </div>
                   <div className="flex items-center gap-1.5">
                     <MetricInfoButton
                       title="NDR Recovery Delivery %"
                       formula="Delivered after NDR ÷ Total NDR Experienced × 100"
                       calculation={`${formatNumber(metrics.ndrDelivered.count)} ÷ ${formatNumber(metrics.totalNdrExperienced.count)} × 100 = ${metrics.ndrDeliveryRate}%`}
-                      explanation="Success rate of re-attempting and successfully delivering orders that had previously failed delivery (customer unavailable, reschedule, etc.)."
+                      explanation="Success rate of re-attempting and successfully delivering orders that had previously failed delivery (customer unavailable, customer reschedule, incomplete address, etc.)."
+                      notes={`Total NDR incidents experienced: ${formatNumber(metrics.totalNdrExperienced.count)}. Recovered to Delivered: ${formatNumber(metrics.ndrDelivered.count)}.`}
                     />
-                    <Percent size={16} className="text-emerald-500" />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
+                      <Percent size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
-                  <strong className="text-xl font-bold text-foreground">{metrics.ndrDeliveryRate}%</strong>
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">{metrics.ndrDeliveryRate}%</strong>
                   <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">delivered</span>
                 </div>
-                <div className="mt-2.5 rounded-lg bg-muted/50 p-2 text-[11px] text-muted-foreground space-y-1">
-                  <div className="flex justify-between">
-                    <span>Delivered after NDR:</span>
-                    <strong className="text-foreground">{formatNumber(metrics.ndrDelivered.count)}</strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Total NDR experienced:</span>
-                    <strong className="text-foreground">{formatNumber(metrics.totalNdrExperienced.count)}</strong>
-                  </div>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    Recovered: <strong className="text-foreground">{formatNumber(metrics.ndrDelivered.count)}</strong>
+                  </span>
+                  <span>
+                    Total NDR: <strong className="text-foreground">{formatNumber(metrics.totalNdrExperienced.count)}</strong>
+                  </span>
                 </div>
               </div>
 
               {/* Avg Time to Deliver (TAT) */}
               <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-muted-foreground">Avg Time to Deliver</span>
+                  <div>
+                    <span className="rounded bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wider">
+                      Speed
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-1.5">Avg Time to Deliver</h3>
+                  </div>
                   <div className="flex items-center gap-1.5">
                     <MetricInfoButton
                       title="Avg Turnaround Time (TAT)"
                       formula="Mean of (Delivered Date - Shipped Date)"
                       calculation={metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} days dispatch to door` : undefined}
-                      explanation="The average duration in days taken from carrier handover to doorstep delivery for completed orders."
-                      notes={`Order creation to delivery average: ${metrics.avgOrderTatDays != null ? `${metrics.avgOrderTatDays} days` : "—"}.`}
+                      explanation="The average duration in days taken from carrier handover (shipped) to doorstep delivery for completed orders across this cohort."
+                      notes={`Order creation to delivery average: ${metrics.avgOrderTatDays != null ? metrics.avgOrderTatDays + ' days' : '—'}.`}
                     />
-                    <Clock size={16} className="text-amber-500" />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600">
+                      <Clock size={18} />
+                    </div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
-                  <strong className="text-xl font-bold text-foreground">
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">
                     {metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} days` : "—"}
                   </strong>
                   <span className="text-xs text-muted-foreground">dispatch to door</span>
                 </div>
-                <div className="mt-2.5 rounded-lg bg-muted/50 p-2 text-[11px] text-muted-foreground space-y-1">
-                  <div className="flex justify-between">
-                    <span>Shipped → Delivered:</span>
-                    <strong className="text-foreground">
-                      {metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} days` : "—"}
-                    </strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Order → Delivered:</span>
-                    <strong className="text-foreground">
-                      {metrics.avgOrderTatDays != null ? `${metrics.avgOrderTatDays} days` : "—"}
-                    </strong>
-                  </div>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    Dispatch: <strong className="text-foreground">{metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays}d` : "—"}</strong>
+                  </span>
+                  <span>
+                    Order Date: <strong className="text-foreground">{metrics.avgOrderTatDays != null ? `${metrics.avgOrderTatDays}d` : "—"}</strong>
+                  </span>
                 </div>
               </div>
             </div>
@@ -1435,9 +1843,18 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       Success rate categorized by number of attempts required to achieve delivery
                     </p>
                   </div>
-                  <span className="rounded bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground uppercase tracking-wide">
-                    Funnel
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <MetricInfoButton
+                      title="Delivery Attempt Breakdown"
+                      formula="Delivered on Attempt N ÷ Total Delivered × 100"
+                      calculation={`1st attempt: ${metrics.firstAttemptDelivered.percent}% (${formatNumber(metrics.firstAttemptDelivered.count)}) · 2nd attempt: ${metrics.secondAttemptDelivered.percent}% (${formatNumber(metrics.secondAttemptDelivered.count)}) · 3rd attempt: ${metrics.thirdAttemptDelivered.percent}% (${formatNumber(metrics.thirdAttemptDelivered.count)})`}
+                      explanation="Measures the distribution of delivery attempts required to successfully deliver packages. 1st attempt delivered succeeded on the initial delivery run with 0 prior failed attempts. 2nd and 3rd attempts succeeded after re-attempting following NDR exceptions."
+                      notes="All attempt percentages are calculated out of total delivered shipments in this cohort."
+                    />
+                    <span className="rounded bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground uppercase tracking-wide">
+                      Funnel
+                    </span>
+                  </div>
                 </div>
 
                 <div className="mt-4 space-y-3.5">
@@ -1545,7 +1962,16 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       COD vs Prepaid volume ratio and comparison of actual delivery success rates
                     </p>
                   </div>
-                  <CreditCard size={17} className="text-muted-foreground" />
+                  <div className="flex items-center gap-2">
+                    <MetricInfoButton
+                      title="Payment Method Split & Delivery %"
+                      formula="Ratio: Count ÷ Total Orders × 100. Delivery %: Delivered ÷ Shipped × 100"
+                      calculation={`COD: ${metrics.codRatio}% (${formatNumber(metrics.cod.count)}), ${metrics.codDeliveryRate}% del. Prepaid: ${metrics.prepaidRatio}% (${formatNumber(metrics.prepaid.count)}), ${metrics.prepaidDeliveryRate}% del.`}
+                      explanation="Compares order volume split between Cash On Delivery (COD) and Prepaid, along with the actual delivery fulfillment rates achieved for each payment method across dispatched orders."
+                      notes={`Prepaid delivery rate outperforms COD by ${(metrics.prepaidDeliveryRate - metrics.codDeliveryRate).toFixed(1)}%. Closed delivery rate: Prepaid ${metrics.prepaidClosedDeliveryRate}% vs COD ${metrics.codClosedDeliveryRate}%.`}
+                    />
+                    <CreditCard size={17} className="text-muted-foreground" />
+                  </div>
                 </div>
 
                 {/* Ratio bar */}
@@ -1992,7 +2418,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                             )}
                           </td>
                           <td className="py-3 px-4 text-right text-muted-foreground font-medium">
-                            {p.shipped === 0 || p.delivered + p.rto === 0 ? "—" : `${p.closedDeliveryRate}%`}
+                            {p.shipped === 0 || p.closed === 0 ? "—" : `${p.closedDeliveryRate}%`}
                           </td>
                           <td className="py-3 px-4 text-right text-destructive font-medium">{formatNumber(p.rto)}</td>
                         </tr>

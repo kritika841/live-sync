@@ -1,7 +1,7 @@
 import { getRuntimeEnv } from "../lib/database";
-import { syncShiprocketOrders, syncRecentOrders } from "../lib/shiprocket";
-import { loadOfdRecords } from "../lib/ofd";
+import { syncShiprocketOrders } from "../lib/shiprocket";
 import { invalidateCache } from "../lib/server-cache";
+import { syncTodayOfdAudit } from "../lib/ofd-audit";
 
 async function executeSync(source = "cron") {
   const timestamp = new Date().toISOString();
@@ -16,10 +16,12 @@ async function executeSync(source = "cron") {
     // 2. Clear stale cache in memory and database
     invalidateCache();
 
-    // 3. Precompute and persist Today's OFD in PostgreSQL analytics_cache
+    // 3. Precompute and persist Today's OFD Audit Register & auto-export CSV
     const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
-    const ofdResult = await loadOfdRecords(runtime.DB, todayStr);
-    console.log(`[${new Date().toISOString()}] Precomputed Today's OFD: ${ofdResult.results.length} records cached.`);
+    const ofdAuditResult = await syncTodayOfdAudit(runtime.DB, todayStr);
+    console.log(
+      `[${new Date().toISOString()}] OFD Audit synchronized: ${ofdAuditResult.total} orders (${ofdAuditResult.delivered} delivered, ${ofdAuditResult.stillOfd} still OFD, ${ofdAuditResult.undelivered} undelivered, ${ofdAuditResult.rto} RTO).`
+    );
 
     // 4. Invalidate 30-day analytics cache key so next visit instantly picks fresh metrics
     await runtime.DB.prepare(

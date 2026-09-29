@@ -2,14 +2,39 @@ import { errorResponse } from "../../../../lib/http";
 import { reconcileInventorySafely } from "../../../../lib/operations/reconcile";
 import { ensureSchema, getRuntimeEnv, logActivity, setSyncState } from "../../../../lib/database";
 import { fetchSpecificOrder, normalizeShiprocketDate, syncRecentOrders } from "../../../../lib/shiprocket";
+import { recordOfdWebhookArrival } from "../../../../lib/ofd-audit";
+import { invalidateCache } from "../../../../lib/server-cache";
 
 export const dynamic = "force-dynamic";
 
 function safeEqual(left: string, right: string) {
-  if (!left || !right || left.length !== right.length) return false;
+  const l = (left || "").trim();
+  const r = (right || "").trim();
+  if (!l || !r || l.length !== r.length) return false;
   let difference = 0;
-  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  for (let index = 0; index < l.length; index += 1) difference |= l.charCodeAt(index) ^ r.charCodeAt(index);
   return difference === 0;
+}
+
+function extractWebhookToken(request: Request, payload?: Record<string, unknown> | null): string {
+  const url = new URL(request.url);
+  const token =
+    request.headers.get("x-api-key") ||
+    request.headers.get("x-webhook-token") ||
+    request.headers.get("x-shiprocket-token") ||
+    request.headers.get("x-shiprocket-secret") ||
+    request.headers.get("webhook-token") ||
+    request.headers.get("token") ||
+    request.headers.get("secret") ||
+    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
+    url.searchParams.get("token") ||
+    url.searchParams.get("secret") ||
+    url.searchParams.get("api_key") ||
+    url.searchParams.get("key") ||
+    (payload && typeof payload.token === "string" ? payload.token : "") ||
+    (payload && typeof payload.secret === "string" ? payload.secret : "") ||
+    "";
+  return token.trim();
 }
 
 const intValue = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : null;
@@ -28,16 +53,30 @@ const ofdUpdate = `UPDATE orders SET
 
 async function handlePOST(request: Request) {
   const runtime = getRuntimeEnv();
-  const secret = runtime.SHIPROCKET_WEBHOOK_SECRET || "";
-  const provided = request.headers.get("x-api-key")
-    || request.headers.get("x-webhook-token")
-    || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "")
-    || new URL(request.url).searchParams.get("token")
-    || "";
-  if (!safeEqual(provided, secret)) return Response.json({ error: "Invalid webhook token" }, { status: 401 });
-
   const payload = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!payload) return Response.json({ error: "Invalid JSON payload" }, { status: 400 });
+
+  const secret = runtime.SHIPROCKET_WEBHOOK_SECRET || "";
+  const provided = extractWebhookToken(request, payload);
+  if (!safeEqual(provided, secret)) {
+    const url = new URL(request.url);
+    await ensureSchema(runtime.DB).catch(() => null);
+    await logActivity(
+      runtime.DB,
+      "Order webhook",
+      "webhook.rejected",
+      `Unauthorized webhook request to ${url.pathname}`,
+      {
+        path: url.pathname,
+        providedTokenLength: provided.length,
+        expectedTokenLength: secret.trim().length,
+        headerKeys: Array.from(request.headers.keys()),
+      },
+      "warn"
+    ).catch(() => null);
+    return Response.json({ error: "Invalid webhook token" }, { status: 401 });
+  }
+
   await ensureSchema(runtime.DB);
   const now = new Date().toISOString();
   const shiprocketOrderId = intValue(payload.sr_order_id || payload.shiprocket_order_id);
@@ -111,6 +150,21 @@ async function handlePOST(request: Request) {
       else if (channelOrderId) await runtime.DB.prepare(`${update}channel_order_id = ?`).bind(reason, attempts, attempts, raisedAt, channelOrderId).run();
     }
   }
+
+  // Record into dedicated OFD audit table if applicable
+  await recordOfdWebhookArrival(runtime.DB, {
+    shiprocketOrderId,
+    channelOrderId,
+    shipmentId,
+    awb,
+    status,
+    eventAt,
+    payload: payload || undefined,
+  }).catch(() => null);
+
+  // Invalidate Today's OFD analytics cache so the dashboard shows real-time changes immediately
+  invalidateCache();
+  await runtime.DB.prepare("DELETE FROM analytics_cache WHERE cache_key LIKE 'today_ofd_%'").run().catch(() => null);
 
   if (shiprocketOrderId) {
     await fetchSpecificOrder(runtime, shiprocketOrderId);

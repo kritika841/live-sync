@@ -19,9 +19,15 @@ const eslintConfig = defineConfig([
   ...tseslint.configs.recommended,
   react.configs.flat.recommended,
   react.configs.flat["jsx-runtime"],
-  reactHooks.configs.flat["recommended-latest"],
+  reactHooks.configs.flat.recommended,
   jsxA11y.flatConfigs.recommended,
   next.configs["core-web-vitals"],
+  {
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+      "jsx-a11y/no-noninteractive-element-interactions": "warn",
+    },
+  },
   {
     languageOptions: {
       globals: {

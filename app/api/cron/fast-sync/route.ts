@@ -26,6 +26,8 @@ async function handle(request: Request) {
   try {
     const runtime = getRuntimeEnv();
     const result = await syncRecentOrders(runtime);
+    const { syncTodayOfdAudit } = await import("../../../../lib/ofd-audit");
+    await syncTodayOfdAudit(runtime.DB).catch(() => null);
     invalidateCache();
     return Response.json({ ok: true, ...result });
   } catch (error) {

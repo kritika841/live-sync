@@ -35,7 +35,7 @@ export async function currentDashboardUser(): Promise<DashboardUser | null> {
       const { data } = await supabase.auth.getUser();
       if (data.user) return dashboardUser(data.user);
     }
-  } catch {}
+  } catch { /* ignore unauthenticated session */ }
   if (process.env.NODE_ENV === "development") {
     return {
       id: "dev-admin-id",

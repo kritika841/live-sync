@@ -322,6 +322,8 @@ const PARAMETER_STATUSES = {
     "INVOICED",
     "PICKUP ERROR",
     "PICKUP EXCEPTION",
+    "SELF FULFILED",
+    "SELF FULFILLED",
   ],
   CANCELLED: [
     "CANCELED",
@@ -650,32 +652,67 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
     return params.toString();
   }, [from, to, courier, payment, state]);
 
+  const currentQueryRef = useRef(queryParams);
+  useEffect(() => {
+    currentQueryRef.current = queryParams;
+  }, [queryParams]);
+
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+
   async function fetchAnalytics(refresh = false) {
     if (preview) return;
+
+    // Cancel any previous in-flight request to prevent race conditions
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    activeAbortControllerRef.current = controller;
+    const requestQuery = queryParams;
+
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/analytics?${queryParams}${refresh ? "&refresh=1" : ""}`, {
+      const res = await fetch(`/api/analytics?${requestQuery}${refresh ? "&refresh=1" : ""}`, {
         cache: "no-store",
         headers: { "x-requested-with": "satmi-analytics" },
+        signal: controller.signal,
       });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
         throw new Error(payload.error || "Failed to load analytics data");
       }
       const json = (await res.json()) as AnalyticsData;
+
+      // Discard stale response if active query changed while request was in-flight
+      if (currentQueryRef.current !== requestQuery) return;
+
       setData(json);
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      if (currentQueryRef.current !== requestQuery) return;
       setError(err instanceof Error ? err.message : "Error loading analytics");
     } finally {
-      setLoading(false);
+      if (currentQueryRef.current === requestQuery) {
+        setLoading(false);
+      }
     }
   }
 
   useEffect(() => {
-    if (active && activeMode === "overview") {
+    if (!active || activeMode !== "overview") return;
+
+    // Debounce custom date picker selections by 200ms so user can set both From and To dates without firing intermediate multi-month queries
+    const timer = setTimeout(() => {
       void fetchAnalytics();
-    }
+    }, datePreset === "custom" ? 200 : 0);
+
+    return () => {
+      clearTimeout(timer);
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, activeMode, queryParams]);
 
@@ -1446,6 +1483,39 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               />
             </div>
 
+            {/* Historical Month Selector */}
+            <select
+              value={
+                from && to && from.slice(0, 7) === to.slice(0, 7) && from.slice(8, 10) === "01"
+                  ? from.slice(0, 7)
+                  : ""
+              }
+              onChange={(e) => {
+                const ym = e.target.value;
+                if (!ym) return;
+                const [year, month] = ym.split("-").map(Number);
+                const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+                const newFrom = `${ym}-01`;
+                const newTo = ym === todayStr.slice(0, 7) ? todayStr : `${ym}-${String(lastDay).padStart(2, "0")}`;
+                setFrom(newFrom);
+                setTo(newTo);
+                setDatePreset("custom");
+              }}
+              className="h-8 rounded-lg border border-border bg-card px-2.5 text-xs font-medium text-foreground hover:bg-muted/50 transition focus:outline-none shadow-xs"
+              title="Select Specific Month"
+            >
+              <option value="">Month…</option>
+              <option value="2026-09">September 2026</option>
+              <option value="2026-08">August 2026</option>
+              <option value="2026-07">July 2026</option>
+              <option value="2026-06">June 2026</option>
+              <option value="2026-05">May 2026</option>
+              <option value="2026-04">April 2026</option>
+              <option value="2026-03">March 2026</option>
+              <option value="2026-02">February 2026</option>
+              <option value="2026-01">January 2026</option>
+            </select>
+
             {/* Courier Filter */}
             <select
               value={courier}
@@ -1627,8 +1697,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   <strong className="text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400">
                     {formatNumber(metrics.delivered.count)}
                   </strong>
-                  <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center">
-                    <ArrowUpRight size={14} /> {metrics.openOrdersDeliveryRate}%
+                  <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center" title={`${metrics.openOrdersDeliveryRate}% of shipped (${formatNumber(metrics.delivered.count)} / ${formatNumber(metrics.shipped.count)}), ${metrics.deliveryRate}% of cohort`}>
+                    <ArrowUpRight size={14} /> {metrics.openOrdersDeliveryRate}% <span className="text-[10px] font-normal text-muted-foreground ml-1">of shipped</span>
                   </span>
                 </div>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">

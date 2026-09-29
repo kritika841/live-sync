@@ -199,11 +199,11 @@ export async function reconcileSourceOfTruth() {
 
   console.log("=== ORDERS UPDATED SUCCESSFULLY. NOW PRECOMPUTING CACHE IN DATABASE ===");
 
-  // Clear stale analytics_cache entries so fresh metrics are loaded
-  await db.prepare("TRUNCATE TABLE analytics_cache").run().catch(() => null);
+  // Clear non-immutable analytics_cache entries while preserving immutable prehistoric records
+  await db.prepare("DELETE FROM analytics_cache WHERE is_immutable = FALSE").run().catch(() => null);
 
   // Precompute and store Today's OFD in database cache
-  const todayStr = "2026-09-28";
+  const todayStr = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const ofdRows = await loadOfdRecords(db, todayStr);
   console.log(`Precomputed Today's OFD (${ofdRows.results.length} records).`);
 

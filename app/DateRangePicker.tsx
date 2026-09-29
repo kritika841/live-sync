@@ -19,7 +19,7 @@ export default function DateRangePicker({from,to,max,onApply}:{from:string;to:st
         onClick={()=>{setStart(from);setEnd(to);setMonth(new Date((from||max)+"T12:00:00"));setOpen(true);}}
       >
         <CalendarDays size={15} className="text-muted-foreground shrink-0"/>
-        <span className="truncate">{from && to ? `${from} — ${to}` : "Custom range"}</span>
+        <span className="truncate">{from && to ? (from === to ? from : `${from} — ${to}`) : (from || "Custom range")}</span>
       </button>
       <Modal open={open} onClose={()=>setOpen(false)} title="Select date range">
         <div className="range-picker space-y-3 p-1">
@@ -93,8 +93,8 @@ export default function DateRangePicker({from,to,max,onApply}:{from:string;to:st
             <button
               type="button"
               className="ops-primary rounded-lg bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition disabled:opacity-50"
-              disabled={!start||!end}
-              onClick={()=>{onApply(start,end);setOpen(false);}}
+              disabled={!start}
+              onClick={()=>{onApply(start,end || start);setOpen(false);}}
             >
               Apply
             </button>

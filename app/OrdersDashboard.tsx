@@ -160,6 +160,15 @@ const indiaDateValue = (date: Date) => {
 };
 const todayValue = indiaDateValue(new Date());
 
+function addDaysToIso(isoDateStr: string, days: number): string {
+  const [y, m, d] = isoDateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d + days, 12, 0, 0));
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export default function OrdersDashboard({
   userLabel,
   userEmail,
@@ -487,19 +496,18 @@ export default function OrdersDashboard({
   }
 
   function applyRecentDays(days: number) {
-    const end = new Date();
-    const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - (days - 1));
-    setFrom(indiaDateValue(start));
-    setTo(indiaDateValue(end));
+    const today = indiaDateValue(new Date());
+    const start = addDaysToIso(today, -(days - 1));
+    setFrom(start);
+    setTo(today);
     setPage(1);
   }
 
   function applyYesterday() {
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const value = indiaDateValue(yesterday);
-    setFrom(value);
-    setTo(value);
+    const today = indiaDateValue(new Date());
+    const yesterday = addDaysToIso(today, -1);
+    setFrom(yesterday);
+    setTo(yesterday);
     setPage(1);
   }
 

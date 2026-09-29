@@ -15,7 +15,7 @@ import {
   highRiskSql,
   lowRiskSql,
 } from "../../../lib/analytics-status";
-import { cachedValue } from "../../../lib/server-cache";
+import { cachedValue, invalidateCache } from "../../../lib/server-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -116,6 +116,7 @@ function isOpenDeliveryStatus(statusValue: unknown) {
     "IN TRANSIT-EN-ROUTE",
     "IN TRANSIT-AT DESTINATION HUB",
     "REACHED AT DESTINATION HUB",
+    "REACHED DESTINATION HUB",
     "PICKED UP",
     "MISROUTED",
     "UNTRACEABLE",
@@ -149,7 +150,6 @@ async function handleGET(request: Request) {
   if (access.response) return access.response;
 
   const runtime = getRuntimeEnv();
-  await ensureSchema(runtime.DB);
 
   const url = new URL(request.url);
   const mode = url.searchParams.get("mode") === "today_ofd" ? "today_ofd" : "overview";
@@ -162,21 +162,27 @@ async function handleGET(request: Request) {
 
     const forceRefresh = url.searchParams.get("refresh") === "1";
     const dbCacheKey = `today_ofd_${selectedDate}`;
+    const isPastDate = selectedDate < currentIndiaDate;
+    const cacheKey = `analytics-today-ofd-${selectedDate}`;
+    const ttl = forceRefresh ? 0 : (isPastDate ? 86400000 : 60000);
+    if (forceRefresh) invalidateCache(cacheKey);
 
-    if (!forceRefresh) {
-      const cached = await runtime.DB.prepare(
-        "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
-      )
-        .bind(dbCacheKey)
-        .first<{ payload: string | Record<string, unknown> }>()
-        .catch(() => null);
-      if (cached?.payload) {
-        const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
-        return Response.json(parsed);
+    const payload = await cachedValue(cacheKey, ttl, async () => {
+      await ensureSchema(runtime.DB);
+      if (!forceRefresh) {
+        const cached = await runtime.DB.prepare(
+          isPastDate
+            ? "SELECT payload FROM analytics_cache WHERE cache_key = ?"
+            : "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
+        )
+          .bind(dbCacheKey)
+          .first<{ payload: string | Record<string, unknown> }>()
+          .catch(() => null);
+        if (cached?.payload) {
+          return typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
+        }
       }
-    }
 
-    const payload = await cachedValue(`analytics-today-ofd-${selectedDate}`, forceRefresh ? 0 : 60000, async () => {
       const history = await runtime.DB.prepare(
         "SELECT key,value FROM sync_state WHERE key IN ('tracking_history_status','tracking_history_last_sync_at')"
       ).all<{ key: string; value: string }>();
@@ -254,7 +260,7 @@ async function handleGET(request: Request) {
         else attemptCounts.later += 1;
       }
       const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
-      return {
+      const resultPayload = {
         date: selectedDate,
         metrics: {
           total: metric(total, total),
@@ -275,16 +281,18 @@ async function handleGET(request: Request) {
         trackingHistory,
         orders,
       };
-    });
 
-    await runtime.DB.prepare(
-      `INSERT INTO analytics_cache (cache_key, payload, updated_at)
-       VALUES (?, ?::jsonb, NOW())
-       ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`
-    )
-      .bind(dbCacheKey, JSON.stringify(payload))
-      .run()
-      .catch(() => null);
+      await runtime.DB.prepare(
+        `INSERT INTO analytics_cache (cache_key, payload, updated_at, is_immutable)
+         VALUES (?, ?::jsonb, NOW(), ?)
+         ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW(), is_immutable = EXCLUDED.is_immutable`
+      )
+        .bind(dbCacheKey, JSON.stringify(resultPayload), isPastDate)
+        .run()
+        .catch(() => null);
+
+      return resultPayload;
+    });
 
     return Response.json(payload);
   }
@@ -331,20 +339,30 @@ async function handleGET(request: Request) {
   const forceRefresh = url.searchParams.get("refresh") === "1";
   const dbCacheKey = `overview_${cacheKey}`;
 
-  if (!forceRefresh) {
-    const cached = await runtime.DB.prepare(
-      "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '15 minutes'"
-    )
-      .bind(dbCacheKey)
-      .first<{ payload: string | Record<string, unknown> }>()
-      .catch(() => null);
-    if (cached?.payload) {
-      const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
-      return Response.json(parsed);
-    }
-  }
+  const currentMonthStart = indiaToday().slice(0, 7) + "-01";
+  const cutoffDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  const payload = await cachedValue(cacheKey, forceRefresh ? 0 : 120000, async () => {
+  // Prehistoric data: any query where requested end date 'to' is before cutoffDate OR in a past month
+  // These values represent closed, historical shipments and will NEVER change.
+  const isImmutable = Boolean(to && (to <= cutoffDate || to < currentMonthStart));
+  const ttl = forceRefresh ? 0 : (isImmutable ? 86400000 : 120000);
+  if (forceRefresh) invalidateCache(cacheKey);
+
+  const payload = await cachedValue(cacheKey, ttl, async () => {
+    await ensureSchema(runtime.DB);
+    if (!forceRefresh) {
+      const cached = await runtime.DB.prepare(
+        isImmutable
+          ? "SELECT payload FROM analytics_cache WHERE cache_key = ?"
+          : "SELECT payload FROM analytics_cache WHERE cache_key = ? AND updated_at >= NOW() - INTERVAL '2 hours'"
+      )
+        .bind(dbCacheKey)
+        .first<{ payload: string | Record<string, unknown> }>()
+        .catch(() => null);
+      if (cached?.payload) {
+        return typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
+      }
+    }
     const ndrReasonSql = "COALESCE(NULLIF(ndr_reason, ''), 'Reason not supplied')";
     const whereO = where
       .replaceAll("customer_state", "o.customer_state")
@@ -416,7 +434,7 @@ async function handleGET(request: Request) {
       runtime.DB.prepare(`
         SELECT ${ndrReasonSql} AS reason, COUNT(*) AS count
         FROM orders
-        WHERE ${where} AND (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL))
+        WHERE ${where} AND (${ndrSql} OR ndr_attempts > 1 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1)
         GROUP BY reason
         ORDER BY count DESC
         LIMIT 50
@@ -588,7 +606,7 @@ async function handleGET(request: Request) {
 
     const syncState = Object.fromEntries(syncRows.results.map((r) => [r.key, r.value || ""]));
 
-  return {
+    const resultPayload = {
     statusBreakdown: statuses.results,
     metrics: {
       // 1. Overall Delivery %
@@ -748,18 +766,20 @@ async function handleGET(request: Request) {
       undelivered: Number(todayOfdSummary?.today_undelivered || 0),
       rto: Number(todayOfdSummary?.today_rto || 0),
     },
-    syncState,
+      syncState,
     };
-  });
 
-  await runtime.DB.prepare(
-    `INSERT INTO analytics_cache (cache_key, payload, updated_at)
-     VALUES (?, ?::jsonb, NOW())
-     ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`
-  )
-    .bind(dbCacheKey, JSON.stringify(payload))
-    .run()
-    .catch(() => null);
+    await runtime.DB.prepare(
+      `INSERT INTO analytics_cache (cache_key, payload, updated_at, is_immutable)
+       VALUES (?, ?::jsonb, NOW(), ?)
+       ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW(), is_immutable = EXCLUDED.is_immutable`
+    )
+      .bind(dbCacheKey, JSON.stringify(resultPayload), isImmutable)
+      .run()
+      .catch(() => null);
+
+    return resultPayload;
+  });
 
   return Response.json(payload);
 }

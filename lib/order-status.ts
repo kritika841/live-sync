@@ -8,7 +8,7 @@ const OUT_FOR_DELIVERY = new Set(["OUT FOR DELIVERY"]);
 const UNDELIVERED = new Set(["UNDELIVERED", "NDR", "NDR PENDING"]);
 const SHIPPED = new Set([
   "SHIPPED", "IN TRANSIT", "IN TRANSIT-EN-ROUTE", "IN TRANSIT-AT DESTINATION HUB",
-  "REACHED AT DESTINATION HUB", "PICKED UP", "MISROUTED", "UNTRACEABLE",
+  "REACHED AT DESTINATION HUB", "REACHED DESTINATION HUB", "PICKED UP", "MISROUTED", "UNTRACEABLE",
 ]);
 
 const normalized = (value: unknown) => String(value ?? "").trim().toUpperCase();
@@ -34,7 +34,7 @@ export function sqlForTab(tab: OrderTab) {
   if (tab === "ready") return `${s} IN ('READY TO SHIP', 'AWB ASSIGNED', 'PICKUP SCHEDULED', 'MANIFEST GENERATED', 'OUT FOR PICKUP', 'PICKUP EXCEPTION')`;
   if (tab === "shipped") return `(${s} IN (
     'SHIPPED', 'IN TRANSIT', 'IN TRANSIT-EN-ROUTE', 'IN TRANSIT-AT DESTINATION HUB',
-    'REACHED AT DESTINATION HUB', 'PICKED UP', 'MISROUTED', 'UNTRACEABLE'
+    'REACHED AT DESTINATION HUB', 'REACHED DESTINATION HUB', 'PICKED UP', 'MISROUTED', 'UNTRACEABLE'
   ))`;
   if (tab === "new") return `${s} IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')`;
   return "1 = 1";

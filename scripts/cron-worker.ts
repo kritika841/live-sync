@@ -23,9 +23,9 @@ async function executeSync(source = "cron") {
       `[${new Date().toISOString()}] OFD Audit synchronized: ${ofdAuditResult.total} orders (${ofdAuditResult.delivered} delivered, ${ofdAuditResult.stillOfd} still OFD, ${ofdAuditResult.undelivered} undelivered, ${ofdAuditResult.rto} RTO).`
     );
 
-    // 4. Invalidate 30-day analytics cache key so next visit instantly picks fresh metrics
+    // 4. Invalidate active analytics cache keys while permanently preserving immutable prehistoric data
     await runtime.DB.prepare(
-      "DELETE FROM analytics_cache WHERE cache_key LIKE 'today_ofd_%' OR updated_at < NOW() - INTERVAL '30 minutes'"
+      "DELETE FROM analytics_cache WHERE (cache_key LIKE 'today_ofd_%' OR updated_at < NOW() - INTERVAL '2 hours') AND is_immutable = FALSE"
     ).run().catch(() => null);
 
     console.log(`[${new Date().toISOString()}] Synchronization and cache refresh complete!`);

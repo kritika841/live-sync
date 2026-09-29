@@ -181,7 +181,7 @@ export class PostgresDatabase {
       onnotice: () => {},
       // Supabase transaction pooling + Vercel functions: one client
       // connection per warm function instance avoids exhausting the pool.
-      max: 6,
+      max: 10,
       max_pipeline: 1, // Disable pipelining to prevent hangs over PgBouncer transaction mode
       idle_timeout: 10, // Release idle connection back to pool promptly
       max_lifetime: 60, // Regularly recycle connections to prevent stale pooled sockets
@@ -646,6 +646,14 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_purchase_orders_status ON purchase_orders (status, expected_date)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_purchase_order_lines_component ON purchase_order_lines (component_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_provider_event_inbox_status ON provider_event_inbox (provider, status, received_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS analytics_cache (
+      cache_key TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      is_immutable BOOLEAN NOT NULL DEFAULT FALSE
+    )`),
+    db.prepare("ALTER TABLE analytics_cache ADD COLUMN IF NOT EXISTS is_immutable BOOLEAN NOT NULL DEFAULT FALSE"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_analytics_date ON orders (SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10))"),
     db.prepare(`INSERT INTO component_types (id, name, position, created_at) VALUES
       ('accessory','Accessory',10,?), ('insert','Insert',20,?), ('inner-packaging','Inner packaging',30,?),
       ('outer-packaging','Outer packaging',40,?), ('courier-box','Courier box',50,?), ('other','Other',60,?)

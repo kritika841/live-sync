@@ -251,18 +251,106 @@ function getTodayString() {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-function getPastDateString(daysCount: number) {
-  // Shiprocket uses inclusive calendar days ending on today (e.g., 30 days is today - 29 days through today)
-  const d = new Date(Date.now() - Math.max(0, daysCount - 1) * 24 * 60 * 60 * 1000);
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(d);
-  const values = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-  return `${values.year}-${values.month}-${values.day}`;
+function addDaysToIso(isoDateStr: string, days: number): string {
+  const [y, m, d] = isoDateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d + days, 12, 0, 0));
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
+
+function getPastDateString(daysCount: number) {
+  const today = getTodayString();
+  return addDaysToIso(today, -Math.max(0, daysCount - 1));
+}
+
+const PARAMETER_STATUSES = {
+  DELIVERED: [
+    "DELIVERED",
+    "DELIVERED TO CUSTOMER",
+    "DELIVERY ACKNOWLEDGED",
+  ],
+  IN_TRANSIT: [
+    "SHIPPED",
+    "IN TRANSIT",
+    "IN TRANSIT-EN-ROUTE",
+    "IN TRANSIT-AT DESTINATION HUB",
+    "REACHED AT DESTINATION HUB",
+    "REACHED DESTINATION HUB",
+    "PICKED UP",
+    "MISROUTED",
+    "UNTRACEABLE",
+  ],
+  OUT_FOR_DELIVERY: [
+    "OUT FOR DELIVERY",
+  ],
+  NDR: [
+    "UNDELIVERED",
+    "UNDELIVERED-1ST ATTEMPT",
+    "UNDELIVERED-2ND ATTEMPT",
+    "UNDELIVERED-3RD ATTEMPT",
+    "Undelivered - Attempt Failure",
+    "NDR",
+    "NDR PENDING",
+    "CUSTOMER UNREACHABLE",
+    "ADDRESS INCOMPLETE",
+  ],
+  RTO: [
+    "RTO INITIATED",
+    "RTO IN TRANSIT",
+    "RTO AT DESTINATION HUB",
+    "RTO DELIVERED",
+    "RTO NDR",
+    "RTO OFD",
+    "RTO ACKNOWLEDGED",
+    "RETURN TO ORIGIN",
+  ],
+  LOST: [
+    "LOST",
+    "DAMAGED",
+  ],
+  NON_SHIPPED: [
+    "NEW",
+    "NEW ORDER",
+    "CONFIRMED",
+    "PROCESSING",
+    "READY TO SHIP",
+    "AWB ASSIGNED",
+    "PICKUP SCHEDULED",
+    "OUT FOR PICKUP",
+    "INVOICED",
+    "PICKUP ERROR",
+    "PICKUP EXCEPTION",
+  ],
+  CANCELLED: [
+    "CANCELED",
+    "CANCELLED",
+    "ORDER CANCELED",
+    "ORDER CANCELLED",
+  ],
+};
+
+const ALL_SHIPPED_STATUSES = [
+  ...PARAMETER_STATUSES.DELIVERED,
+  ...PARAMETER_STATUSES.OUT_FOR_DELIVERY,
+  ...PARAMETER_STATUSES.IN_TRANSIT,
+  ...PARAMETER_STATUSES.NDR,
+  ...PARAMETER_STATUSES.RTO,
+  ...PARAMETER_STATUSES.LOST,
+];
+
+const CLOSED_STATUSES = [
+  ...PARAMETER_STATUSES.DELIVERED,
+  ...PARAMETER_STATUSES.RTO,
+  ...PARAMETER_STATUSES.NDR,
+];
+
+const COHORT_ALL_STATUSES = [
+  ...ALL_SHIPPED_STATUSES,
+  ...PARAMETER_STATUSES.NON_SHIPPED,
+  ...PARAMETER_STATUSES.CANCELLED,
+];
 
 function MetricInfoButton({
   title,
@@ -271,6 +359,7 @@ function MetricInfoButton({
   explanation,
   notes,
   align = "right",
+  includedStatuses,
 }: {
   title: string;
   formula: string;
@@ -278,6 +367,7 @@ function MetricInfoButton({
   explanation: string;
   notes?: string;
   align?: "left" | "right";
+  includedStatuses?: string[];
 }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -309,7 +399,7 @@ function MetricInfoButton({
           setOpen((prev) => !prev);
         }}
         aria-label={`Formula details for ${title}`}
-        title={`View formula for ${title}`}
+        title={`View formula and included statuses for ${title}`}
         className={`inline-flex items-center justify-center size-5 rounded-full border transition-all ${
           open
             ? "border-primary bg-primary text-primary-foreground shadow-xs scale-105"
@@ -328,7 +418,7 @@ function MetricInfoButton({
           onClick={(e) => e.stopPropagation()}
           className={`absolute ${
             align === "left" ? "left-0" : "right-0"
-          } top-7 z-50 w-72 sm:w-80 rounded-xl border border-border bg-card/98 backdrop-blur-md p-3.5 shadow-2xl ring-1 ring-black/10 dark:ring-white/10 animate-in fade-in zoom-in-95 duration-150 text-left`}
+          } top-7 z-50 w-72 sm:w-84 max-h-[85vh] overflow-y-auto rounded-xl border border-border bg-card/98 backdrop-blur-md p-3.5 shadow-2xl ring-1 ring-black/10 dark:ring-white/10 animate-in fade-in zoom-in-95 duration-150 text-left`}
         >
           <div className="flex items-center justify-between pb-2 border-b border-border/60">
             <span className="text-xs font-bold text-foreground flex items-center gap-1.5">
@@ -352,7 +442,7 @@ function MetricInfoButton({
               <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block mb-1">
                 Formula
               </span>
-              <div className="rounded-md bg-muted px-2.5 py-1.5 font-mono text-[11px] text-foreground font-semibold border border-border/70 select-all">
+              <div className="rounded-md bg-muted px-2.5 py-1.5 font-mono text-[11px] text-foreground font-semibold border border-border/70 select-all break-words">
                 {formula}
               </div>
             </div>
@@ -362,8 +452,28 @@ function MetricInfoButton({
                 <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block mb-1">
                   Active Numbers
                 </span>
-                <div className="rounded-md bg-emerald-500/10 dark:bg-emerald-950/30 px-2.5 py-1.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-400 font-bold border border-emerald-500/20">
+                <div className="rounded-md bg-emerald-500/10 dark:bg-emerald-950/30 px-2.5 py-1.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-400 font-bold border border-emerald-500/20 break-words">
                   {calculation}
+                </div>
+              </div>
+            )}
+
+            {includedStatuses && includedStatuses.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                    Included Statuses ({includedStatuses.length})
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1 max-h-36 overflow-y-auto p-1.5 rounded-lg bg-muted/60 border border-border/60">
+                  {includedStatuses.map((st) => (
+                    <span
+                      key={st}
+                      className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-card text-foreground border border-border/80 shadow-2xs"
+                    >
+                      {st}
+                    </span>
+                  ))}
                 </div>
               </div>
             )}
@@ -499,17 +609,17 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
       setFrom(todayStr);
       setTo(todayStr);
     } else if (preset === "yesterday") {
-      const yesterday = getPastDateString(2);
+      const yesterday = addDaysToIso(todayStr, -1);
       setFrom(yesterday);
       setTo(yesterday);
     } else if (preset === "7d") {
-      setFrom(getPastDateString(7));
+      setFrom(addDaysToIso(todayStr, -6));
       setTo(todayStr);
     } else if (preset === "14d") {
-      setFrom(getPastDateString(14));
+      setFrom(addDaysToIso(todayStr, -13));
       setTo(todayStr);
     } else if (preset === "30d") {
-      setFrom(getPastDateString(30));
+      setFrom(addDaysToIso(todayStr, -29));
       setTo(todayStr);
     } else if (preset === "mtd") {
       const startOfMonth = `${todayStr.slice(0, 7)}-01`;
@@ -521,7 +631,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
       const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
       const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
       const prevMonthStr = String(prevMonth).padStart(2, "0");
-      const lastDay = new Date(prevYear, prevMonth, 0).getDate();
+      const lastDay = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
       setFrom(`${prevYear}-${prevMonthStr}-01`);
       setTo(`${prevYear}-${prevMonthStr}-${String(lastDay).padStart(2, "0")}`);
     } else if (preset === "all") {
@@ -1306,10 +1416,14 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               <input
                 type="date"
                 value={from}
-                max={to || todayStr}
+                max={todayStr}
                 onChange={(e) => {
-                  setFrom(e.target.value);
+                  const val = e.target.value;
+                  setFrom(val);
                   setDatePreset("custom");
+                  if (to && val && val > to) {
+                    setTo(val);
+                  }
                 }}
                 className="bg-transparent border-0 text-foreground text-xs p-0 focus:outline-none cursor-pointer"
                 title="Start Date"
@@ -1318,11 +1432,14 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               <input
                 type="date"
                 value={to}
-                min={from}
                 max={todayStr}
                 onChange={(e) => {
-                  setTo(e.target.value);
+                  const val = e.target.value;
+                  setTo(val);
                   setDatePreset("custom");
+                  if (from && val && val < from) {
+                    setFrom(val);
+                  }
                 }}
                 className="bg-transparent border-0 text-foreground text-xs p-0 focus:outline-none cursor-pointer"
                 title="End Date"
@@ -1452,6 +1569,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Total Shipped Orders"
                       formula="Delivered + RTO + NDR/Undelivered + In Transit + OFD + Lost"
+                      includedStatuses={ALL_SHIPPED_STATUSES}
                       calculation={`${formatNumber(metrics.shipped.count)} shipped out of ${formatNumber(metrics.total.count)} total orders (${metrics.shipped.percent}%)`}
                       explanation="Total orders physically manifested, dispatched, and handed over to courier carriers across active transit and finalized statuses. Fresh unfulfilled orders awaiting warehouse pick-pack are excluded."
                       notes="Forms the population base for Open Delivery % and RTO %."
@@ -1474,7 +1592,10 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     Delivered: <strong className="text-foreground">{formatNumber(metrics.delivered.count)}</strong>
                   </span>
                   <span>
-                    En Route: <strong className="text-foreground">{formatNumber(metrics.inTransit.count + metrics.outForDelivery.count)}</strong>
+                    RTO: <strong className="text-foreground">{formatNumber(metrics.rto.count)}</strong>
+                  </span>
+                  <span>
+                    En Route: <strong className="text-foreground">{formatNumber(metrics.inTransit.count + metrics.outForDelivery.count + metrics.ndr.count)}</strong>
                   </span>
                 </div>
               </article>
@@ -1492,6 +1613,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Total Delivered Orders"
                       formula="Orders confirmed DELIVERED to customer"
+                      includedStatuses={PARAMETER_STATUSES.DELIVERED}
                       calculation={`${formatNumber(metrics.delivered.count)} delivered (${metrics.openOrdersDeliveryRate}% of shipped, ${metrics.deliveryRate}% of cohort)`}
                       explanation="Total shipments successfully delivered to end customers with verified courier delivery scan confirmation. Total store-to-door delivery success."
                       notes={`Delivered revenue: ${formatCurrency(data.financials.deliveredRevenue)}. Average delivered order value: ${formatCurrency(data.financials.avgDeliveredOrderValue)}.`}
@@ -1532,6 +1654,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Open Orders Delivery %"
                       formula="Delivered ÷ Total Shipped (Date Range) × 100"
+                      includedStatuses={ALL_SHIPPED_STATUSES}
                       calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.openOrdersDeliveryRate}%`}
                       explanation="Calculates delivery success across all packages handed over to couriers in the date range. Numerator is Delivered; denominator includes all active transit and finalized statuses (Delivered + In Transit + OFD + NDR + RTO). Delivery success across all dispatched shipments."
                       notes="Fresh store orders placed today that are awaiting warehouse dispatch are excluded from shipped."
@@ -1572,9 +1695,10 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Closed Orders Delivery %"
                       formula="Delivered ÷ (Delivered + RTO + Undelivered) × 100"
+                      includedStatuses={CLOSED_STATUSES}
                       calculation={`${formatNumber(metrics.delivered.count)} ÷ (${formatNumber(metrics.delivered.count)} + ${formatNumber(metrics.rto.count)} + ${formatNumber(metrics.ndr.count)}) × 100 = ${metrics.closedOrdersDeliveryRate}%`}
                       explanation="Measures delivery conversion strictly on resolved and attempted shipments (Delivered ÷ [Delivered + RTO + Undelivered] × 100). Conversion rate on resolved & attempted shipments. Line-haul packages still travelling between hubs with 0 attempts are excluded so newer cohorts aren't penalized."
-                      notes={`Total closed outcomes in cohort: ${formatNumber(metrics.closed.count)}.`}
+                      notes={`Outcomes (${formatNumber(metrics.closed.count)}) = Delivered (${formatNumber(metrics.delivered.count)}) + RTO (${formatNumber(metrics.rto.count)}) + Open NDR (${formatNumber(metrics.ndr.count)}).`}
                     />
                     <div className="flex size-9 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600">
                       <PackageCheck size={18} />
@@ -1592,8 +1716,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     Outcomes: <strong className="text-foreground">{formatNumber(metrics.closed.count)}</strong>
                   </span>
                   <span>
-                    RTO + NDR:{" "}
-                    <strong className="text-foreground">{formatNumber(metrics.rto.count + metrics.ndr.count)}</strong>
+                    RTO ({formatNumber(metrics.rto.count)}) + Open NDR ({formatNumber(metrics.ndr.count)})
                   </span>
                 </div>
               </article>
@@ -1611,6 +1734,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="RTO % (Return to Origin)"
                       formula="RTO ÷ Total Shipped × 100"
+                      includedStatuses={PARAMETER_STATUSES.RTO}
                       calculation={`${formatNumber(metrics.rto.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.rtoRate}%`}
                       explanation="The percentage of dispatched orders that could not be delivered and are marked for return to origin warehouse. Returned shipments out of total dispatched orders."
                       notes={`Total RTO share across all orders: ${metrics.rtoOfTotal.percent}%.`}
@@ -1649,6 +1773,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Overall Delivered %"
                       formula="Delivered ÷ Total Cohort Orders × 100"
+                      includedStatuses={COHORT_ALL_STATUSES}
                       calculation={`${formatNumber(metrics.delivered.count)} ÷ ${formatNumber(metrics.total.count)} × 100 = ${metrics.deliveryRate}%`}
                       explanation="Calculates delivered packages as a percentage of all orders placed in this time window, including unfulfilled, cancelled, or pending orders. Store-wide delivery rate across all orders placed."
                       notes="Shows true store-to-door completion across the cohort."
@@ -1690,6 +1815,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="In Transit Shipments (0 Attempts)"
                       formula="In Transit Orders (0 Delivery Attempts) ÷ Total Shipped × 100"
+                      includedStatuses={PARAMETER_STATUSES.IN_TRANSIT}
                       calculation={`${formatNumber(metrics.inTransit.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.inTransit.percent}%`}
                       explanation="Line-haul packages currently en route between fulfillment hubs and destination centers with zero delivery attempts. Once a courier rider attempts delivery, the parcel enters Out for Delivery or NDR."
                       notes={`Strict 0-attempt shipments: ${formatNumber(metrics.inTransitZeroAttempts.count)} of ${formatNumber(metrics.inTransit.count)} in-transit orders.`}
@@ -1726,6 +1852,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Out for Delivery (OFD)"
                       formula="Active OFD Orders in Cohort ÷ Total Shipped × 100"
+                      includedStatuses={PARAMETER_STATUSES.OUT_FOR_DELIVERY}
                       calculation={`${formatNumber(metrics.outForDelivery.count)} ÷ ${formatNumber(metrics.shipped.count)} × 100 = ${metrics.outForDelivery.percent}%`}
                       explanation={`Parcels currently assigned to courier riders for active doorstep delivery attempts. Active in this order cohort: ${formatNumber(metrics.outForDelivery.count)} orders (${metrics.outForDelivery.percent}% of shipped). Real-time today scans across all orders: ${data.todayOfd?.total ?? '—'} dispatched today (${data.todayOfd?.stillOut ?? '—'} active with riders, ${data.todayOfd?.delivered ?? '—'} delivered today, ${data.todayOfd?.undelivered ?? '—'} undelivered).`}
                       notes="Click the live badge or the 'Today\'s OFD' tab above to view real-time courier attempts for today's scans."
@@ -1770,6 +1897,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="NDR Recovery Delivery %"
                       formula="Delivered after NDR ÷ Total NDR Experienced × 100"
+                      includedStatuses={[...PARAMETER_STATUSES.DELIVERED, ...PARAMETER_STATUSES.NDR]}
                       calculation={`${formatNumber(metrics.ndrDelivered.count)} ÷ ${formatNumber(metrics.totalNdrExperienced.count)} × 100 = ${metrics.ndrDeliveryRate}%`}
                       explanation="Success rate of re-attempting and successfully delivering orders that had previously failed delivery (customer unavailable, customer reschedule, incomplete address, etc.)."
                       notes={`Total NDR incidents experienced: ${formatNumber(metrics.totalNdrExperienced.count)}. Recovered to Delivered: ${formatNumber(metrics.ndrDelivered.count)}.`}
@@ -1806,6 +1934,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Avg Turnaround Time (TAT)"
                       formula="Mean of (Delivered Date - Shipped Date)"
+                      includedStatuses={PARAMETER_STATUSES.DELIVERED}
                       calculation={metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} days dispatch to door` : undefined}
                       explanation="The average duration in days taken from carrier handover (shipped) to doorstep delivery for completed orders across this cohort."
                       notes={`Order creation to delivery average: ${metrics.avgOrderTatDays != null ? metrics.avgOrderTatDays + ' days' : '—'}.`}
@@ -1847,6 +1976,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Delivery Attempt Breakdown"
                       formula="Delivered on Attempt N ÷ Total Delivered × 100"
+                      includedStatuses={PARAMETER_STATUSES.DELIVERED}
                       calculation={`1st attempt: ${metrics.firstAttemptDelivered.percent}% (${formatNumber(metrics.firstAttemptDelivered.count)}) · 2nd attempt: ${metrics.secondAttemptDelivered.percent}% (${formatNumber(metrics.secondAttemptDelivered.count)}) · 3rd attempt: ${metrics.thirdAttemptDelivered.percent}% (${formatNumber(metrics.thirdAttemptDelivered.count)})`}
                       explanation="Measures the distribution of delivery attempts required to successfully deliver packages. 1st attempt delivered succeeded on the initial delivery run with 0 prior failed attempts. 2nd and 3rd attempts succeeded after re-attempting following NDR exceptions."
                       notes="All attempt percentages are calculated out of total delivered shipments in this cohort."
@@ -1966,6 +2096,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <MetricInfoButton
                       title="Payment Method Split & Delivery %"
                       formula="Ratio: Count ÷ Total Orders × 100. Delivery %: Delivered ÷ Shipped × 100"
+                      includedStatuses={ALL_SHIPPED_STATUSES}
                       calculation={`COD: ${metrics.codRatio}% (${formatNumber(metrics.cod.count)}), ${metrics.codDeliveryRate}% del. Prepaid: ${metrics.prepaidRatio}% (${formatNumber(metrics.prepaid.count)}), ${metrics.prepaidDeliveryRate}% del.`}
                       explanation="Compares order volume split between Cash On Delivery (COD) and Prepaid, along with the actual delivery fulfillment rates achieved for each payment method across dispatched orders."
                       notes={`Prepaid delivery rate outperforms COD by ${(metrics.prepaidDeliveryRate - metrics.codDeliveryRate).toFixed(1)}%. Closed delivery rate: Prepaid ${metrics.prepaidClosedDeliveryRate}% vs COD ${metrics.codClosedDeliveryRate}%.`}
@@ -2002,6 +2133,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       <MetricInfoButton
                         title="COD Delivery %"
                         formula="COD Delivered ÷ COD Shipped × 100"
+                        includedStatuses={PARAMETER_STATUSES.DELIVERED}
                         calculation={`${formatNumber(metrics.codDelivered)} ÷ ${formatNumber(metrics.codShipped)} × 100 = ${metrics.codDeliveryRate}%`}
                         explanation="Delivery success percentage specifically for Cash On Delivery (COD) orders."
                         notes={`Closed delivery rate: ${metrics.codClosedDeliveryRate}%.`}
@@ -2027,6 +2159,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       <MetricInfoButton
                         title="Prepaid Delivery %"
                         formula="Prepaid Delivered ÷ Prepaid Shipped × 100"
+                        includedStatuses={PARAMETER_STATUSES.DELIVERED}
                         calculation={`${formatNumber(metrics.prepaidDelivered)} ÷ ${formatNumber(metrics.prepaidShipped)} × 100 = ${metrics.prepaidDeliveryRate}%`}
                         explanation="Delivery success percentage specifically for Prepaid orders."
                         notes={`Closed delivery rate: ${metrics.prepaidClosedDeliveryRate}%.`}

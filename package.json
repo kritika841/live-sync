@@ -21,6 +21,7 @@
     "check:operations": "node --env-file=.env.local --import tsx scripts/check-operations-config.ts",
     "scheduler": "node --env-file=.env.local scripts/scheduler.mjs",
     "catalog:fetch": "node --env-file=.env.local scripts/fetch-shopify-products.mjs",
+    "analytics:precompute": "node --env-file=.env.local --import tsx scripts/precompute-prehistoric-analytics.ts",
     "vercel-build": "npm run build && node --import tsx scripts/bootstrap-production.ts"
   },
   "dependencies": {

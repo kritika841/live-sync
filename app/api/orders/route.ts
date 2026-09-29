@@ -90,14 +90,18 @@ const DEFAULT_ORDER_TAGS = [
   const unshippedOrdersWindowDays = Math.max(1, Math.min(365, parseInt(windowDaysRow?.value || "30", 10) || 30));
   const cutoffDate = new Date(Date.now() - unshippedOrdersWindowDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
+  const globalFilterValues = [...filterValues];
+  const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
+
+  const rowFilters = [...filters];
+  const rowFilterValues = [...filterValues];
   if (tab === "new" && !from) {
-    filters.push("SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) >= ?");
-    filterValues.push(cutoffDate);
+    rowFilters.push("SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) >= ?");
+    rowFilterValues.push(cutoffDate);
   }
 
   const riskSql = risk === "high" ? "is_high_risk = TRUE" : risk === "low" ? "is_high_risk = FALSE" : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? "(is_high_risk = FALSE OR confirmation_status = 'confirmed')" : "1 = 1";
-  const filterSql = filters.length ? filters.join(" AND ") : "1 = 1";
-  const where = [sqlForTab(tab), riskSql, ...filters];
+  const where = [sqlForTab(tab), riskSql, ...rowFilters];
   const whereSql = where.join(" AND ");
   const orderBy = approved ? "COALESCE(NULLIF(confirmed_at, ''), confirmation_updated_at) DESC, id DESC" : `COALESCE(NULLIF(order_date, ''), created_at) ${sort}, id ${sort}`;
   if (url.searchParams.get("selection") === "all") {
@@ -105,7 +109,7 @@ const DEFAULT_ORDER_TAGS = [
       SELECT id, channel_order_id AS channelOrderId
       FROM orders WHERE ${whereSql}
       ORDER BY ${orderBy}
-    `).bind(...filterValues).all<{ id: number; channelOrderId: string }>();
+    `).bind(...rowFilterValues).all<{ id: number; channelOrderId: string }>();
     return Response.json({ orders: allOrders.results, total: allOrders.results.length });
   }
   const rowsPromise = runtime.DB.prepare(`
@@ -123,7 +127,7 @@ const DEFAULT_ORDER_TAGS = [
     FROM orders WHERE ${whereSql}
     ORDER BY ${orderBy}
     LIMIT ? OFFSET ?
-  `).bind(...filterValues, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
+  `).bind(...rowFilterValues, perPage, (page - 1) * perPage).all<Record<string, unknown>>();
 
   const groupedPromise = filterSql === "1 = 1"
     ? cachedValue(`order-grouped-counts-${unshippedOrdersWindowDays}`, 30000, async () => {
@@ -150,7 +154,7 @@ const DEFAULT_ORDER_TAGS = [
         FROM orders 
         WHERE ${filterSql} 
         GROUP BY status, is_high_risk, confirmation_status, "isHistoric"
-      `).bind(cutoffDate, ...filterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;isHistoric:boolean;total:number}>();
+      `).bind(cutoffDate, ...globalFilterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;isHistoric:boolean;total:number}>();
 
   const optionsPromise = cachedValue("order-options", 86400000, async () => {
     const [couriers,pickups] = await Promise.all([

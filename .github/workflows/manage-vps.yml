@@ -103,7 +103,10 @@ jobs:
               cd /home/deployer/apps/satmi-orders
               REMOTE_URL=$(grep SUPABASE_DB_URL .env.local | cut -d= -f2- | tr -d '"'\'' ')
               echo "Dumping public schema from remote Supabase..."
-              pg_dump "$REMOTE_URL" --schema=public --no-owner --no-privileges --clean --if-exists > /home/deployer/supabase_backup.sql
+              PG_DUMP="/usr/lib/postgresql/17/bin/pg_dump"
+              if [ ! -f "$PG_DUMP" ]; then PG_DUMP="pg_dump"; fi
+              echo "Using dump binary: $($PG_DUMP --version)"
+              $PG_DUMP "$REMOTE_URL" --schema=public --no-owner --no-privileges --clean --if-exists > /home/deployer/supabase_backup.sql
               echo "Backup created size: $(ls -lh /home/deployer/supabase_backup.sql | awk '{print $5}')"
 
               echo "=== STEP 4: Restoring data into local Postgres ==="

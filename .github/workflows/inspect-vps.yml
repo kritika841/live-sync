@@ -27,11 +27,12 @@ jobs:
             echo "=== Variable names in /home/deployer/apps/satmi-orders/.env.local ==="
             grep -E '^[A-Za-z0-9_]+=' /home/deployer/apps/satmi-orders/.env.local 2>/dev/null | cut -d= -f1 || echo "No .env.local yet"
 
-            echo "=== PM2 logs (satmi-orders error) ==="
-            pm2 logs satmi-orders --lines 50 --nostream --err || tail -n 50 /home/deployer/.pm2/logs/satmi-orders-error.log || true
+            echo "=== PM2 Log Files ==="
+            ls -la /home/deployer/.pm2/logs/ /home/deployer/logs/ 2>/dev/null || true
 
-            echo "=== PM2 logs (satmi-orders out) ==="
-            pm2 logs satmi-orders --lines 30 --nostream --out || tail -n 30 /home/deployer/.pm2/logs/satmi-orders-out.log || true
+            echo "=== PM2 satmi-orders Error Log Tail ==="
+            tail -n 60 /home/deployer/.pm2/logs/satmi-orders-error* 2>/dev/null || true
+            tail -n 60 /home/deployer/logs/satmi-orders-error* 2>/dev/null || true
 
             echo "=== Test Local Postgres Authentication with Node ==="
             cd /home/deployer/apps/satmi-orders
@@ -41,18 +42,16 @@ jobs:
               async function run() {
                 try {
                   console.log("Connected to DB:", process.env.SUPABASE_DB_URL.replace(/:[^:@]+@/, ":***@"));
-                  const ext = await sql`SELECT extname FROM pg_extension WHERE extname = "pgcrypto"`;
-                  console.log("pgcrypto extension:", ext);
-                  const users = await sql`SELECT id, email, role, length(encrypted_password) as pass_len FROM auth_users`;
+                  const users = await sql`SELECT id, email, name, role, length(encrypted_password) as pass_len FROM auth_users`;
                   console.log("Users in auth_users:", users);
                   if (users.length > 0) {
                     const testEmail = users[0].email;
                     console.log("Testing crypt query for:", testEmail);
                     const res = await sql`
-                      SELECT id, email, (encrypted_password = crypt($2, encrypted_password)) as match
+                      SELECT id, email, (encrypted_password = crypt(${ "dummy_password" }, encrypted_password)) as match
                       FROM auth_users
-                      WHERE LOWER(email) = LOWER($1)
-                    `([testEmail, "wrongpassword"]);
+                      WHERE LOWER(email) = LOWER(${ testEmail })
+                    `;
                     console.log("Crypt query result:", res);
                   }
                 } catch (e) {

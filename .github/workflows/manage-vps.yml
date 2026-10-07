@@ -62,7 +62,7 @@ jobs:
 
             if [ "$ACTION" = "check-status" ]; then
               echo "--- Check Sudo Access ---"
-              sudo -n true && echo "Sudo: SUCCESS (passwordless)" || echo "Sudo: REQUIRES_PASSWORD or NOT_IN_SUDOERS"
+              sudo -n true && echo "Sudo: SUCCESS" || echo "Sudo: REQUIRES_PASSWORD"
               
               echo "--- Check PostgreSQL ---"
               which psql || echo "psql: not installed"

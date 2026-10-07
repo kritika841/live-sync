@@ -12,7 +12,6 @@ on:
           - 'check-status'
           - 'inspect-users'
           - 'install-postgres'
-          - 'migrate-data'
           - 'setup-all'
 
 jobs:
@@ -26,6 +25,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
+          timeout: 300s
           script: |
             set -e
             ACTION="${{ inputs.action }}"
@@ -76,4 +76,87 @@ jobs:
               sudo systemctl enable postgresql
               sudo systemctl start postgresql
               sudo systemctl status postgresql --no-pager
+            fi
+
+            if [ "$ACTION" = "setup-all" ]; then
+              echo "=== STEP 1: Installing PostgreSQL and extensions ==="
+              sudo apt-get update -y
+              sudo apt-get install -y postgresql postgresql-contrib
+              sudo systemctl enable postgresql
+              sudo systemctl start postgresql
+
+              echo "=== STEP 2: Creating local database & user ==="
+              DB_PASS="satmi_local_$(openssl rand -hex 16)"
+              sudo -u postgres psql -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'satmi_admin') THEN CREATE USER satmi_admin WITH PASSWORD '$DB_PASS'; ELSE ALTER USER satmi_admin WITH PASSWORD '$DB_PASS'; END IF; END \$\$;"
+              sudo -u postgres psql -c "SELECT 1 FROM pg_database WHERE datname = 'satmi_orders'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE satmi_orders OWNER satmi_admin;"
+              sudo -u postgres psql -d satmi_orders -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL ON SCHEMA public TO satmi_admin;"
+              sudo -u postgres psql -d satmi_orders -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO satmi_admin;"
+              sudo -u postgres psql -d satmi_orders -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO satmi_admin;"
+
+              echo "=== STEP 3: Dumping data from remote Supabase ==="
+              cd /home/deployer/apps/satmi-orders
+              REMOTE_URL=$(grep SUPABASE_DB_URL .env.local | cut -d= -f2- | tr -d '"'\'' ')
+              echo "Dumping public schema from remote Supabase..."
+              pg_dump "$REMOTE_URL" --schema=public --no-owner --no-privileges --clean --if-exists > /home/deployer/supabase_backup.sql
+              echo "Backup created size: $(ls -lh /home/deployer/supabase_backup.sql | awk '{print $5}')"
+
+              echo "=== STEP 4: Restoring data into local Postgres ==="
+              sudo -u postgres psql -d satmi_orders < /home/deployer/supabase_backup.sql || true
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO satmi_admin;"
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO satmi_admin;"
+
+              echo "=== STEP 5: Creating local auth_users table and copying accounts ==="
+              sudo -u postgres psql -d satmi_orders -c "CREATE TABLE IF NOT EXISTS auth_users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                encrypted_password TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );"
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL ON auth_users TO satmi_admin;"
+
+              node --env-file=.env.local -e '
+                import postgres from "postgres";
+                const remoteSql = postgres(process.env.SUPABASE_DB_URL, { connect_timeout: 10 });
+                const localSql = postgres("postgresql://satmi_admin:'$DB_PASS'@127.0.0.1:5432/satmi_orders");
+                async function sync() {
+                  const users = await remoteSql`SELECT id, email, encrypted_password, raw_user_meta_data, raw_app_meta_data, created_at FROM auth.users`;
+                  console.log("Found remote users to sync:", users.length);
+                  for (const u of users) {
+                    const name = u.raw_user_meta_data?.name || u.email || "";
+                    const role = u.raw_app_meta_data?.role || u.role || "admin";
+                    await localSql`INSERT INTO auth_users (id, email, encrypted_password, name, role, created_at)
+                      VALUES (${u.id}, ${u.email}, ${u.encrypted_password}, ${name}, ${role}, ${u.created_at})
+                      ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, encrypted_password=EXCLUDED.encrypted_password, name=EXCLUDED.name, role=EXCLUDED.role`;
+                    console.log("Synced user:", u.email, name);
+                  }
+                  await remoteSql.end();
+                  await localSql.end();
+                }
+                sync().catch(e => { console.error("User sync error:", e); process.exit(1); });
+              '
+
+              echo "=== STEP 6: Updating .env.local to point to local Postgres ==="
+              LOCAL_URL="postgresql://satmi_admin:$DB_PASS@127.0.0.1:5432/satmi_orders"
+              cp .env.local .env.local.backup_$(date +%s)
+              sed -i "s|^SUPABASE_DB_URL=.*|SUPABASE_DB_URL=\"$LOCAL_URL\"|" .env.local
+
+              echo "=== STEP 7: Testing local database connection ==="
+              node --env-file=.env.local -e '
+                import postgres from "postgres";
+                const sql = postgres(process.env.SUPABASE_DB_URL);
+                const count = await sql`SELECT COUNT(*) FROM orders`;
+                console.log("SUCCESS! Verified local orders count:", count[0].count);
+                const uCount = await sql`SELECT COUNT(*) FROM auth_users`;
+                console.log("SUCCESS! Verified local users count:", uCount[0].count);
+                await sql.end();
+              '
+
+              echo "=== STEP 8: Restarting PM2 processes ==="
+              pm2 restart satmi-orders --update-env
+              pm2 restart satmi-scheduler --update-env
+              pm2 save
+              echo "=== ALL DONE: Hostinger VPS is running on local PostgreSQL! ==="
             fi

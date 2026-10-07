@@ -14,6 +14,7 @@ on:
           - 'inspect-users'
           - 'install-postgres'
           - 'setup-all'
+          - 'fix-ownership'
 
 jobs:
   run-action:
@@ -31,6 +32,33 @@ jobs:
             set -e
             ACTION="${{ inputs.action }}"
             echo "=== Executing Action: $ACTION ==="
+
+            if [ "$ACTION" = "fix-ownership" ]; then
+              echo "--- Transferring ownership of all public tables, sequences, views to satmi_admin ---"
+              sudo -u postgres psql -d satmi_orders -c "
+                DO \$\$
+                DECLARE
+                  r RECORD;
+                BEGIN
+                  FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+                    EXECUTE 'ALTER TABLE public.' || quote_ident(r.tablename) || ' OWNER TO satmi_admin';
+                  END LOOP;
+                  FOR r IN (SELECT sequencename FROM pg_sequences WHERE schemaname = 'public') LOOP
+                    EXECUTE 'ALTER SEQUENCE public.' || quote_ident(r.sequencename) || ' OWNER TO satmi_admin';
+                  END LOOP;
+                  FOR r IN (SELECT table_name FROM information_schema.views WHERE table_schema = 'public') LOOP
+                    EXECUTE 'ALTER VIEW public.' || quote_ident(r.table_name) || ' OWNER TO satmi_admin';
+                  END LOOP;
+                END
+                \$\$;
+              "
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO satmi_admin;"
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO satmi_admin;"
+              sudo -u postgres psql -d satmi_orders -c "GRANT ALL PRIVILEGES ON SCHEMA public TO satmi_admin;"
+
+              echo "--- Verification of table owners ---"
+              sudo -u postgres psql -d satmi_orders -c "SELECT tablename, tableowner FROM pg_tables WHERE schemaname = 'public' LIMIT 10;"
+            fi
 
             if [ "$ACTION" = "check-status" ]; then
               echo "--- Check Sudo Access ---"

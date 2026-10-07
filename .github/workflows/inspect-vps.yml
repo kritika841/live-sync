@@ -27,25 +27,10 @@ jobs:
             echo "=== Variable names in /home/deployer/apps/satmi-orders/.env.local ==="
             grep -E '^[A-Za-z0-9_]+=' /home/deployer/apps/satmi-orders/.env.local 2>/dev/null | cut -d= -f1 || echo "No .env.local yet"
 
-            echo "=== PM2 Log Files ==="
-            ls -la /home/deployer/.pm2/logs/ /home/deployer/logs/ 2>/dev/null || true
+            echo "=== Full satmi-orders-error-2.log ==="
+            cat /home/deployer/logs/satmi-orders-error-2.log 2>/dev/null || true
 
-            echo "=== PM2 satmi-orders Error Log Tail ==="
-            tail -n 60 /home/deployer/.pm2/logs/satmi-orders-error* 2>/dev/null || true
-            tail -n 60 /home/deployer/logs/satmi-orders-error* 2>/dev/null || true
-
-            echo "=== Test authenticateUser directly from lib/auth/session ==="
-            cd /home/deployer/apps/satmi-orders
-            node --env-file=.env.local -e '
-              import { authenticateUser } from "./lib/auth/session.ts";
-              async function run() {
-                try {
-                  console.log("Calling authenticateUser...");
-                  const result = await authenticateUser("kartavya@satmi.in", "wrongpassword");
-                  console.log("Result:", result);
-                } catch (e) {
-                  console.error("authenticateUser threw error:", e);
-                }
-              }
-              run();
-            '
+            echo "=== Test Curl Local Endpoint http://127.0.0.1:5001/api/auth/sign-in ==="
+            curl -v -X POST http://127.0.0.1:5001/api/auth/sign-in \
+              -H "Content-Type: application/json" \
+              -d '{"email":"kartavya@satmi.in","password":"wrongpassword"}' || true

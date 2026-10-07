@@ -71,6 +71,7 @@ jobs:
 
             if [ "$ACTION" = "install-postgres" ]; then
               echo "--- Installing PostgreSQL on VPS ---"
+              sudo dpkg --configure -a
               sudo apt-get update -y
               sudo apt-get install -y postgresql postgresql-contrib
               sudo systemctl enable postgresql
@@ -80,6 +81,7 @@ jobs:
 
             if [ "$ACTION" = "setup-all" ]; then
               echo "=== STEP 1: Installing PostgreSQL and extensions ==="
+              sudo dpkg --configure -a
               sudo apt-get update -y
               sudo apt-get install -y postgresql postgresql-contrib
               sudo systemctl enable postgresql

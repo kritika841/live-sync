@@ -80,10 +80,13 @@ jobs:
             fi
 
             if [ "$ACTION" = "setup-all" ]; then
-              echo "=== STEP 1: Installing PostgreSQL and extensions ==="
+              echo "=== STEP 1: Installing PostgreSQL 17 client and server ==="
               sudo dpkg --configure -a
+              sudo install -d /etc/apt/keyrings
+              curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/postgresql.gpg
+              echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
               sudo apt-get update -y
-              sudo apt-get install -y postgresql postgresql-contrib
+              sudo apt-get install -y postgresql-client-17 postgresql-17 postgresql-contrib-17
               sudo systemctl enable postgresql
               sudo systemctl start postgresql
 

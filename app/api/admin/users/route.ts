@@ -1,7 +1,6 @@
 import { errorResponse } from "../../../../lib/http";
 import { isSameOrigin, requireApiAdmin } from "../../../../lib/auth/access";
 import { ensureSchema, getRuntimeEnv, logActivity } from "../../../../lib/database";
-import { getSupabaseAdmin } from "../../../../lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -33,33 +32,52 @@ async function audit(actor: { id: string; email: string; name: string; role: str
 async function handleGET() {
   const access = await requireApiAdmin();
   if (access.response) return access.response;
-  const supabaseAdmin = getSupabaseAdmin();
 
-  const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 200 });
-  if (error) return Response.json({ error: messageOf(error, "Could not load users") }, { status: 502 });
+  const runtime = getRuntimeEnv();
+  await ensureSchema(runtime.DB);
 
-  const users = ((data?.users || []) as unknown as Array<ManagedUser & { app_metadata?: { role?: string }; user_metadata?: { name?: string }; banned_until?: string | null; created_at?: string }>).map((user) => ({
-    id: user.id,
-    name: user.user_metadata?.name || user.email || "",
-    email: user.email || "",
-    role: user.app_metadata?.role || "user",
-    banned: Boolean(user.banned_until && new Date(user.banned_until).getTime() > Date.now()),
-    banReason: user.banReason || "",
-    createdAt: String(user.created_at || ""),
-  }));
-  return Response.json({ users, total: Number(data?.total || users.length), currentUserId: access.user.id });
+  try {
+    const rows = await runtime.DB.prepare(`
+      SELECT id, email, name, role, banned_until, created_at
+      FROM auth_users
+      ORDER BY created_at DESC
+    `).all<{
+      id: string;
+      email: string;
+      name: string;
+      role: string;
+      banned_until: string | null;
+      created_at: string;
+    }>();
+
+    const users = rows.results.map((u) => ({
+      id: u.id,
+      name: u.name || u.email || "",
+      email: u.email || "",
+      role: u.role || "user",
+      banned: Boolean(u.banned_until && new Date(u.banned_until).getTime() > Date.now()),
+      banReason: "",
+      createdAt: String(u.created_at || ""),
+    }));
+
+    return Response.json({ users, total: users.length, currentUserId: access.user.id });
+  } catch (error) {
+    return Response.json({ error: messageOf(error, "Could not load users") }, { status: 500 });
+  }
 }
 
 async function handlePOST(request: Request) {
   const access = await requireApiAdmin();
   if (access.response) return access.response;
-  const supabaseAdmin = getSupabaseAdmin();
   if (!isSameOrigin(request)) return Response.json({ error: "Invalid request origin" }, { status: 403 });
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body) return Response.json({ error: "Invalid request" }, { status: 400 });
   const action = String(body.action || "");
   const userId = String(body.userId || "");
+
+  const runtime = getRuntimeEnv();
+  await ensureSchema(runtime.DB);
 
   if (action === "create") {
     const email = String(body.email || "").trim().toLowerCase();
@@ -70,13 +88,19 @@ async function handlePOST(request: Request) {
       return Response.json({ error: "A name, valid email, and password of at least 8 characters are required" }, { status: 400 });
     }
 
-    const created = await supabaseAdmin.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { name }, app_metadata: { role } });
-    if (created.error) {
-      return Response.json({ error: messageOf(created.error, "Could not create user") }, { status: created.error.status || 400 });
+    const existing = await runtime.DB.prepare("SELECT id FROM auth_users WHERE LOWER(email) = LOWER(?)").bind(email).first();
+    if (existing) {
+      return Response.json({ error: "A user with this email address already exists." }, { status: 409 });
     }
 
+    const newId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    await runtime.DB.prepare(`
+      INSERT INTO auth_users (id, email, encrypted_password, name, role, created_at)
+      VALUES (?, ?, crypt(?, gen_salt('bf', 10)), ?, ?, NOW())
+    `).bind(newId, email, password, name, role).run();
+
     await audit(access.user, "auth.user_created", `Added dashboard user ${email}`, {
-      targetUserId: created.data?.user.id,
+      targetUserId: newId,
       targetEmail: email,
       role,
     });
@@ -93,24 +117,20 @@ async function handlePOST(request: Request) {
     if (userId === access.user.id && role !== "admin") {
       return Response.json({ error: "You cannot remove your own administrator access" }, { status: 400 });
     }
-    const result = await supabaseAdmin.auth.admin.updateUserById(userId, { app_metadata: { role } });
-    if (result.error) return Response.json({ error: messageOf(result.error, "Could not update role") }, { status: result.error.status || 400 });
+    await runtime.DB.prepare("UPDATE auth_users SET role = ? WHERE id = ?").bind(role, userId).run();
     await audit(access.user, "auth.role_changed", "Changed a dashboard user role", { targetUserId: userId, role });
     return Response.json({ ok: true, message: "Role updated." });
   }
 
   if (action === "disable") {
     if (userId === access.user.id) return Response.json({ error: "You cannot disable your own account" }, { status: 400 });
-    const result = await supabaseAdmin.auth.admin.updateUserById(userId, { ban_duration: "876000h" });
-    if (result.error) return Response.json({ error: messageOf(result.error, "Could not disable user") }, { status: result.error.status || 400 });
-    await supabaseAdmin.auth.admin.signOut(userId, "global");
+    await runtime.DB.prepare("UPDATE auth_users SET banned_until = NOW() + INTERVAL '100 years' WHERE id = ?").bind(userId).run();
     await audit(access.user, "auth.user_disabled", "Disabled a dashboard user", { targetUserId: userId });
     return Response.json({ ok: true, message: "User disabled and active sessions revoked." });
   }
 
   if (action === "enable") {
-    const result = await supabaseAdmin.auth.admin.updateUserById(userId, { ban_duration: "none" });
-    if (result.error) return Response.json({ error: messageOf(result.error, "Could not enable user") }, { status: result.error.status || 400 });
+    await runtime.DB.prepare("UPDATE auth_users SET banned_until = NULL WHERE id = ?").bind(userId).run();
     await audit(access.user, "auth.user_enabled", "Enabled a dashboard user", { targetUserId: userId });
     return Response.json({ ok: true, message: "User enabled." });
   }
@@ -118,9 +138,7 @@ async function handlePOST(request: Request) {
   if (action === "set_password") {
     const newPassword = String(body.password || "");
     if (newPassword.length < 8) return Response.json({ error: "The password must be at least 8 characters" }, { status: 400 });
-    const result = await supabaseAdmin.auth.admin.updateUserById(userId, { password: newPassword });
-    if (result.error) return Response.json({ error: messageOf(result.error, "Could not set password") }, { status: result.error.status || 400 });
-    await supabaseAdmin.auth.admin.signOut(userId, "global");
+    await runtime.DB.prepare("UPDATE auth_users SET encrypted_password = crypt(?, gen_salt('bf', 10)) WHERE id = ?").bind(newPassword, userId).run();
     await audit(access.user, "auth.password_changed", "Assigned a new dashboard password", { targetUserId: userId });
     return Response.json({ ok: true, message: "Password changed and existing sessions revoked." });
   }

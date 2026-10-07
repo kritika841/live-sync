@@ -15,11 +15,14 @@ export default function AccountMenu({ name, email, isAdmin, preview=false }: { n
     if(preview){window.location.assign("/auth/sign-in");return;}
     setSigningOut(true);setError("");
     try{
-      const {error}=await createSupabaseBrowserClient().auth.signOut({scope:"local"});
-      if(error)throw error;
+      await fetch("/api/auth/sign-out", { method: "POST" });
+      try {
+        await createSupabaseBrowserClient().auth.signOut({scope:"local"});
+      } catch {
+        // ignore Supabase offline error
+      }
       window.location.assign("/auth/sign-in");
     }catch{setError("Could not sign out. Please try again.");setSigningOut(false);}
-
   }
 
   return (

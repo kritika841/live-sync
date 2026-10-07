@@ -12,11 +12,9 @@ export default async function AuthPage({ params }: { params: Promise<{ path: str
   const { path } = await params;
   if (!publicViews.has(path)) notFound();
 
-  const configured = Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-  );
-  const user = configured ? await currentDashboardUser() : null;
+  const user = await currentDashboardUser();
   if (user) redirect("/");
+  const configured = true;
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-background text-foreground">

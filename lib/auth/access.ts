@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "../supabase/server";
+import { SESSION_COOKIE_NAME, verifySessionToken } from "./session";
 
 export type DashboardUser = {
   id: string;
@@ -29,8 +30,15 @@ export async function currentDashboardUser(): Promise<DashboardUser | null> {
   try {
     const { cookies } = await import("next/headers");
     const cookieStore = await cookies();
+
+    const sessionCookie = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+    if (sessionCookie) {
+      const localUser = await verifySessionToken(sessionCookie);
+      if (localUser) return localUser;
+    }
+
     const hasAuthCookie = cookieStore.getAll().some((c) => c.name.includes("-auth-token") || c.name.startsWith("sb-"));
-    if (hasAuthCookie) {
+    if (hasAuthCookie && process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
       const supabase = await createSupabaseServerClient();
       const { data } = await supabase.auth.getUser();
       if (data.user) return dashboardUser(data.user);

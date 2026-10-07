@@ -82,7 +82,12 @@ jobs:
             ENV_FILE="$APP_DIR/.env.local"
             
             if [ -n "$PROD_ENV_B64" ]; then
+              EXISTING_LOCAL_DB=$(grep -E '^SUPABASE_DB_URL=.*127\.0\.0\.1' "$ENV_FILE" 2>/dev/null || true)
               echo "$PROD_ENV_B64" | base64 -d > "$ENV_FILE"
+              if [ -n "$EXISTING_LOCAL_DB" ]; then
+                sed -i "s|^SUPABASE_DB_URL=.*|$EXISTING_LOCAL_DB|" "$ENV_FILE"
+                echo "Preserved local VPS PostgreSQL connection."
+              fi
               echo "Synced complete production .env.local from secret."
             else
               touch "$ENV_FILE"

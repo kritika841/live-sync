@@ -435,9 +435,30 @@ export async function ensureTodayOfdAuditSchema(db: PostgresDatabase) {
   await setSyncState(db, "ofd_audit_schema_revision", ofdAuditSchemaRevision).catch(() => null);
 }
 
+const authSchemaRevision = "2026-10-07-auth-users-v1";
+export async function ensureAuthSchema(db: PostgresDatabase) {
+  const current = await db.prepare("SELECT value FROM sync_state WHERE key='auth_schema_revision'").first<{value:string}>().catch(() => null);
+  if (current?.value === authSchemaRevision) return;
+
+  await db.prepare("CREATE EXTENSION IF NOT EXISTS pgcrypto").run().catch(() => null);
+  await db.prepare(`CREATE TABLE IF NOT EXISTS auth_users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    encrypted_password TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'user',
+    banned_until TIMESTAMPTZ DEFAULT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`).run().catch(() => null);
+  await db.prepare("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS banned_until TIMESTAMPTZ DEFAULT NULL").run().catch(() => null);
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_auth_users_email ON auth_users(LOWER(email))").run().catch(() => null);
+  await setSyncState(db, "auth_schema_revision", authSchemaRevision).catch(() => null);
+}
+
 // Avoid repeating ALTER TABLE on every serverless cold start while order writes run.
 const coreSchemaRevision = "2026-09-11";
 async function initializeSchema(db: PostgresDatabase) {
+  await ensureAuthSchema(db);
   const tables=await db.prepare("SELECT to_regclass('public.sync_state') AS state, to_regclass('public.operations_schema_versions') AS versions").first<{state:string|null;versions:string|null}>();
   if(tables?.state){
     const current=await db.prepare("SELECT value FROM sync_state WHERE key='core_schema_revision'").first<{value:string}>();

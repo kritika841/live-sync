@@ -34,30 +34,17 @@ jobs:
             tail -n 60 /home/deployer/.pm2/logs/satmi-orders-error* 2>/dev/null || true
             tail -n 60 /home/deployer/logs/satmi-orders-error* 2>/dev/null || true
 
-            echo "=== Test Local Postgres Authentication with Node ==="
+            echo "=== Test authenticateUser directly from lib/auth/session ==="
             cd /home/deployer/apps/satmi-orders
             node --env-file=.env.local -e '
-              import postgres from "postgres";
-              const sql = postgres(process.env.SUPABASE_DB_URL);
+              import { authenticateUser } from "./lib/auth/session.ts";
               async function run() {
                 try {
-                  console.log("Connected to DB:", process.env.SUPABASE_DB_URL.replace(/:[^:@]+@/, ":***@"));
-                  const users = await sql`SELECT id, email, name, role, length(encrypted_password) as pass_len FROM auth_users`;
-                  console.log("Users in auth_users:", users);
-                  if (users.length > 0) {
-                    const testEmail = users[0].email;
-                    console.log("Testing crypt query for:", testEmail);
-                    const res = await sql`
-                      SELECT id, email, (encrypted_password = crypt(${ "dummy_password" }, encrypted_password)) as match
-                      FROM auth_users
-                      WHERE LOWER(email) = LOWER(${ testEmail })
-                    `;
-                    console.log("Crypt query result:", res);
-                  }
+                  console.log("Calling authenticateUser...");
+                  const result = await authenticateUser("kartavya@satmi.in", "wrongpassword");
+                  console.log("Result:", result);
                 } catch (e) {
-                  console.error("Test error:", e);
-                } finally {
-                  await sql.end();
+                  console.error("authenticateUser threw error:", e);
                 }
               }
               run();

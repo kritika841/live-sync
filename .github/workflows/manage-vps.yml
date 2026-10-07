@@ -54,7 +54,7 @@ jobs:
                   console.log("Tables in local satmi_orders:", tables.map(t => t.tablename));
                   for (const t of tables) {
                     try {
-                      const res = await sql`SELECT COUNT(*) FROM ${sql(t.tablename)}`;
+                      const res = await sql.unsafe('SELECT COUNT(*) FROM "' + t.tablename + '"');
                       console.log(`Table ${t.tablename}: ${res[0].count} rows`);
                     } catch (e) {
                       console.log(`Table ${t.tablename}: error ${e.message}`);

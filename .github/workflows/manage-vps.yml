@@ -1,0 +1,79 @@
+name: Manage VPS and Database
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'check-status'
+        type: choice
+        options:
+          - 'check-status'
+          - 'inspect-users'
+          - 'install-postgres'
+          - 'migrate-data'
+          - 'setup-all'
+
+jobs:
+  run-action:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute action on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            set -e
+            ACTION="${{ inputs.action }}"
+            echo "=== Executing Action: $ACTION ==="
+
+            if [ "$ACTION" = "check-status" ]; then
+              echo "--- Check Sudo Access ---"
+              sudo -n true && echo "Sudo: SUCCESS (passwordless)" || echo "Sudo: REQUIRES_PASSWORD or NOT_IN_SUDOERS"
+              
+              echo "--- Check PostgreSQL ---"
+              which psql || echo "psql: not installed"
+              systemctl status postgresql --no-pager || echo "postgresql service: not found"
+              
+              echo "--- Check Available Ports ---"
+              ss -tulpn | grep 5432 || echo "Port 5432: available"
+            fi
+
+            if [ "$ACTION" = "inspect-users" ]; then
+              cd /home/deployer/apps/satmi-orders
+              node --env-file=.env.local -e '
+                import postgres from "postgres";
+                const url = process.env.SUPABASE_DB_URL;
+                if (!url) { console.log("No SUPABASE_DB_URL"); process.exit(0); }
+                const sql = postgres(url, { connect_timeout: 10 });
+                async function run() {
+                  try {
+                    const users = await sql`SELECT id, email, role, created_at, raw_user_meta_data FROM auth.users`;
+                    console.log("Auth users found in Supabase:", users.length);
+                    for (const u of users) {
+                      console.log("User:", u.id, u.email, u.role, u.raw_user_meta_data);
+                    }
+                    const agents = await sql`SELECT user_id, email, name, role FROM support_agents`;
+                    console.log("Support agents:", agents);
+                  } catch (e) {
+                    console.error("Query error:", e.message);
+                  } finally {
+                    process.exit(0);
+                  }
+                }
+                run();
+              '
+            fi
+
+            if [ "$ACTION" = "install-postgres" ]; then
+              echo "--- Installing PostgreSQL on VPS ---"
+              sudo apt-get update -y
+              sudo apt-get install -y postgresql postgresql-contrib
+              sudo systemctl enable postgresql
+              sudo systemctl start postgresql
+              sudo systemctl status postgresql --no-pager
+            fi

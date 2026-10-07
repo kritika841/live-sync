@@ -33,7 +33,11 @@ export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string)
         FROM matching_ofd_events
         GROUP BY order_id, ofd_date
       ), selected_orders AS (
-        SELECT orders.*,
+        SELECT orders.id, orders.channel_order_id, orders.customer_name,
+          orders.customer_phone, orders.customer_city, orders.customer_state, orders.status,
+          orders.payment_method, orders.total, orders.awb, orders.courier,
+          orders.shipped_at, orders.first_out_for_delivery_at, orders.out_for_delivery_at, orders.delivered_at,
+          orders.ndr_reason, orders.ndr_attempts, orders.ndr_raised_at, orders.shipping_cost,
           COALESCE(
             selected_event.ofd_at,
             CASE WHEN ${latestOfdDateSql} = ? THEN out_for_delivery_at END,

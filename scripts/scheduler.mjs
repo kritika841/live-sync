@@ -35,9 +35,9 @@ export async function invokeJob(base,secret,path,fetcher=fetch){
 
 export function startScheduler(base,secret){
  const authSecret = secret || process.env.CRON_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'satmi-internal-cron-key';
- const jobs=[{path:'/api/cron/fast-sync',every:60000},{path:'/api/cron/sync',every:43200000}].map(j=>({...j,running:false,next:0}));
+ const jobs=[{path:'/api/cron/fast-sync',every:15*60*1000},{path:'/api/cron/sync',every:43200000}].map(j=>({...j,running:false,next:0}));
  const tick=()=>{for(const job of jobs){if(job.running||Date.now()<job.next)continue;job.running=true;job.next=Date.now()+job.every;
- invokeJob(base,authSecret,job.path).then(result=>{if(result.hasMore)job.next=Date.now()+60000;console.log(new Date().toISOString(),job.path,result.hasMore?'continuing import':'completed');}).catch(e=>console.error(new Date().toISOString(),job.path,e.message)).finally(()=>{job.running=false;});}};
+ invokeJob(base,authSecret,job.path).then(result=>{if(result.hasMore)job.next=Date.now()+15*60*1000;console.log(new Date().toISOString(),job.path,result.hasMore?'continuing import':'completed');}).catch(e=>console.error(new Date().toISOString(),job.path,e.message)).finally(()=>{job.running=false;});}};
  tick();const timer=setInterval(tick,1000);return()=>clearInterval(timer);
 }
 

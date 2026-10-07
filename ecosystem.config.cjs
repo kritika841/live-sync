@@ -8,6 +8,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PORT: 5001,
+        DISABLE_IN_APP_SYNC: "true",
       },
       instances: 1,
       exec_mode: "fork",

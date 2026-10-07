@@ -3,6 +3,11 @@ name: Deploy to Hostinger VPS
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/workflows/manage-vps.yml'
+      - '.github/workflows/inspect-vps.yml'
+      - 'README.md'
+      - 'docs/**'
   workflow_dispatch:
 
 jobs:

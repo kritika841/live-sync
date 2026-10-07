@@ -157,6 +157,12 @@ function shipmentFor(order: ShiprocketOrder) {
     : order.shipments && typeof order.shipments === "object" ? order.shipments : {};
 }
 
+export function cleanJsonString(val: unknown): string {
+  if (val === undefined || val === null) return "{}";
+  const str = typeof val === "string" ? val : JSON.stringify(val);
+  return str.replace(/\0/g, "").replace(/\\u0000/g, "");
+}
+
 function orderSnapshot(order: ShiprocketOrder) {
   const shipment = shipmentFor(order);
   const others = order.others && typeof order.others === "object" ? order.others as Record<string, unknown> : {};
@@ -183,7 +189,7 @@ function orderSnapshot(order: ShiprocketOrder) {
     pickupLocation: stringValue(order.pickup_location), awb: stringValue(shipment.awb),
     courier: stringValue(shipment.courier || shipment.courier_name),
     shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
-    productsJson: JSON.stringify(Array.isArray(order.products) ? order.products : []), rawJson: JSON.stringify(order),
+    productsJson: cleanJsonString(Array.isArray(order.products) ? order.products : []), rawJson: cleanJsonString(order),
     isHighRisk: ["high", "very high"].includes(String(order.rto_risk || "").toLowerCase().replace(/[_-]/g, " ").trim()),
   };
 }
@@ -236,7 +242,7 @@ async function syncTrackingHistories(db: PostgresDatabase, token: string, refere
               AND COALESCE(NULLIF(event_at, ''), received_at) = ?
           )`).bind(
           reference.id, reference.channelOrderId || null, reference.shipmentId, reference.awb,
-          event.status, JSON.stringify(event.activity), event.eventAt, new Date().toISOString(),
+          event.status, cleanJsonString(event.activity), event.eventAt, new Date().toISOString(),
           reference.awb, event.status, event.eventAt,
         ));
         eventCount += 1;
@@ -407,7 +413,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
         pickup_location=excluded.pickup_location, awb=excluded.awb,
         courier=excluded.courier, shipment_id=excluded.shipment_id,
-        products_json=excluded.products_json, raw_json=(excluded.raw_json::jsonb || CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text,
+        products_json=excluded.products_json, raw_json=(REPLACE(excluded.raw_json, '\u0000', '')::jsonb || CASE WHEN REPLACE(orders.raw_json, '\u0000', '')::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',REPLACE(orders.raw_json, '\u0000', '')::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text,
         synced_at=excluded.synced_at, is_high_risk=excluded.is_high_risk
     `;
 
@@ -460,7 +466,7 @@ async function syncNdrDetails(db: PostgresDatabase, token: string, channelId: nu
           ndr_attempts = CASE WHEN ? > 0 THEN ? ELSE ndr_attempts END,
           ndr_raised_at = COALESCE(NULLIF(?, ''), ndr_raised_at), ndr_json = ?
         WHERE id = ?
-      `).bind(reason, attempts, attempts, raisedAt, JSON.stringify(record), current.id));
+      `).bind(reason, attempts, attempts, raisedAt, cleanJsonString(record), current.id));
     }
     if (statements.length) await db.batch(statements);
   }

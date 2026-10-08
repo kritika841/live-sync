@@ -18,20 +18,11 @@ jobs:
             echo "=== PM2 Process Status ==="
             pm2 status || true
 
-            echo "=== PM2 Describe satmi-scheduler ==="
-            pm2 describe satmi-scheduler || true
+            echo "=== PM2 satmi-orders logs ==="
+            pm2 logs satmi-orders --lines 80 --nostream || true
 
-            echo "=== satmi-scheduler Out Log (last 60 lines) ==="
-            tail -n 60 /home/deployer/logs/satmi-scheduler-out.log 2>/dev/null || true
-
-            echo "=== satmi-scheduler Error Log (last 60 lines) ==="
-            tail -n 60 /home/deployer/logs/satmi-scheduler-error.log 2>/dev/null || true
-
-            echo "=== satmi-orders Error Log (last 60 lines) ==="
-            tail -n 60 /home/deployer/logs/satmi-orders-error.log 2>/dev/null || true
-
-            echo "=== satmi-orders Out Log (last 40 lines) ==="
-            tail -n 40 /home/deployer/logs/satmi-orders-out.log 2>/dev/null || true
+            echo "=== PM2 satmi-scheduler logs ==="
+            pm2 logs satmi-scheduler --lines 80 --nostream || true
 
             echo "=== Database sync_state ==="
             sudo -u postgres psql -d satmi_orders -c "SELECT key, LEFT(value, 80) as val, updated_at FROM sync_state ORDER BY updated_at DESC LIMIT 25;" || true
@@ -39,6 +30,4 @@ jobs:
             echo "=== Database orders summary ==="
             sudo -u postgres psql -d satmi_orders -c "SELECT COUNT(*) as total_orders, MAX(order_date) as latest_order_date, MAX(synced_at) as latest_synced_at FROM orders;" || true
 
-            echo "=== Test Fast-Sync Curl Local Endpoint ==="
-            curl -s -w "\nHTTP_STATUS: %{http_code}\n" -H "x-requested-with: satmi-orders-dashboard" http://127.0.0.1:5001/api/cron/fast-sync || true
 

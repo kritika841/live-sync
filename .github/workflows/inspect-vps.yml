@@ -18,19 +18,27 @@ jobs:
             echo "=== PM2 Process Status ==="
             pm2 status || true
 
-            echo "=== Listening Ports (3000, 5001, etc.) ==="
-            ss -tulpn 2>/dev/null | grep -E ':(3000|5001|80|443)' || netstat -tulpn 2>/dev/null | grep -E ':(3000|5001|80|443)' || true
+            echo "=== PM2 Describe satmi-scheduler ==="
+            pm2 describe satmi-scheduler || true
 
-            echo "=== App Directories in /home/deployer/apps ==="
-            ls -la /home/deployer/apps || true
+            echo "=== satmi-scheduler Out Log (last 60 lines) ==="
+            tail -n 60 /home/deployer/logs/satmi-scheduler-out.log 2>/dev/null || true
 
-            echo "=== Variable names in /home/deployer/apps/satmi-orders/.env.local ==="
-            grep -E '^[A-Za-z0-9_]+=' /home/deployer/apps/satmi-orders/.env.local 2>/dev/null | cut -d= -f1 || echo "No .env.local yet"
+            echo "=== satmi-scheduler Error Log (last 60 lines) ==="
+            tail -n 60 /home/deployer/logs/satmi-scheduler-error.log 2>/dev/null || true
 
-            echo "=== Full satmi-orders-error-2.log ==="
-            cat /home/deployer/logs/satmi-orders-error-2.log 2>/dev/null || true
+            echo "=== satmi-orders Error Log (last 60 lines) ==="
+            tail -n 60 /home/deployer/logs/satmi-orders-error.log 2>/dev/null || true
 
-            echo "=== Test Curl Local Endpoint http://127.0.0.1:5001/api/auth/sign-in ==="
-            curl -v -X POST http://127.0.0.1:5001/api/auth/sign-in \
-              -H "Content-Type: application/json" \
-              -d '{"email":"kartavya@satmi.in","password":"wrongpassword"}' || true
+            echo "=== satmi-orders Out Log (last 40 lines) ==="
+            tail -n 40 /home/deployer/logs/satmi-orders-out.log 2>/dev/null || true
+
+            echo "=== Database sync_state ==="
+            sudo -u postgres psql -d satmi_orders -c "SELECT key, LEFT(value, 80) as val, updated_at FROM sync_state ORDER BY updated_at DESC LIMIT 25;" || true
+
+            echo "=== Database orders summary ==="
+            sudo -u postgres psql -d satmi_orders -c "SELECT COUNT(*) as total_orders, MAX(order_date) as latest_order_date, MAX(synced_at) as latest_synced_at FROM orders;" || true
+
+            echo "=== Test Fast-Sync Curl Local Endpoint ==="
+            curl -s -w "\nHTTP_STATUS: %{http_code}\n" -H "x-requested-with: satmi-orders-dashboard" http://127.0.0.1:5001/api/cron/fast-sync || true
+

@@ -413,7 +413,15 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
         pickup_location=excluded.pickup_location, awb=excluded.awb,
         courier=excluded.courier, shipment_id=excluded.shipment_id,
-        products_json=excluded.products_json, raw_json=(REPLACE(excluded.raw_json, '\u0000', '')::jsonb || CASE WHEN REPLACE(orders.raw_json, '\u0000', '')::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags',REPLACE(orders.raw_json, '\u0000', '')::jsonb->'shopify_tags') ELSE '{}'::jsonb END)::text,
+        products_json=excluded.products_json,
+        raw_json=(
+          excluded.raw_json::jsonb ||
+          CASE
+            WHEN NULLIF(orders.raw_json, '') IS NOT NULL AND orders.raw_json::jsonb->'shopify_tags' IS NOT NULL
+            THEN jsonb_build_object('shopify_tags', orders.raw_json::jsonb->'shopify_tags')
+            ELSE '{}'::jsonb
+          END
+        )::text,
         synced_at=excluded.synced_at, is_high_risk=excluded.is_high_risk
     `;
 
@@ -684,7 +692,7 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
     const first = await page(1);
     let imported=first.count;
     let next=Math.max(2,cursor);
-    for(let i=0;i<2 && next<=first.total;i++,next++) imported+=(await page(next)).count;
+    for(let i=0;i<4 && next<=first.total;i++,next++) imported+=(await page(next)).count;
     const pending=next<=first.total;
     const nowIso = new Date().toISOString();
     await setSyncState(db,"fast_sync_cursor",pending?String(next):"1");

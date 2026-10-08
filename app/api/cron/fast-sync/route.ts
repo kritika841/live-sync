@@ -29,7 +29,7 @@ async function handle(request: Request) {
     const { syncTodayOfdAudit } = await import("../../../../lib/ofd-audit");
     await syncTodayOfdAudit(runtime.DB).catch(() => null);
     invalidateCache();
-    return Response.json({ ok: true, ...result });
+    return Response.json({ ok: true, ...result, hasMore: Boolean(result.pending) });
   } catch (error) {
     return errorResponse(error);
   }

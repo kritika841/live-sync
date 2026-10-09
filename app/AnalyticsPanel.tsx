@@ -260,11 +260,6 @@ function addDaysToIso(isoDateStr: string, days: number): string {
   return `${year}-${month}-${day}`;
 }
 
-function getPastDateString(daysCount: number) {
-  const today = getTodayString();
-  return addDaysToIso(today, -Math.max(0, daysCount - 1));
-}
-
 const PARAMETER_STATUSES = {
   DELIVERED: [
     "DELIVERED",
@@ -509,11 +504,12 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   }, [mode]);
 
   const todayStr = useMemo(() => getTodayString(), []);
+  const yesterdayStr = useMemo(() => addDaysToIso(getTodayString(), -1), []);
   const [datePreset, setDatePreset] = useState<
     "today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "last_month" | "all" | "custom"
-  >("30d");
-  const [from, setFrom] = useState(() => getPastDateString(30));
-  const [to, setTo] = useState(todayStr);
+  >("yesterday");
+  const [from, setFrom] = useState(() => yesterdayStr);
+  const [to, setTo] = useState(() => yesterdayStr);
 
   const [courier, setCourier] = useState("");
   const [payment, setPayment] = useState("");
@@ -684,16 +680,16 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
       }
       const json = (await res.json()) as AnalyticsData;
 
-      // Discard stale response if active query changed while request was in-flight
-      if (currentQueryRef.current !== requestQuery) return;
+      // Discard stale response if a newer request was initiated
+      if (activeAbortControllerRef.current !== controller) return;
 
       setData(json);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
-      if (currentQueryRef.current !== requestQuery) return;
+      if (activeAbortControllerRef.current !== controller) return;
       setError(err instanceof Error ? err.message : "Error loading analytics");
     } finally {
-      if (currentQueryRef.current === requestQuery) {
+      if (activeAbortControllerRef.current === controller) {
         setLoading(false);
       }
     }
@@ -1613,7 +1609,16 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
       )}
 
       {/* MAIN CONTENT AREA */}
-      <div className="p-5 space-y-6">
+      <div className="p-5 space-y-6 relative">
+        {loading && data && (
+          <div className="sticky top-20 z-30 flex items-center justify-center pointer-events-none mb-[-48px]">
+            <div className="inline-flex items-center gap-2.5 rounded-full border border-primary/30 bg-card/95 px-4 py-2 text-xs font-semibold text-foreground shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 pointer-events-auto">
+              <RefreshCw size={15} className="animate-spin text-primary" />
+              <span>Fetching fresh analytics data…</span>
+            </div>
+          </div>
+        )}
+
         {loading && !data && (
           <div className="py-24 text-center space-y-3">
             <RefreshCw size={28} className="animate-spin text-primary mx-auto" />
@@ -1622,7 +1627,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
         )}
 
         {data && metrics && (
-          <>
+          <div className={`space-y-6 transition-all duration-200 ${loading ? "filter blur-[2px] opacity-60 pointer-events-none select-none" : ""}`}>
             {/* PRIMARY HEADLINE KPI CARDS */}
             {/* PRIMARY HEADLINE KPI CARDS */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
@@ -2638,7 +2643,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               )}
             </div>
-          </>
+          </div>
         )}
       </div>
     </section>

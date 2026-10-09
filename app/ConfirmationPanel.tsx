@@ -518,10 +518,14 @@ function MandatoryDelayDialog({
   order,
   submitting,
   onSubmit,
+  isAdmin = false,
+  onDismiss,
 }: {
   order: DelayedConfirmedOrder | null;
   submitting: boolean;
   onSubmit: (category: string, notes: string) => Promise<void>;
+  isAdmin?: boolean;
+  onDismiss?: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const [category, setCategory] = useState("");
@@ -581,7 +585,11 @@ function MandatoryDelayDialog({
       className="app-dialog mandatory-delay-dialog-native"
       aria-label="Action Required: Confirmed Order Delayed > 24 Hours"
       onCancel={(e) => {
-        e.preventDefault();
+        if (isAdmin && onDismiss) {
+          onDismiss();
+        } else {
+          e.preventDefault();
+        }
       }}
       onPointerDown={(e) => {
         if (e.target === e.currentTarget) {
@@ -629,21 +637,51 @@ function MandatoryDelayDialog({
           ⚠️
         </div>
         <div style={{ flex: 1 }}>
-          <div
-            style={{
-              display: "inline-block",
-              padding: "3px 9px",
-              borderRadius: "4px",
-              background: "rgba(239, 68, 68, 0.2)",
-              color: "#ef4444",
-              fontSize: "11px",
-              fontWeight: 800,
-              textTransform: "uppercase",
-              letterSpacing: "0.06em",
-              marginBottom: "6px"
-            }}
-          >
-            Fulfillment Compliance Alert
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+            <div
+              style={{
+                display: "inline-block",
+                padding: "3px 9px",
+                borderRadius: "4px",
+                background: "rgba(239, 68, 68, 0.2)",
+                color: "#ef4444",
+                fontSize: "11px",
+                fontWeight: 800,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                marginBottom: "6px"
+              }}
+            >
+              Fulfillment Compliance Alert
+            </div>
+            {isAdmin && onDismiss && (
+              <button
+                type="button"
+                onClick={onDismiss}
+                title="Dismiss (Admin bypass)"
+                aria-label="Dismiss compliance alert"
+                className="compliance-dismiss-btn"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "32px",
+                  height: "32px",
+                  minHeight: "unset",
+                  minWidth: "unset",
+                  padding: 0,
+                  borderRadius: "8px",
+                  background: "rgba(239, 68, 68, 0.15)",
+                  border: "1px solid rgba(239, 68, 68, 0.45)",
+                  color: "#ef4444",
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                  marginBottom: "4px",
+                }}
+              >
+                <X size={18} strokeWidth={2.5} style={{ stroke: "#ef4444", display: "block" }} />
+              </button>
+            )}
           </div>
           <h2 style={{ margin: "0 0 4px", fontSize: "19px", fontWeight: 800, letterSpacing: "-0.02em", color: "hsl(var(--foreground))" }}>
             Action Required: Confirmed Order Delayed &gt; 24h
@@ -1010,6 +1048,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   // Delay reason mandatory prompt state
   const [delaySubmitting, setDelaySubmitting] = useState(false);
   const [currentDelayedIndex, setCurrentDelayedIndex] = useState(0);
+  const [dismissedDelayedOrderIds, setDismissedDelayedOrderIds] = useState<Set<number>>(() => new Set());
 
   // Delay logs inspection modal state
   const [inspectingDelayOrder, setInspectingDelayOrder] = useState<ConfirmationOrder | null>(null);
@@ -1017,24 +1056,36 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   const [inspectingLogsLoading, setInspectingLogsLoading] = useState(false);
 
   const delayedOrdersNeedingPrompt = useMemo(() => {
-    if (!isAdmin) return [];
-    return (data.delayedOrders || []).filter((o) => o.requiresPrompt);
-  }, [isAdmin, data.delayedOrders]);
+    return (data.delayedOrders || []).filter((o) => o.requiresPrompt && !dismissedDelayedOrderIds.has(o.id));
+  }, [data.delayedOrders, dismissedDelayedOrderIds]);
 
   const activeDelayedOrder = delayedOrdersNeedingPrompt[currentDelayedIndex] || delayedOrdersNeedingPrompt[0] || null;
 
-  // Intercept and prevent Escape key while mandatory delay modal is active
+  const handleDismissDelayedOrder = useCallback(() => {
+    if (!activeDelayedOrder) return;
+    setDismissedDelayedOrderIds((prev) => {
+      const next = new Set(prev);
+      next.add(activeDelayedOrder.id);
+      return next;
+    });
+  }, [activeDelayedOrder]);
+
+  // Intercept and prevent Escape key while mandatory delay modal is active (unless admin bypasses)
   useEffect(() => {
     if (!activeDelayedOrder) return;
-    const preventEscape = (e: KeyboardEvent) => {
+    const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
+        if (isAdmin) {
+          handleDismissDelayedOrder();
+        } else {
+          e.preventDefault();
+          e.stopPropagation();
+        }
       }
     };
-    window.addEventListener("keydown", preventEscape, true);
-    return () => window.removeEventListener("keydown", preventEscape, true);
-  }, [activeDelayedOrder]);
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
+  }, [activeDelayedOrder, isAdmin, handleDismissDelayedOrder]);
 
   const [customTabs, setCustomTabs] = useState<Array<{ id: string; label: string; dateFrom: string; dateTo: string }>>(() => {
     if (typeof window === "undefined") return [];
@@ -1695,6 +1746,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   const candidates = (() => {
     const query = candidateSearch.trim().toLowerCase();
     return data.candidates.filter((order) => {
+      if (order.paymentMethod?.toLowerCase() === "prepaid") return false;
       if (campaignPayment !== "all" && order.paymentMethod?.toLowerCase() !== campaignPayment) return false;
       const orderTags = order.tags.map((tag) => tag.toLowerCase());
       if ([...selectedTags].some((tag) => !orderTags.includes(tag.toLowerCase()))) return false;
@@ -1706,6 +1758,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   })();
 
   const confirmationOrders = (data[mode] || []).filter((order) => {
+    if (mode === "queue" && order.paymentMethod?.toLowerCase() === "prepaid") return false;
     const query = confirmationSearch.trim().toLowerCase();
     if (query) {
       const digits = query.replace(/\D/g, "");
@@ -1754,8 +1807,8 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
           <label>
             Assigned agent
             <select value={confirmationAgent} onChange={(event) => setConfirmationAgent(event.target.value)}>
-              <option value="">All agents</option>
-              <option value="unassigned">Unassigned</option>
+              <option key="all" value="">All agents</option>
+              <option key="unassigned" value="unassigned">Unassigned</option>
               {data.agents.map((agent) => <option value={agent.userId} key={agent.userId}>{agent.name}</option>)}
             </select>
           </label>
@@ -2304,7 +2357,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
                             <label className="confirmation-agent-select">
                               Agent
                               <select value={order.confirmationAssigneeId || ""} disabled={busy} onChange={(event) => void post({ action: "assign_confirmation_agent", orderId: order.id, agentId: event.target.value })}>
-                                <option value="">Unassigned</option>
+                                <option key="unassigned" value="">Unassigned</option>
                                 {data.agents.map((agent) => <option key={agent.userId} value={agent.userId}>{agent.name}</option>)}
                               </select>
                             </label>
@@ -2622,11 +2675,13 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
         )}
       </Modal>
 
-      {/* MANDATORY DELAY REASON MODAL (UNCLOSEABLE, NATIVE TOP-LAYER POPUP) */}
+      {/* MANDATORY DELAY REASON MODAL (UNCLOSEABLE FOR AGENTS, DISMISSIBLE FOR ADMIN) */}
       <MandatoryDelayDialog
         order={activeDelayedOrder}
         submitting={delaySubmitting}
         onSubmit={handleDelaySubmit}
+        isAdmin={isAdmin}
+        onDismiss={handleDismissDelayedOrder}
       />
 
       {/* DELAY LOGS AUDIT TRAIL MODAL (CLICKABLE FROM DELAY PILL) */}

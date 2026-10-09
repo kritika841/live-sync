@@ -1,7 +1,25 @@
 import { type PostgresDatabase } from "./database";
 
 export const DEFAULT_HIGH_RTO_CAMPAIGN_ID = "cmp_default_high_rto";
-export const HIGH_RISK_SQL = "LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high')";
+export const HIGH_RISK_TAGS = ["high", "very high", "rto prediction high", "high rto", "high risk"];
+
+export const HIGH_RISK_TAG_SQL = `(
+  raw_json::jsonb->'shopify_tags' @> '"high"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"rto_prediction_high"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"very-high"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"high_rto"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"high_risk"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"high"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"rto_prediction_high"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"very-high"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"high_rto"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"high_risk"'::jsonb
+  OR (raw_json::jsonb->>'order_tag' IS NOT NULL AND LOWER(raw_json::jsonb->>'order_tag') ~* '\\m(high|very-high|rto_prediction_high|high_rto|high_risk)\\M')
+  OR (raw_json::jsonb->>'sr_tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'sr_tags') ~* '\\m(high|very-high|rto_prediction_high|high_rto|high_risk)\\M')
+  OR (raw_json::jsonb->>'tags' IS NOT NULL AND jsonb_typeof(raw_json::jsonb->'tags') = 'string' AND LOWER(raw_json::jsonb->>'tags') ~* '\\m(high|very-high|rto_prediction_high|high_rto|high_risk)\\M')
+)`;
+
+export const HIGH_RISK_SQL = `(LOWER(REPLACE(REPLACE(COALESCE(raw_json::jsonb->>'rto_risk', ''), '_', ' '), '-', ' ')) IN ('high', 'very high') OR ${HIGH_RISK_TAG_SQL})`;
 export const ACTIONABLE_STATUS_SQL = "UPPER(status) NOT LIKE '%DELIVERED%' AND UPPER(status) NOT LIKE 'RTO%' AND UPPER(status) NOT LIKE '%CANCEL%'";
 
 type CampaignCriteria = {
@@ -31,10 +49,19 @@ export function extractOrderTags(raw: Record<string, unknown>) {
   return [...new Map(tags.map((tag) => [normalized(tag), tag])).values()];
 }
 
-function campaignMatches(order: RoutingOrder, criteria: CampaignCriteria) {
-  const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
+export function isOrderHighRisk(raw: Record<string, unknown> | null | undefined): boolean {
+  if (!raw) return false;
   const risk = normalized(raw.rto_risk);
-  const highRisk = risk === "high" || risk === "very high";
+  if (risk === "high" || risk === "very high") return true;
+  const tags = extractOrderTags(raw).map(normalized);
+  return tags.some((tag) => HIGH_RISK_TAGS.includes(tag));
+}
+
+function campaignMatches(order: RoutingOrder, criteria: CampaignCriteria) {
+  // Prepaid orders must NEVER go for confirmation
+  if (normalized(order.paymentMethod) === "prepaid") return false;
+  const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
+  const highRisk = isOrderHighRisk(raw);
   if (criteria.risk === "high" && !highRisk) return false;
   if (criteria.risk === "low" && highRisk) return false;
   const paymentMethod = normalized(criteria.paymentMethod);
@@ -70,11 +97,25 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
   const now = new Date().toISOString();
   const assignments: Array<{ campaignId: string; orderId: number; position: number; createdAt: string }> = [];
   const pendingOrderIds: number[] = [];
+  const highRiskOrderIds: number[] = [];
+  const prepaidCleanupIds: number[] = [];
+
   for (const order of orderResult.results) {
-    if (["confirmed", "rejected"].includes(order.confirmationStatus)) continue;
     const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
-    const risk = normalized(raw.rto_risk);
-    const highRisk = risk === "high" || risk === "very high";
+    const highRisk = isOrderHighRisk(raw);
+    if (highRisk) {
+      highRiskOrderIds.push(order.id);
+    }
+
+    // Prepaid orders must NEVER go for confirmation even if they have the high risk tag
+    if (normalized(order.paymentMethod) === "prepaid") {
+      if (order.confirmationStatus === "pending") {
+        prepaidCleanupIds.push(order.id);
+      }
+      continue;
+    }
+
+    if (["confirmed", "rejected"].includes(order.confirmationStatus)) continue;
     const campaign = highRisk
       ? campaignResult.results.find((item) => item.id === DEFAULT_HIGH_RTO_CAMPAIGN_ID)
       : campaignResult.results.find((item) => campaignMatches(order, JSON.parse(item.criteriaJson || "{}") as CampaignCriteria));
@@ -83,6 +124,17 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
     if (actionable(order.status) && order.confirmationStatus === "not_required") {
       pendingOrderIds.push(order.id);
     }
+  }
+
+  if (prepaidCleanupIds.length) {
+    const placeholders = prepaidCleanupIds.map(() => "?").join(", ");
+    await db.prepare(`
+      UPDATE orders SET confirmation_status='not_required', confirmation_updated_at=?
+      WHERE id IN (${placeholders})
+    `).bind(now, ...prepaidCleanupIds).run().catch(() => null);
+    await db.prepare(`
+      DELETE FROM campaign_assignments WHERE order_id IN (${placeholders})
+    `).bind(...prepaidCleanupIds).run().catch(() => null);
   }
   if (assignments.length) {
     const rowPlaceholders = assignments.map(() => "(?, ?, ?, ?)").join(", ");
@@ -100,5 +152,12 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
       UPDATE orders SET confirmation_status='pending', confirmation_updated_at=?
       WHERE id IN (${placeholders}) AND confirmation_status='not_required'
     `).bind(now, ...pendingOrderIds).run();
+  }
+  if (highRiskOrderIds.length) {
+    const placeholders = highRiskOrderIds.map(() => "?").join(", ");
+    await db.prepare(`
+      UPDATE orders SET is_high_risk=TRUE
+      WHERE id IN (${placeholders}) AND is_high_risk=FALSE
+    `).bind(...highRiskOrderIds).run().catch(() => null);
   }
 }

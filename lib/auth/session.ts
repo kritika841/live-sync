@@ -97,7 +97,7 @@ export async function authenticateUser(
   await ensureSchema(runtime.DB);
 
   try {
-    const row = await runtime.DB.prepare(`
+    let row = await runtime.DB.prepare(`
       SELECT id, email, name, role, banned_until,
              (encrypted_password = crypt(?, encrypted_password)) AS password_matches
       FROM auth_users
@@ -113,6 +113,28 @@ export async function authenticateUser(
         banned_until: string | null;
         password_matches: boolean;
       }>();
+
+    if (!row) {
+      row = await runtime.DB.prepare(`
+        SELECT id::text AS id, email,
+               COALESCE(raw_user_meta_data->>'name', email) AS name,
+               COALESCE(raw_app_meta_data->>'role', 'user') AS role,
+               banned_until,
+               (encrypted_password = crypt(?, encrypted_password)) AS password_matches
+        FROM auth.users
+        WHERE LOWER(email) = LOWER(?)
+        LIMIT 1
+      `)
+        .bind(password, trimmedEmail)
+        .first<{
+          id: string;
+          email: string;
+          name: string;
+          role: string;
+          banned_until: string | null;
+          password_matches: boolean;
+        }>();
+    }
 
     if (!row) {
       return { user: null, error: "The email or password is incorrect." };

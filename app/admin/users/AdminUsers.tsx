@@ -2,7 +2,18 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Modal, useEntryDialog } from "../../Modal";
-import { CircleUserRound, KeyRound, ShieldCheck, UserPlus, UserRoundCheck, UserRoundX } from "lucide-react";
+import {
+  ChevronDown,
+  CircleUserRound,
+  Clock,
+  KeyRound,
+  LogOut,
+  Pencil,
+  ShieldCheck,
+  UserPlus,
+  UserRoundCheck,
+  UserRoundX,
+} from "lucide-react";
 
 type ManagedUser = {
   id: string;
@@ -12,19 +23,26 @@ type ManagedUser = {
   banned: boolean;
   banReason: string;
   createdAt: string;
+  lastSignInAt?: string | null;
 };
 
-type UsersResponse = { users: ManagedUser[]; total: number; error?: string };
+type UsersResponse = { users: ManagedUser[]; total: number; currentUserId?: string; error?: string };
 
-function formatDate(value: string) {
-  if (!value) return "—";
+function formatDate(value: string | undefined | null) {
+  if (!value) return "Never";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(date);
 }
 
-export default function AdminUsers({ currentUserId }: { currentUserId: string }) {
-  const [createOpen,setCreateOpen]=useState(false);
-  const {requestEntry,dialog}=useEntryDialog();
+export default function AdminUsers({
+  currentUserId,
+  active = true,
+}: {
+  currentUserId: string;
+  active?: boolean;
+}) {
+  const [createOpen, setCreateOpen] = useState(false);
+  const { requestEntry, dialog } = useEntryDialog();
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -79,25 +97,70 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
     event.preventDefault();
     const form = event.currentTarget;
     const values = new FormData(form);
-    const saved=await request({ action: "create", name: values.get("name"), email: values.get("email"), password: values.get("password"), role: values.get("role") }, "create");
-    if(saved){form.reset();setCreateOpen(false);}
+    const saved = await request({ action: "create", name: values.get("name"), email: values.get("email"), password: values.get("password"), role: values.get("role") }, "create");
+    if (saved) { form.reset(); setCreateOpen(false); }
+  }
+
+  async function editUser(user: ManagedUser) {
+    const values = await requestEntry(`Edit ${user.name || user.email}`, [
+      { name: "name", label: "Full Name", value: user.name },
+      { name: "email", label: "Email Address", type: "email", value: user.email },
+      {
+        name: "role",
+        label: "Assigned Role",
+        value: user.role,
+        options: [
+          { value: "admin", label: "Administrator" },
+          { value: "support_manager", label: "Support Manager" },
+          { value: "support_agent", label: "Support Agent" },
+          { value: "operations", label: "Operations" },
+          { value: "warehouse", label: "Warehouse" },
+          { value: "user", label: "User" },
+        ],
+      },
+    ]);
+    if (!values) return;
+    void request(
+      {
+        action: "update_info",
+        userId: user.id,
+        name: values.name,
+        email: values.email,
+        role: values.role,
+      },
+      `edit:${user.id}`
+    );
   }
 
   async function setPassword(user: ManagedUser) {
-    const values=await requestEntry("Set password",[{name:"password",label:"New password (minimum 8 characters)",type:"password"}]);
-    const password=values?.password ?? null;
+    const values = await requestEntry("Set password", [{ name: "password", label: "New password (minimum 8 characters)", type: "password" }]);
+    const password = values?.password ?? null;
     if (password === null) return;
     void request({ action: "set_password", userId: user.id, password }, `password:${user.id}`);
   }
 
+  async function forceLogout(user: ManagedUser) {
+    const confirmed = window.confirm(
+      `Force logout "${user.name || user.email}"?\n\nThis will immediately revoke their refresh tokens and terminate all active login sessions.`
+    );
+    if (!confirmed) return;
+    void request({ action: "force_logout", userId: user.id }, `logout:${user.id}`);
+  }
+
+  const totalUsers = users.length;
+  const activeUsers = users.filter((u) => !u.banned).length;
+  const adminUsers = users.filter((u) => u.role === "admin").length;
+  const opsUsers = users.filter((u) => u.role !== "admin").length;
+
   return (
-    <div className="space-y-6">
+    <div className={`space-y-6 ${!active ? "view-hidden" : ""}`}>
       {dialog}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      {/* Top Page Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border/80 pb-5">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-wider text-primary">Access control</p>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">Dashboard Users</h1>
-          <p className="text-xs text-muted-foreground mt-0.5">Manage team access and role permissions</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Manage team access, role permissions, sessions, and user credentials</p>
         </div>
         <div className="flex items-center gap-3">
           <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
@@ -110,6 +173,36 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
             <UserPlus size={15} />
             <span>Add user</span>
           </button>
+        </div>
+      </div>
+
+      {/* Metric summary cards */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+          <span className="text-[11px] font-medium text-muted-foreground">Total Users</span>
+          <p className="mt-1 text-2xl font-bold tracking-tight text-foreground">{totalUsers}</p>
+          <span className="text-[10px] text-muted-foreground">Registered accounts</span>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+          <span className="text-[11px] font-medium text-muted-foreground">Active Access</span>
+          <p className="mt-1 text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400">
+            {activeUsers}
+          </p>
+          <span className="text-[10px] text-muted-foreground">Currently enabled</span>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+          <span className="text-[11px] font-medium text-muted-foreground">Administrators</span>
+          <p className="mt-1 text-2xl font-bold tracking-tight text-primary">
+            {adminUsers}
+          </p>
+          <span className="text-[10px] text-muted-foreground">Full privileges</span>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-4 shadow-xs">
+          <span className="text-[11px] font-medium text-muted-foreground">Operations &amp; Agents</span>
+          <p className="mt-1 text-2xl font-bold tracking-tight text-foreground">
+            {opsUsers}
+          </p>
+          <span className="text-[10px] text-muted-foreground">Support &amp; warehouse</span>
         </div>
       </div>
 
@@ -225,7 +318,9 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
         ) : (
           <div className="divide-y divide-border">
             {users.map((user) => {
-              const self = user.id === currentUserId;
+              const self = user.id === currentUserId || user.email === "kritika@satmi.in";
+              const isBusyRow = busy.includes(user.id);
+
               return (
                 <article
                   className="flex flex-wrap items-center justify-between gap-4 p-4 lg:px-5 hover:bg-muted/30 transition-colors"
@@ -241,15 +336,23 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
                           {user.name || user.email}
                         </strong>
                         {self && (
-                          <span className="rounded-full bg-primary/15 px-2 py-0.2 text-[10px] font-bold text-primary">
+                          <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-bold text-primary">
                             You
                           </span>
                         )}
                       </div>
                       <span className="block text-xs text-muted-foreground truncate">{user.email}</span>
-                      <small className="block text-[11px] text-muted-foreground/70">
-                        Added {formatDate(user.createdAt)}
-                      </small>
+                      <div className="flex items-center gap-3 mt-0.5">
+                        <small className="block text-[11px] text-muted-foreground/70">
+                          Added {formatDate(user.createdAt)}
+                        </small>
+                        {user.lastSignInAt && (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/70">
+                            <Clock size={11} className="text-muted-foreground/50" />
+                            Active {formatDate(user.lastSignInAt)}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -283,24 +386,50 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
                         if (result)
                           void request({ action: "set_role", userId: user.id, role: result.role }, `role:${user.id}`);
                       }}
-                      className="rounded-lg border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 capitalize"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 capitalize transition"
                     >
-                      {user.role.replaceAll("_", " ")}
+                      <span>{user.role.replaceAll("_", " ")}</span>
+                      {!self && <ChevronDown size={12} className="text-muted-foreground" />}
                     </button>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* 1. Edit User Info */}
+                    <button
+                      title="Edit user details (name, email, role)"
+                      disabled={Boolean(busy) || isBusyRow}
+                      onClick={() => editUser(user)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition"
+                    >
+                      <Pencil size={13} />
+                      <span>Edit</span>
+                    </button>
+
+                    {/* 2. Set Password */}
                     <button
                       title="Assign a new password"
-                      disabled={Boolean(busy)}
+                      disabled={Boolean(busy) || isBusyRow}
                       onClick={() => setPassword(user)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition"
                     >
                       <KeyRound size={13} />
                       <span>Set password</span>
                     </button>
+
+                    {/* 3. Force Logout */}
                     <button
-                      disabled={Boolean(busy) || self}
+                      title="Terminate all active login sessions for this account"
+                      disabled={Boolean(busy) || isBusyRow}
+                      onClick={() => forceLogout(user)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 disabled:opacity-50 transition"
+                    >
+                      <LogOut size={13} />
+                      <span>Force logout</span>
+                    </button>
+
+                    {/* 4. Disable / Enable Account */}
+                    <button
+                      disabled={Boolean(busy) || self || isBusyRow}
                       onClick={() =>
                         void request(
                           { action: user.banned ? "enable" : "disable", userId: user.id },
@@ -326,4 +455,3 @@ export default function AdminUsers({ currentUserId }: { currentUserId: string })
     </div>
   );
 }
-

@@ -95,12 +95,20 @@ const DEFAULT_ORDER_TAGS = [
 
   const rowFilters = [...filters];
   const rowFilterValues = [...filterValues];
-  if (tab === "new" && !from) {
+  if (tab === "new" && !from && risk !== "approved") {
     rowFilters.push("SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) >= ?");
     rowFilterValues.push(cutoffDate);
   }
 
-  const riskSql = risk === "high" ? "is_high_risk = TRUE" : risk === "low" ? "is_high_risk = FALSE" : risk === "approved" ? "confirmation_status = 'confirmed'" : risk === "low_approved" ? "(is_high_risk = FALSE OR confirmation_status = 'confirmed')" : "1 = 1";
+  const riskSql = risk === "high"
+    ? "is_high_risk = TRUE AND LOWER(payment_method) != 'prepaid'"
+    : risk === "low"
+      ? "(is_high_risk = FALSE OR LOWER(payment_method) = 'prepaid')"
+      : risk === "approved"
+        ? "confirmation_status = 'confirmed'"
+        : risk === "low_approved"
+          ? "(is_high_risk = FALSE OR confirmation_status = 'confirmed' OR LOWER(payment_method) = 'prepaid')"
+          : "1 = 1";
   const where = [sqlForTab(tab), riskSql, ...rowFilters];
   const whereSql = where.join(" AND ");
   const orderBy = approved ? "COALESCE(NULLIF(confirmed_at, ''), confirmation_updated_at) DESC, id DESC" : `COALESCE(NULLIF(order_date, ''), created_at) ${sort}, id ${sort}`;
@@ -133,6 +141,7 @@ const DEFAULT_ORDER_TAGS = [
     ? cachedValue(`order-grouped-counts-${unshippedOrdersWindowDays}`, 30000, async () => {
         return runtime.DB.prepare(`
           SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus",
+            (LOWER(payment_method) = 'prepaid') AS "isPrepaid",
             CASE 
               WHEN UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')
                    AND SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) < ?
@@ -140,11 +149,12 @@ const DEFAULT_ORDER_TAGS = [
             END AS "isHistoric",
             COUNT(*) AS total 
           FROM orders 
-          GROUP BY status, is_high_risk, confirmation_status, "isHistoric"
-        `).bind(cutoffDate).all<{status:string;isHigh:boolean;confirmationStatus:string;isHistoric:boolean;total:number}>();
+          GROUP BY status, is_high_risk, confirmation_status, "isPrepaid", "isHistoric"
+        `).bind(cutoffDate).all<{status:string;isHigh:boolean;confirmationStatus:string;isPrepaid:boolean;isHistoric:boolean;total:number}>();
       })
     : runtime.DB.prepare(`
         SELECT status, is_high_risk AS "isHigh", confirmation_status AS "confirmationStatus",
+          (LOWER(payment_method) = 'prepaid') AS "isPrepaid",
           CASE 
             WHEN UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')
                  AND SUBSTR(COALESCE(NULLIF(order_date, ''), created_at), 1, 10) < ?
@@ -153,8 +163,8 @@ const DEFAULT_ORDER_TAGS = [
           COUNT(*) AS total 
         FROM orders 
         WHERE ${filterSql} 
-        GROUP BY status, is_high_risk, confirmation_status, "isHistoric"
-      `).bind(cutoffDate, ...globalFilterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;isHistoric:boolean;total:number}>();
+        GROUP BY status, is_high_risk, confirmation_status, "isPrepaid", "isHistoric"
+      `).bind(cutoffDate, ...globalFilterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;isPrepaid:boolean;isHistoric:boolean;total:number}>();
 
   const optionsPromise = cachedValue("order-options", 86400000, async () => {
     const [couriers,pickups] = await Promise.all([
@@ -169,8 +179,8 @@ const DEFAULT_ORDER_TAGS = [
   const riskCounts = {all:0,low:0,high:0,approved:0,low_approved:0};
   let total=0;
   for(const row of grouped.results) {
-    const count=Number(row.total), bucket=statusTab(row.status), confirmed=row.confirmationStatus==='confirmed';
-    const matchesRisk=risk==='high' ? row.isHigh : risk==='low' ? !row.isHigh : risk==='approved' ? confirmed : risk==='low_approved' ? (!row.isHigh||confirmed) : true;
+    const count=Number(row.total), bucket=statusTab(row.status), confirmed=row.confirmationStatus==='confirmed', isPrepaid=Boolean(row.isPrepaid);
+    const matchesRisk=risk==='high' ? (row.isHigh && !isPrepaid) : risk==='low' ? (!row.isHigh || isPrepaid) : risk==='approved' ? confirmed : risk==='low_approved' ? (!row.isHigh || confirmed || isPrepaid) : true;
     
     // Omit prehistoric unshipped orders from the "new" count
     if (bucket === "new" && row.isHistoric) {
@@ -179,9 +189,11 @@ const DEFAULT_ORDER_TAGS = [
 
     if(matchesRisk) {counts.all+=count;if(bucket!=='other')counts[bucket]+=count;}
     if(tab==='all'||bucket===tab) {
-      riskCounts.all+=count; riskCounts[row.isHigh?'high':'low']+=count;
+      riskCounts.all+=count;
+      if (row.isHigh && !isPrepaid) riskCounts.high+=count;
+      else riskCounts.low+=count;
       if(confirmed)riskCounts.approved+=count;
-      if(!row.isHigh||confirmed)riskCounts.low_approved+=count;
+      if(!row.isHigh||confirmed||isPrepaid)riskCounts.low_approved+=count;
       if(matchesRisk)total+=count;
     }
   }

@@ -5,22 +5,78 @@ import {Modal} from "./Modal";
 
 const key = (date: Date) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
 
-export default function DateRangePicker({from,to,max,onApply}:{from:string;to:string;max:string;onApply:(from:string,to:string)=>void}) {
-  const [open,setOpen]=useState(false), [start,setStart]=useState(from), [end,setEnd]=useState(to);
-  const [month,setMonth]=useState(() => new Date((from || max)+"T12:00:00"));
-  function choose(value:string) {if (!start || end) {setStart(value);setEnd("");} else if(value<start){setEnd(start);setStart(value);}else setEnd(value);}
-  const first=new Date(month.getFullYear(),month.getMonth(),1), days=new Date(month.getFullYear(),month.getMonth()+1,0).getDate();
+export default function DateRangePicker({
+  from,
+  to,
+  max,
+  onApply,
+  compact = false,
+  active = false,
+  className = "",
+}: {
+  from: string;
+  to: string;
+  max: string;
+  onApply: (from: string, to: string) => void;
+  compact?: boolean;
+  active?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [start, setStart] = useState(from);
+  const [end, setEnd] = useState(to);
+  const [month, setMonth] = useState(() => new Date((from || max) + "T12:00:00"));
+  function choose(value: string) {
+    if (!start || end) {
+      setStart(value);
+      setEnd("");
+    } else if (value < start) {
+      setEnd(start);
+      setStart(value);
+    } else setEnd(value);
+  }
+  const first = new Date(month.getFullYear(), month.getMonth(), 1);
+  const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+
+  const triggerButton = (
+    <button
+      type="button"
+      className={
+        compact
+          ? `inline-flex items-center gap-1.5 rounded-md px-2.5 py-0.5 text-xs font-semibold transition outline-none cursor-pointer ${
+              active
+                ? "bg-primary text-primary-foreground shadow-2xs font-bold ring-1 ring-primary/40"
+                : "text-muted-foreground hover:text-foreground hover:bg-card/60"
+            } ${className}`
+          : `flex h-9 w-full items-center gap-2 rounded-lg border bg-card px-3 text-xs font-medium text-foreground hover:bg-muted transition outline-none shadow-sm cursor-pointer ${
+              active ? "border-primary ring-1 ring-primary/30" : "border-input"
+            } ${className}`
+      }
+      onClick={() => {
+        setStart(from);
+        setEnd(to);
+        setMonth(new Date((from || max) + "T12:00:00"));
+        setOpen(true);
+      }}
+      title="Custom date range"
+    >
+      <CalendarDays size={compact ? 13 : 15} className={compact && active ? "text-primary-foreground" : "text-muted-foreground shrink-0"} />
+      <span className="truncate">
+        {from && to && active ? (from === to ? from : `${from} — ${to}`) : (from && to ? (from === to ? from : `${from} — ${to}`) : "Custom")}
+      </span>
+    </button>
+  );
+
   return (
-    <div className="date-range-control flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-muted-foreground">Order date range</span>
-      <button
-        type="button"
-        className="flex h-9 w-full items-center gap-2 rounded-lg border border-input bg-card px-3 text-xs font-medium text-foreground hover:bg-muted transition outline-none shadow-sm"
-        onClick={()=>{setStart(from);setEnd(to);setMonth(new Date((from||max)+"T12:00:00"));setOpen(true);}}
-      >
-        <CalendarDays size={15} className="text-muted-foreground shrink-0"/>
-        <span className="truncate">{from && to ? (from === to ? from : `${from} — ${to}`) : (from || "Custom range")}</span>
-      </button>
+    <>
+      {compact ? (
+        triggerButton
+      ) : (
+        <div className="date-range-control flex flex-col gap-1.5">
+          <span className="text-xs font-medium text-muted-foreground">Order date range</span>
+          {triggerButton}
+        </div>
+      )}
       <Modal open={open} onClose={()=>setOpen(false)} title="Select date range">
         <div className="range-picker space-y-3 p-1">
           <p className="text-xs text-muted-foreground">Select a start date, then an end date.</p>
@@ -101,6 +157,6 @@ export default function DateRangePicker({from,to,max,onApply}:{from:string;to:st
           </footer>
         </div>
       </Modal>
-    </div>
+    </>
   );
 }

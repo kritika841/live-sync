@@ -1,9 +1,10 @@
 import { completePhone } from "../../../lib/contact";
 import { shopifyOrderContacts } from "../../../lib/shopify";
 import { errorResponse } from "../../../lib/http";
-import { ACTIONABLE_STATUS_SQL, HIGH_RISK_SQL, extractOrderTags, routeConfirmationOrders } from "../../../lib/confirmation";
+import { ACTIONABLE_STATUS_SQL, extractOrderTags, isOrderHighRisk, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureConfirmationSchema, getRuntimeEnv } from "../../../lib/database";
 import { isAdmin, isSameOrigin, requireApiUser } from "../../../lib/auth/access";
+import { cachedValue, invalidateCache } from "../../../lib/server-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -104,7 +105,7 @@ async function handleGET(request: Request) {
         GROUP BY c.id ORDER BY c.position, c.created_at`).all<Record<string, unknown>>(),
       url.searchParams.get("candidates") === "true" ? runtime.DB.prepare(`SELECT ${candidateColumns}
         FROM orders o LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id
-        WHERE ${ACTIONABLE_STATUS_SQL} AND o.confirmation_status NOT IN ('confirmed','rejected')
+        WHERE ${ACTIONABLE_STATUS_SQL} AND LOWER(o.payment_method) != 'prepaid' AND o.confirmation_status NOT IN ('confirmed','rejected')
         ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC`).all<Record<string, unknown>>() : Promise.resolve({results:[] as Record<string,unknown>[]}),
     ]);
     const serializedCandidates = candidates.results.map((row) => serializeCandidate(row));
@@ -143,7 +144,7 @@ async function handleGET(request: Request) {
   }
   const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
   const joins = "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id";
-  const queueCondition = `(o.confirmation_status IN ('pending','callback','unreachable') OR ((o.is_high_risk = TRUE OR ${HIGH_RISK_SQL}) AND o.confirmation_status NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
+  const queueCondition = `LOWER(o.payment_method) != 'prepaid' AND (o.confirmation_status IN ('pending','callback','unreachable') OR (o.is_high_risk = TRUE AND o.confirmation_status NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
 
   const listQuery = mode === "confirmed"
     ? runtime.DB.prepare(`SELECT ${orderColumns}
@@ -198,17 +199,21 @@ async function handleGET(request: Request) {
     LIMIT 100
   `).all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] }));
 
-  const [orders, countRow, agents, dateGroups, totalMatchingRow, delayedOrdersRow] = await Promise.all([
-    listQuery.all<Record<string, unknown>>(),
-    runtime.DB.prepare(`SELECT
-      (SELECT COUNT(*) FROM orders o ${joins}
+  const countsPromise = cachedValue("confirmation-summary-counts", 10000, async () => {
+    return runtime.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM orders o
         WHERE ${queueCondition}
           AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
             AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))) AS queue,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed') AS confirmed,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed' AND UPPER(TRIM(status)) IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')) AS confirmed_pending,
       (SELECT COUNT(*) FROM orders WHERE confirmation_status='confirmed' AND UPPER(TRIM(status)) NOT IN ('NEW', 'NEW ORDER', 'PENDING', 'PENDING ORDER', 'PROCESSING')) AS confirmed_shipped,
-      (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; confirmed_pending: number; confirmed_shipped: number; rejected: number }>(),
+      (SELECT COUNT(*) FROM orders WHERE confirmation_status='rejected') AS rejected`).bind(now).first<{ queue: number; confirmed: number; confirmed_pending: number; confirmed_shipped: number; rejected: number }>();
+  });
+
+  const [orders, countRow, agents, dateGroups, totalMatchingRow, delayedOrdersRow] = await Promise.all([
+    listQuery.all<Record<string, unknown>>(),
+    countsPromise,
     runtime.DB.prepare("SELECT user_id AS userId,name FROM support_agents WHERE available ORDER BY name").all<{userId:string;name:string}>().catch(() => ({results:[] as {userId:string;name:string}[]})),
     dateGroupsPromise.catch(() => ({ results: [] as {date:string;count:number}[] })),
     totalMatchingPromise.catch(() => ({ total: 0 })),
@@ -351,15 +356,28 @@ async function handlePOST(request: Request) {
     }
     if (action === "refresh_contacts") {
       const after = Math.max(0, Number(body.after) || 0);
-      const rows = await runtime.DB.prepare(`SELECT id,channel_order_id AS "channelOrderId",customer_phone AS "customerPhone" FROM orders WHERE id>? AND LOWER(channel_name) LIKE '%shopify%' ORDER BY id LIMIT 50`).bind(after).all<{id:number;channelOrderId:string;customerPhone:string}>();
+      const rows = await runtime.DB.prepare(`SELECT id,channel_order_id AS "channelOrderId",customer_phone AS "customerPhone",raw_json AS "rawJson" FROM orders WHERE id>? AND LOWER(channel_name) LIKE '%shopify%' ORDER BY id LIMIT 50`).bind(after).all<{id:number;channelOrderId:string;customerPhone:string;rawJson:string}>();
       const contacts = await shopifyOrderContacts(runtime, rows.results.map(row => row.channelOrderId));
+      const touchedOrderIds: number[] = [];
       const updates = rows.results.flatMap(row => {
         const contact = contacts.get(row.channelOrderId.replace(/^#/, ""));
         if (!contact) return [];
         const phone = completePhone(contact.shippingAddress?.phone, contact.phone, contact.billingAddress?.phone, row.customerPhone);
-        return [runtime.DB.prepare(`UPDATE orders SET customer_phone=?, raw_json=(raw_json::jsonb || jsonb_build_object('shopify_tags',?::jsonb))::text WHERE id=?`).bind(phone,JSON.stringify(contact.tags),row.id)];
+        let raw: Record<string, unknown> = {};
+        try {
+          raw = JSON.parse(row.rawJson || "{}");
+        } catch {
+          raw = {};
+        }
+        const mergedRaw = { ...raw, shopify_tags: contact.tags };
+        const highRisk = isOrderHighRisk(mergedRaw);
+        touchedOrderIds.push(row.id);
+        return [runtime.DB.prepare(`UPDATE orders SET customer_phone=?, raw_json=(raw_json::jsonb || jsonb_build_object('shopify_tags',?::jsonb))::text, is_high_risk=(is_high_risk OR ?) WHERE id=?`).bind(phone,JSON.stringify(contact.tags),highRisk,row.id)];
       });
-      if(updates.length) await runtime.DB.batch(updates);
+      if(updates.length) {
+        await runtime.DB.batch(updates);
+        await routeConfirmationOrders(runtime.DB, touchedOrderIds).catch(() => null);
+      }
       return Response.json({ok:true, updated:updates.length, next:rows.results.length===50 ? rows.results.at(-1)?.id : null});
     }
     if (action === "reveal_phone") {
@@ -373,7 +391,16 @@ async function handlePOST(request: Request) {
         const resolved = contact && completePhone(contact.shippingAddress?.phone, contact.phone, contact.billingAddress?.phone);
         if (resolved) {
           phone = resolved;
-          await runtime.DB.prepare("UPDATE orders SET customer_phone=?,raw_json=(raw_json::jsonb || jsonb_build_object('shopify_tags',?::jsonb))::text WHERE id=?").bind(phone, JSON.stringify(contact.tags), orderId).run();
+          let raw: Record<string, unknown> = {};
+          try {
+            raw = JSON.parse(String(order.rawJson || "{}"));
+          } catch {
+            raw = {};
+          }
+          const mergedRaw = { ...raw, shopify_tags: contact.tags };
+          const highRisk = isOrderHighRisk(mergedRaw);
+          await runtime.DB.prepare("UPDATE orders SET customer_phone=?,raw_json=(raw_json::jsonb || jsonb_build_object('shopify_tags',?::jsonb))::text, is_high_risk=(is_high_risk OR ?) WHERE id=?").bind(phone, JSON.stringify(contact.tags), highRisk, orderId).run();
+          await routeConfirmationOrders(runtime.DB, [orderId]).catch(() => null);
         }
       }
       return Response.json({customerPhone:phone,phoneMasked:!completePhone(phone) && Boolean(phone)});
@@ -400,12 +427,12 @@ async function handlePOST(request: Request) {
       orderIds.forEach((orderId, index) => {
         statements.push(runtime.DB.prepare(`INSERT INTO campaign_assignments (campaign_id,order_id,position,created_at)
           VALUES (?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET campaign_id=excluded.campaign_id,position=excluded.position,created_at=excluded.created_at`).bind(campaignId, orderId, index, now));
-        statements.push(runtime.DB.prepare("UPDATE orders SET confirmation_status=CASE WHEN confirmation_status='not_required' THEN 'pending' ELSE confirmation_status END,confirmation_updated_at=? WHERE id=? AND confirmation_status NOT IN ('confirmed','rejected')").bind(now, orderId));
+        statements.push(runtime.DB.prepare("UPDATE orders SET confirmation_status=CASE WHEN confirmation_status='not_required' THEN 'pending' ELSE confirmation_status END,confirmation_updated_at=? WHERE id=? AND LOWER(payment_method) != 'prepaid' AND confirmation_status NOT IN ('confirmed','rejected')").bind(now, orderId));
       });
       statements.push(runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation','campaign.created','info',?,?,?,?,?,?)").bind(`Campaign ${name} created`, JSON.stringify({ campaignId, orderCount: orderIds.length, autoAssign, actorId: access.user.id, actorName: access.user.name, actorRole: access.user.role }), now, access.user.id, access.user.name, access.user.role));
       await runtime.DB.batch(statements);
       if (autoAssign) {
-        const available = await runtime.DB.prepare(`SELECT id FROM orders WHERE ${ACTIONABLE_STATUS_SQL} AND confirmation_status NOT IN ('confirmed','rejected')`).all<{ id: number }>();
+        const available = await runtime.DB.prepare(`SELECT id FROM orders WHERE ${ACTIONABLE_STATUS_SQL} AND LOWER(payment_method) != 'prepaid' AND confirmation_status NOT IN ('confirmed','rejected')`).all<{ id: number }>();
         await routeConfirmationOrders(runtime.DB, available.results.map((row) => Number(row.id)));
       }
       return Response.json({ ok: true, campaignId });
@@ -436,6 +463,25 @@ async function handlePOST(request: Request) {
     if (!orderId) throw new Error("Order is required");
     const order = await runtime.DB.prepare("SELECT id,channel_order_id AS channelOrderId,confirmation_status AS confirmationStatus FROM orders WHERE id=?").bind(orderId).first<{ id: number; channelOrderId: string; confirmationStatus: string }>();
     if (!order) throw new Error("Order was not found");
+
+    if (action === "dismiss_approved") {
+      if (!isAdmin(access.user)) throw new Error("Only administrators can dismiss approved orders");
+      const note = String(body.note || "Dismissed by administrator").trim();
+      const reason = String(body.rejectionReason || "admin_dismissed").trim();
+      const attemptCount = await runtime.DB.prepare("SELECT COUNT(*) AS total FROM confirmation_attempts WHERE order_id=?").bind(orderId).first<{ total: number }>();
+      const attemptNumber = Number(attemptCount?.total || 0) + 1;
+      await runtime.DB.batch([
+        runtime.DB.prepare(`INSERT INTO confirmation_attempts
+          (order_id,attempt_number,outcome,note,call_picked,rejection_reason,created_at)
+          VALUES (?,?,'rejected',?,TRUE,?,?)`).bind(orderId, attemptNumber, note, reason, now),
+        runtime.DB.prepare("UPDATE orders SET confirmation_status='rejected',confirmation_updated_at=?,confirmed_at='',rejected_at=? WHERE id=?").bind(now, now, orderId),
+        runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation','order.dismissed_approved','info',?,?,?,?,?,?)")
+          .bind(`Order ${order.channelOrderId} approval dismissed by admin`, JSON.stringify({ orderId, note, actorId: access.user.id, actorName: access.user.name }), now, access.user.id, access.user.name, access.user.role),
+      ]);
+      invalidateCache("confirmation-summary-counts");
+      return Response.json({ ok: true, status: "rejected" });
+    }
+
     if (["confirmed", "rejected"].includes(order.confirmationStatus)) throw new Error("This order has already been completed");
     const note = String(body.note || "").trim();
     if (!note) throw new Error("A note is required");
@@ -459,6 +505,7 @@ async function handlePOST(request: Request) {
       runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation',?,'info',?,?,?,?,?,?)")
         .bind(`order.${outcome}`, `Order ${order.channelOrderId} marked ${outcome}`, JSON.stringify({ orderId, note, rejectionReason: reason, nextActionAt, actorId: access.user.id, actorName: access.user.name, actorRole: access.user.role }), now, access.user.id, access.user.name, access.user.role),
     ]);
+    invalidateCache("confirmation-summary-counts");
     return Response.json({ ok: true, status: outcome });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Confirmation action failed" }, { status: 422 });

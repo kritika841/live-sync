@@ -1,11 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { LogOut, Settings } from "lucide-react";
+import { LogOut, UsersRound } from "lucide-react";
 import { useState } from "react";
 import { createSupabaseBrowserClient } from "../lib/supabase/client";
 
-export default function AccountMenu({ name, email, isAdmin, preview=false }: { name: string; email: string; isAdmin: boolean; preview?:boolean }) {
+export default function AccountMenu({
+  name,
+  email,
+  isAdmin,
+  preview = false,
+  onOpenUsers,
+}: {
+  name: string;
+  email: string;
+  isAdmin: boolean;
+  preview?: boolean;
+  onOpenUsers?: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [error,setError]=useState("");
   const [signingOut, setSigningOut] = useState(false);
@@ -46,14 +58,28 @@ export default function AccountMenu({ name, email, isAdmin, preview=false }: { n
             </div>
             <div className="py-1">
               {isAdmin && !preview && (
-                <Link
-                  href="/admin/users"
-                  className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition hover:bg-muted"
-                  onClick={() => setOpen(false)}
-                >
-                  <Settings size={15} className="text-muted-foreground" />
-                  Manage users
-                </Link>
+                onOpenUsers ? (
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition hover:bg-muted"
+                    onClick={() => {
+                      setOpen(false);
+                      onOpenUsers();
+                    }}
+                  >
+                    <UsersRound size={15} className="text-muted-foreground" />
+                    Manage users
+                  </button>
+                ) : (
+                  <Link
+                    href="/?view=users"
+                    className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition hover:bg-muted"
+                    onClick={() => setOpen(false)}
+                  >
+                    <UsersRound size={15} className="text-muted-foreground" />
+                    Manage users
+                  </Link>
+                )
               )}
               <button
                 onClick={signOut}

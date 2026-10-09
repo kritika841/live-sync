@@ -1402,6 +1402,31 @@ td small { display:block; max-width:200px; margin-top:4px; color:var(--muted-2);
 .app-dialog button.ops-primary, .app-dialog .ops-form footer button:last-child, .entry-dialog-form footer button:last-child {
   background:var(--green); border-color:var(--green); color:#fff; font-weight:700;
 }
+.app-dialog button.compliance-dismiss-btn {
+  min-height: unset !important;
+  min-width: unset !important;
+  padding: 0 !important;
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 8px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: rgba(239, 68, 68, 0.15) !important;
+  border: 1px solid rgba(239, 68, 68, 0.45) !important;
+  color: #ef4444 !important;
+}
+.app-dialog button.compliance-dismiss-btn:hover {
+  background: rgba(239, 68, 68, 0.28) !important;
+  border-color: rgba(239, 68, 68, 0.7) !important;
+}
+.app-dialog button.compliance-dismiss-btn svg {
+  width: 18px !important;
+  height: 18px !important;
+  stroke: #ef4444 !important;
+  stroke-width: 2.5px !important;
+  display: block !important;
+}
 .entry-dialog-form { display:grid; gap:16px; }
 .entry-dialog-form label { display:grid; gap:6px; font-size:12px; font-weight:600; color:var(--muted-2); }
 .entry-dialog-form footer { display:flex; justify-content:flex-end; gap:8px; border-top:1px solid var(--line); padding-top:16px; }

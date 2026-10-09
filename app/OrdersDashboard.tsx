@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isTransientRequestError, readJson } from "../lib/http";
 import Link from "next/link";
 import {
+  Calendar,
   Check,
   ClipboardCheck,
   Copy,
@@ -26,6 +27,7 @@ import ConfirmationPanel from "./ConfirmationPanel";
 import AnalyticsPanel from "./AnalyticsPanel";
 import SettingsPanel from "./SettingsPanel";
 import CopiedLogsPanel from "./CopiedLogsPanel";
+import AdminUsers from "./admin/users/AdminUsers";
 import AccountMenu from "./AccountMenu";
 import LiveStatus from "./LiveStatus";
 import ThemeToggle from "../components/ThemeToggle";
@@ -169,20 +171,61 @@ function addDaysToIso(isoDateStr: string, days: number): string {
   return `${year}-${month}-${day}`;
 }
 
+type DashboardView = "orders" | "confirmation" | "analytics" | "today_ofd" | "logs" | "settings" | "copied_logs" | "users";
+
+function parseDashboardView(view?: string): DashboardView {
+  if (view === "users") return "users";
+  if (view === "settings") return "settings";
+  if (view === "analytics") return "analytics";
+  if (view === "today_ofd") return "today_ofd";
+  if (view === "confirmation") return "confirmation";
+  if (view === "logs") return "logs";
+  if (view === "copied_logs") return "copied_logs";
+  return "orders";
+}
+
 export default function OrdersDashboard({
+  initialView,
+  userId = "",
   userLabel,
   userEmail,
   userRole,
   isAdmin,
   preview = false,
 }: {
+  initialView?: string;
+  userId?: string;
   userLabel: string;
   userEmail: string;
   userRole: string;
   isAdmin: boolean;
   preview?: boolean;
 }) {
-  const [view, setView] = useState<"orders" | "confirmation" | "analytics" | "today_ofd" | "logs" | "settings" | "copied_logs">("orders");
+  const [view, setView] = useState<DashboardView>(() => {
+    if (initialView) return parseDashboardView(initialView);
+    if (typeof window !== "undefined") {
+      const urlView = new URLSearchParams(window.location.search).get("view");
+      if (urlView) return parseDashboardView(urlView);
+    }
+    return "orders";
+  });
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const currentParam = new URLSearchParams(window.location.search).get("view");
+      const targetParam = view === "orders" ? null : view;
+      if (currentParam !== targetParam) {
+        const url = new URL(window.location.href);
+        if (targetParam) {
+          url.searchParams.set("view", targetParam);
+        } else {
+          url.searchParams.delete("view");
+        }
+        window.history.replaceState(null, "", url.toString());
+      }
+    }
+  }, [view]);
+
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
   const [risk, setRisk] = useState<RiskKey>("all");
@@ -195,12 +238,14 @@ export default function OrdersDashboard({
     return () => clearTimeout(timer);
   }, [search]);
 
+const yesterdayValue = addDaysToIso(todayValue, -1);
+
   const [payment, setPayment] = useState("");
   const [courier, setCourier] = useState("");
   const [tag, setTag] = useState("");
   const [pickup, setPickup] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState(yesterdayValue);
+  const [to, setTo] = useState(yesterdayValue);
   const [deliveredDate, setDeliveredDate] = useState("");
   const [copiedFilter, setCopiedFilter] = useState<"all" | "copied" | "uncopied">("all");
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
@@ -228,6 +273,30 @@ export default function OrdersDashboard({
   const [copiedIdFeedback, setCopiedIdFeedback] = useState<number | null>(null);
   const [logsData, setLogsData] = useState<LogsResponse>({ logs: [], sync: {} });
   const [logsLoading, setLogsLoading] = useState(true);
+  const [dismissingOrderId, setDismissingOrderId] = useState<number | null>(null);
+
+  async function dismissApprovedOrder(order: Order) {
+    if (!confirm(`Are you sure you want to dismiss approved order #${order.channelOrderId || order.id}? It will be revoked from approved.`)) {
+      return;
+    }
+    setDismissingOrderId(order.id);
+    try {
+      const res = await fetch("/api/confirmation", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
+        body: JSON.stringify({ action: "dismiss_approved", orderId: order.id, note: "Dismissed by admin from approved tab" }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to dismiss approved order");
+      }
+      await loadOrders();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Error dismissing approved order");
+    } finally {
+      setDismissingOrderId(null);
+    }
+  }
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ tab, risk, page: String(page), sort });
@@ -643,13 +712,32 @@ export default function OrdersDashboard({
     }
   }
 
+  const activeDatePreset = useMemo(() => {
+    if (!from && !to) return "all";
+    if (from === yesterdayValue && to === yesterdayValue) return "yesterday";
+    if (from === todayValue && to === todayValue) return "today";
+    if (from === addDaysToIso(todayValue, -6) && to === todayValue) return "7d";
+    if (from === addDaysToIso(todayValue, -29) && to === todayValue) return "30d";
+    return "custom";
+  }, [from, to, yesterdayValue]);
+
+  const hasAnyAppliedFilter = Boolean(
+    payment ||
+    courier ||
+    pickup ||
+    tag ||
+    from ||
+    to ||
+    (tab === "delivered" && deliveredDate) ||
+    copiedFilter !== "all"
+  );
+
   const appliedFilters = [
     payment,
     courier,
     pickup,
     tag,
-    from,
-    to,
+    from || to ? "date" : "",
     tab === "delivered" ? deliveredDate : "",
     copiedFilter !== "all" ? copiedFilter : "",
   ].filter(Boolean).length;
@@ -675,6 +763,7 @@ export default function OrdersDashboard({
     logs: { eyebrow: "Live activity", title: "Activity log" },
     copied_logs: { eyebrow: "Copy tracking", title: "Copied logs" },
     settings: { eyebrow: "System preferences", title: "Settings" },
+    users: { eyebrow: "Access control", title: "Dashboard Users" },
   }[view];
 
   return (
@@ -823,16 +912,21 @@ export default function OrdersDashboard({
                       <span className="truncate">Settings</span>
                     </div>
                   </button>
-                  <Link
-                    href="/admin/users"
+                  <button
+                    type="button"
                     title="Manage users"
-                    className="group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+                    className={`group relative flex h-10 w-full items-center justify-start rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                      view === "users"
+                        ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
+                    onClick={() => setView("users")}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <UsersRound size={18} className="text-muted-foreground" />
+                      <UsersRound size={18} className={view === "users" ? "text-primary" : "text-muted-foreground"} />
                       <span className="truncate">Manage users</span>
                     </div>
-                  </Link>
+                  </button>
                 </nav>
               </div>
             )}
@@ -977,13 +1071,19 @@ export default function OrdersDashboard({
                       <Settings size={17} />
                       <span>Settings</span>
                     </button>
-                    <Link
-                      href="/admin/users"
-                      className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted"
+                    <button
+                      type="button"
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                        view === "users" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setView("users");
+                        setMobileNavOpen(false);
+                      }}
                     >
-                      <UsersRound size={17} />
+                      <UsersRound size={17} className={view === "users" ? "text-primary" : "text-muted-foreground"} />
                       <span>Manage users</span>
-                    </Link>
+                    </button>
                   </>
                 )}
               </nav>
@@ -1028,7 +1128,13 @@ export default function OrdersDashboard({
           </div>
           <LiveStatus preview={preview} />
           <ThemeToggle />
-          <AccountMenu preview={preview} name={userLabel} email={userEmail} isAdmin={isAdmin} />
+          <AccountMenu
+            preview={preview}
+            name={userLabel}
+            email={userEmail}
+            isAdmin={isAdmin}
+            onOpenUsers={() => setView("users")}
+          />
         </div>
       </header>
 
@@ -1151,6 +1257,8 @@ export default function OrdersDashboard({
                 <button
                   onClick={() => {
                     setRisk("approved");
+                    setFrom("");
+                    setTo("");
                     setFilterOpen(false);
                     setPage(1);
                   }}
@@ -1229,6 +1337,90 @@ export default function OrdersDashboard({
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5 ml-auto">
+                {/* Quick Date Presets */}
+                <div className="flex flex-wrap items-center gap-1 bg-muted/70 p-1 rounded-lg border border-border">
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-muted-foreground px-1.5 uppercase tracking-wider select-none">
+                    <Calendar size={12} className="text-primary shrink-0" />
+                    <span className="hidden sm:inline">Date:</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={applyYesterday}
+                    className={`rounded-md px-2.5 py-0.5 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "yesterday"
+                        ? "bg-primary text-primary-foreground shadow-2xs font-bold ring-1 ring-primary/40"
+                        : "text-muted-foreground hover:text-foreground hover:bg-card/60"
+                    }`}
+                    title={`Yesterday (${yesterdayValue})`}
+                  >
+                    Yesterday
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyRecentDays(1)}
+                    className={`rounded-md px-2.5 py-0.5 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "today"
+                        ? "bg-primary text-primary-foreground shadow-2xs font-bold ring-1 ring-primary/40"
+                        : "text-muted-foreground hover:text-foreground hover:bg-card/60"
+                    }`}
+                    title={`Today (${todayValue})`}
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyRecentDays(7)}
+                    className={`rounded-md px-2.5 py-0.5 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "7d"
+                        ? "bg-primary text-primary-foreground shadow-2xs font-bold ring-1 ring-primary/40"
+                        : "text-muted-foreground hover:text-foreground hover:bg-card/60"
+                    }`}
+                    title="Last 7 days"
+                  >
+                    7D
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyRecentDays(30)}
+                    className={`rounded-md px-2.5 py-0.5 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "30d"
+                        ? "bg-primary text-primary-foreground shadow-2xs font-bold ring-1 ring-primary/40"
+                        : "text-muted-foreground hover:text-foreground hover:bg-card/60"
+                    }`}
+                    title="Last 30 days"
+                  >
+                    30D
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFrom("");
+                      setTo("");
+                      setPage(1);
+                    }}
+                    className={`rounded-md px-2.5 py-0.5 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "all"
+                        ? "bg-primary text-primary-foreground shadow-2xs font-bold ring-1 ring-primary/40"
+                        : "text-muted-foreground hover:text-foreground hover:bg-card/60"
+                    }`}
+                    title="All time orders"
+                  >
+                    All
+                  </button>
+                  <DateRangePicker
+                    compact
+                    active={activeDatePreset === "custom"}
+                    from={from}
+                    to={to}
+                    max={todayValue}
+                    onApply={(start, end) => {
+                      setFrom(start);
+                      setTo(end);
+                      setPage(1);
+                    }}
+                  />
+                </div>
+
                 {/* ID Copy Quick Filter */}
                 <div className="flex items-center gap-1 bg-muted/70 p-1 rounded-lg border border-border">
                   <span className="text-[10px] font-bold text-muted-foreground px-1 uppercase tracking-wider">
@@ -1240,7 +1432,7 @@ export default function OrdersDashboard({
                       setCopiedFilter("all");
                       setPage(1);
                     }}
-                    className={`rounded-md px-2 py-0.5 text-xs font-semibold transition ${
+                    className={`rounded-md px-2 py-0.5 text-xs font-semibold transition cursor-pointer ${
                       copiedFilter === "all"
                         ? "bg-card text-foreground shadow-2xs"
                         : "text-muted-foreground hover:text-foreground"
@@ -1254,7 +1446,7 @@ export default function OrdersDashboard({
                       setCopiedFilter("copied");
                       setPage(1);
                     }}
-                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold transition ${
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold transition cursor-pointer ${
                       copiedFilter === "copied"
                         ? "bg-card text-emerald-700 dark:text-emerald-400 shadow-2xs font-bold"
                         : "text-muted-foreground hover:text-foreground"
@@ -1270,7 +1462,7 @@ export default function OrdersDashboard({
                       setCopiedFilter("uncopied");
                       setPage(1);
                     }}
-                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold transition ${
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold transition cursor-pointer ${
                       copiedFilter === "uncopied"
                         ? "bg-card text-amber-700 dark:text-amber-400 shadow-2xs font-bold"
                         : "text-muted-foreground hover:text-foreground"
@@ -1299,9 +1491,9 @@ export default function OrdersDashboard({
 
                 <button
                   onClick={() => setFilterOpen((v) => !v)}
-                  className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                  className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition cursor-pointer ${
                     filterOpen || appliedFilters > 0
-                      ? "border-primary bg-primary/10 text-primary"
+                      ? "border-primary bg-primary/10 text-primary ring-1 ring-primary/20"
                       : "border-border bg-card text-foreground hover:bg-muted"
                   }`}
                 >
@@ -1316,6 +1508,165 @@ export default function OrdersDashboard({
               </div>
             </div>
 
+            {/* Active Filters Bar */}
+            {hasAnyAppliedFilter && (
+              <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-5 py-2 text-xs animate-in fade-in duration-150">
+                <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5 select-none mr-0.5">
+                  <SlidersHorizontal size={11} className="text-primary" />
+                  <span>Active filters:</span>
+                </span>
+
+                {/* Date Badge */}
+                {(from || to) && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
+                    <Calendar size={11} />
+                    <span>
+                      {from && to
+                        ? (from === to
+                            ? (from === yesterdayValue
+                                ? `Yesterday (${from})`
+                                : from === todayValue
+                                ? `Today (${from})`
+                                : from)
+                            : `${from} — ${to}`)
+                        : from
+                        ? `From ${from}`
+                        : `To ${to}`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFrom("");
+                        setTo("");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Clear date filter (view all time)"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Payment Badge */}
+                {payment && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs capitalize">
+                    <span>Payment: {payment}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPayment("");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Clear payment filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Courier Badge */}
+                {courier && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
+                    <span>Courier: {courier}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCourier("");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Clear courier filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Pickup Badge */}
+                {pickup && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
+                    <span>Pickup: {pickup}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPickup("");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Clear pickup filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Tag Badge */}
+                {tag && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
+                    <span>Tag: {tag}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTag("");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Clear tag filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Copied ID Badge */}
+                {copiedFilter !== "all" && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
+                    <span>ID: {copiedFilter === "copied" ? "Copied" : "Not copied"}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCopiedFilter("all");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Reset copied filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Delivered Date Badge */}
+                {tab === "delivered" && deliveredDate && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
+                    <span>Delivered: {deliveredDate}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeliveredDate("");
+                        setPage(1);
+                      }}
+                      className="rounded-full hover:bg-primary/20 p-0.5 text-primary transition cursor-pointer"
+                      title="Clear delivered date filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                )}
+
+                {/* Clear All */}
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="ml-auto text-xs font-semibold text-muted-foreground hover:text-destructive transition underline cursor-pointer"
+                >
+                  Clear all
+                </button>
+              </div>
+            )}
+
             {/* Filter Panel */}
             {filterOpen && (
               <div className="border-b border-border bg-muted/20 p-5">
@@ -1328,7 +1679,11 @@ export default function OrdersDashboard({
                         setPayment(event.target.value);
                         setPage(1);
                       }}
-                      className="h-9 rounded-lg border border-input bg-card px-2.5 text-xs text-foreground outline-none"
+                      className={`h-9 rounded-lg border px-2.5 text-xs outline-none transition cursor-pointer ${
+                        payment
+                          ? "border-primary bg-primary/10 text-primary font-semibold ring-1 ring-primary/30"
+                          : "border-input bg-card text-foreground"
+                      }`}
                     >
                       <option value="">All payments</option>
                       <option value="prepaid">Prepaid</option>
@@ -1344,7 +1699,11 @@ export default function OrdersDashboard({
                         setCourier(event.target.value);
                         setPage(1);
                       }}
-                      className="h-9 rounded-lg border border-input bg-card px-2.5 text-xs text-foreground outline-none"
+                      className={`h-9 rounded-lg border px-2.5 text-xs outline-none transition cursor-pointer ${
+                        courier
+                          ? "border-primary bg-primary/10 text-primary font-semibold ring-1 ring-primary/30"
+                          : "border-input bg-card text-foreground"
+                      }`}
                     >
                       <option value="">All couriers</option>
                       {data.filterOptions.couriers.map((value) => (
@@ -1363,7 +1722,11 @@ export default function OrdersDashboard({
                         setPickup(event.target.value);
                         setPage(1);
                       }}
-                      className="h-9 rounded-lg border border-input bg-card px-2.5 text-xs text-foreground outline-none"
+                      className={`h-9 rounded-lg border px-2.5 text-xs outline-none transition cursor-pointer ${
+                        pickup
+                          ? "border-primary bg-primary/10 text-primary font-semibold ring-1 ring-primary/30"
+                          : "border-input bg-card text-foreground"
+                      }`}
                     >
                       <option value="">All locations</option>
                       {data.filterOptions.pickups.map((value) => (
@@ -1382,7 +1745,11 @@ export default function OrdersDashboard({
                         setTag(e.target.value);
                         setPage(1);
                       }}
-                      className="h-9 rounded-lg border border-input bg-card px-2.5 text-xs text-foreground outline-none"
+                      className={`h-9 rounded-lg border px-2.5 text-xs outline-none transition cursor-pointer ${
+                        tag
+                          ? "border-primary bg-primary/10 text-primary font-semibold ring-1 ring-primary/30"
+                          : "border-input bg-card text-foreground"
+                      }`}
                     >
                       <option value="">All tags</option>
                       {data.filterOptions.tags?.map((value) => (
@@ -1401,7 +1768,11 @@ export default function OrdersDashboard({
                         setCopiedFilter(e.target.value as "all" | "copied" | "uncopied");
                         setPage(1);
                       }}
-                      className="h-9 rounded-lg border border-input bg-card px-2.5 text-xs text-foreground outline-none"
+                      className={`h-9 rounded-lg border px-2.5 text-xs outline-none transition cursor-pointer ${
+                        copiedFilter !== "all"
+                          ? "border-primary bg-primary/10 text-primary font-semibold ring-1 ring-primary/30"
+                          : "border-input bg-card text-foreground"
+                      }`}
                     >
                       <option value="all">All orders</option>
                       <option value="copied">Copied IDs</option>
@@ -1411,6 +1782,7 @@ export default function OrdersDashboard({
 
                   <div className="col-span-2 md:col-span-2 lg:col-span-1">
                     <DateRangePicker
+                      active={activeDatePreset === "custom"}
                       from={from}
                       to={to}
                       max={todayValue}
@@ -1427,8 +1799,8 @@ export default function OrdersDashboard({
                       variant="secondary"
                       size="sm"
                       onClick={clearFilters}
-                      disabled={!appliedFilters}
-                      className="w-full text-xs"
+                      disabled={!hasAnyAppliedFilter}
+                      className="w-full text-xs cursor-pointer"
                     >
                       Clear filters
                     </Button>
@@ -1440,28 +1812,63 @@ export default function OrdersDashboard({
                     Quick date:
                   </span>
                   <button
-                    onClick={() => applyRecentDays(1)}
-                    className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                  >
-                    Today
-                  </button>
-                  <button
+                    type="button"
                     onClick={applyYesterday}
-                    className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "yesterday"
+                        ? "border-primary bg-primary text-primary-foreground font-bold shadow-xs"
+                        : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
                   >
                     Yesterday
                   </button>
                   <button
+                    type="button"
+                    onClick={() => applyRecentDays(1)}
+                    className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "today"
+                        ? "border-primary bg-primary text-primary-foreground font-bold shadow-xs"
+                        : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => applyRecentDays(7)}
-                    className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "7d"
+                        ? "border-primary bg-primary text-primary-foreground font-bold shadow-xs"
+                        : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
                   >
                     Last 7 days
                   </button>
                   <button
+                    type="button"
                     onClick={() => applyRecentDays(30)}
-                    className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "30d"
+                        ? "border-primary bg-primary text-primary-foreground font-bold shadow-xs"
+                        : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
                   >
                     Last 30 days
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFrom("");
+                      setTo("");
+                      setPage(1);
+                    }}
+                    className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                      activeDatePreset === "all"
+                        ? "border-primary bg-primary text-primary-foreground font-bold shadow-xs"
+                        : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
+                  >
+                    All time
                   </button>
                 </div>
               </div>
@@ -1532,6 +1939,9 @@ export default function OrdersDashboard({
                     <th className="px-4 py-3 text-right">Amount</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">AWB / Courier</th>
+                    {risk === "approved" && isAdmin && (
+                      <th className="px-4 py-3 text-right">Action</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -1672,6 +2082,21 @@ export default function OrdersDashboard({
                               {order.courier || "Not assigned"}
                             </small>
                           </td>
+
+                          {risk === "approved" && isAdmin && (
+                            <td className="px-4 py-3.5 text-right whitespace-nowrap">
+                              <button
+                                type="button"
+                                disabled={dismissingOrderId === order.id}
+                                onClick={() => void dismissApprovedOrder(order)}
+                                title="Dismiss approved order"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs font-semibold text-destructive hover:bg-destructive/20 disabled:opacity-50 transition"
+                              >
+                                <X size={13} strokeWidth={2.5} />
+                                <span>{dismissingOrderId === order.id ? "Dismissing…" : "Dismiss"}</span>
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       );
                     })}
@@ -1866,6 +2291,11 @@ export default function OrdersDashboard({
                 void loadOrders();
               }}
             />
+          )}
+
+          {/* MANAGE USERS PANEL (ADMIN ONLY) */}
+          {isAdmin && (
+            <AdminUsers currentUserId={userId} active={view === "users"} />
           )}
         </div>
       </main>

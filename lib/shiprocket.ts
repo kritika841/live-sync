@@ -1,7 +1,7 @@
 import {completePhone} from "./contact";
 import { reconcileInventorySafely } from "./operations/reconcile";
 import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type RuntimeEnv } from "./database";
-import { routeConfirmationOrders } from "./confirmation";
+import { routeConfirmationOrders, isOrderHighRisk } from "./confirmation";
 import { invalidateCache } from "./server-cache";
 
 const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
@@ -190,7 +190,7 @@ function orderSnapshot(order: ShiprocketOrder) {
     courier: stringValue(shipment.courier || shipment.courier_name),
     shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
     productsJson: cleanJsonString(Array.isArray(order.products) ? order.products : []), rawJson: cleanJsonString(order),
-    isHighRisk: ["high", "very high"].includes(String(order.rto_risk || "").toLowerCase().replace(/[_-]/g, " ").trim()),
+    isHighRisk: isOrderHighRisk(order as unknown as Record<string, unknown>),
   };
 }
 
@@ -422,7 +422,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
             ELSE '{}'::jsonb
           END
         )::text,
-        synced_at=excluded.synced_at, is_high_risk=excluded.is_high_risk
+        synced_at=excluded.synced_at, is_high_risk=(excluded.is_high_risk OR orders.is_high_risk)
     `;
 
     await db.prepare(query).bind(...values).run();

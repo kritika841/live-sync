@@ -1579,13 +1579,15 @@ td small { display:block; max-width:200px; margin-top:4px; color:var(--muted-2);
 .log-actor-badge { display:inline-flex; align-items:center; padding:2px 7px; border-radius:6px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; margin-right:6px; }
 .log-actor-badge.admin { background:#FFEDD5; color:#C2410C; border:1px solid #FDBA74; }
 .log-actor-badge.support_manager { background:#FEF3C7; color:#B45309; border:1px solid #FCD34D; }
-.log-actor-badge.support_agent { background:#E0F2FE; color:#0369A1; border:1px solid #BAE6FD; }
+.log-actor-badge.support_agent,
+.log-actor-badge.customer_support { background:#E0F2FE; color:#0369A1; border:1px solid #BAE6FD; }
 .log-actor-badge.system { background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; }
 .log-actor-badge.operations { background:#F3E8FF; color:#7E22CE; border:1px solid #DDD6FE; }
 
 .dark .log-actor-badge.admin { background:#3b1f14; color:#ff9f75; border:1px solid #7c3a22; }
 .dark .log-actor-badge.support_manager { background:#362812; color:#f0c674; border:1px solid #7a5823; }
-.dark .log-actor-badge.support_agent { background:#112a38; color:#7ad1f5; border:1px solid #23587a; }
+.dark .log-actor-badge.support_agent,
+.dark .log-actor-badge.customer_support { background:#112a38; color:#7ad1f5; border:1px solid #23587a; }
 .dark .log-actor-badge.system { background:#162422; color:#7ee4c4; border:1px solid #254c43; }
 .dark .log-actor-badge.operations { background:#231738; color:#c99eff; border:1px solid #4a3078; }
 

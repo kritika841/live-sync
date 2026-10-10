@@ -148,6 +148,9 @@ export async function GET(request: Request) {
 async function handleGET(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
+  if (["customer_support", "support_agent"].includes(access.user.role)) {
+    return Response.json({ error: "Access restricted" }, { status: 403 });
+  }
 
   const runtime = getRuntimeEnv();
 

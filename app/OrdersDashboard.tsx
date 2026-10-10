@@ -173,7 +173,12 @@ function addDaysToIso(isoDateStr: string, days: number): string {
 
 type DashboardView = "orders" | "confirmation" | "analytics" | "today_ofd" | "logs" | "settings" | "copied_logs" | "users";
 
-function parseDashboardView(view?: string): DashboardView {
+function parseDashboardView(view?: string, isSupport?: boolean): DashboardView {
+  if (isSupport) {
+    if (view === "logs") return "logs";
+    if (view === "settings") return "settings";
+    return "confirmation";
+  }
   if (view === "users") return "users";
   if (view === "settings") return "settings";
   if (view === "analytics") return "analytics";
@@ -201,19 +206,28 @@ export default function OrdersDashboard({
   isAdmin: boolean;
   preview?: boolean;
 }) {
+  const isCustomerSupport = userRole === "customer_support" || userRole === "support_agent";
+
   const [view, setView] = useState<DashboardView>(() => {
-    if (initialView) return parseDashboardView(initialView);
+    if (initialView) return parseDashboardView(initialView, isCustomerSupport);
     if (typeof window !== "undefined") {
       const urlView = new URLSearchParams(window.location.search).get("view");
-      if (urlView) return parseDashboardView(urlView);
+      if (urlView) return parseDashboardView(urlView, isCustomerSupport);
     }
-    return "orders";
+    return isCustomerSupport ? "confirmation" : "orders";
   });
+
+  useEffect(() => {
+    if (isCustomerSupport && !["confirmation", "logs", "settings"].includes(view)) {
+      setView("confirmation");
+    }
+  }, [isCustomerSupport, view]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const currentParam = new URLSearchParams(window.location.search).get("view");
-      const targetParam = view === "orders" ? null : view;
+      const defaultView = isCustomerSupport ? "confirmation" : "orders";
+      const targetParam = view === defaultView ? null : view;
       if (currentParam !== targetParam) {
         const url = new URL(window.location.href);
         if (targetParam) {
@@ -224,7 +238,7 @@ export default function OrdersDashboard({
         window.history.replaceState(null, "", url.toString());
       }
     }
-  }, [view]);
+  }, [view, isCustomerSupport]);
 
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>("new");
@@ -321,7 +335,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
   const changingQuery = !!loadedQuery && loadedQuery !== query;
 
   async function loadOrders(retryCount = 0) {
-    if (preview) return;
+    if (preview || isCustomerSupport) return;
     try {
       const response = await fetch(`/api/orders?${query}`, {
         cache: "no-store",
@@ -509,7 +523,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
   }, [preview, loadedQuery]);
 
   async function syncNow() {
-    if (preview) return;
+    if (preview || isCustomerSupport) return;
     setSyncing(true);
     setError("");
     try {
@@ -801,79 +815,131 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
                 Workspace
               </p>
               <nav className="space-y-1">
-                <button
-                  title="Orders"
-                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
-                    view === "orders"
-                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
-                  onClick={() => setView("orders")}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <ShoppingBag size={18} className={view === "orders" ? "text-primary" : "text-muted-foreground"} />
-                    <span className="truncate">Orders</span>
-                  </div>
-                </button>
-                <button
-                  title="Confirmation"
-                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
-                    view === "confirmation"
-                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
-                  onClick={() => setView("confirmation")}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <PhoneCall size={18} className={view === "confirmation" ? "text-primary" : "text-muted-foreground"} />
-                    <span className="truncate">Confirmation</span>
-                  </div>
-                </button>
-                <button
-                  title="Analytics"
-                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
-                    view === "analytics"
-                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
-                  onClick={() => setView("analytics")}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <BarChart3 size={18} className={view === "analytics" ? "text-primary" : "text-muted-foreground"} />
-                    <span className="truncate">Analytics</span>
-                  </div>
-                </button>
-                <button
-                  title="Today’s OFD"
-                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
-                    view === "today_ofd"
-                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
-                  onClick={() => setView("today_ofd")}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <Truck size={18} className={view === "today_ofd" ? "text-primary" : "text-muted-foreground"} />
-                    <span className="truncate">Today’s OFD</span>
-                  </div>
-                </button>
-                <button
-                  title="Activity log"
-                  className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
-                    view === "logs"
-                      ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
-                  onClick={() => {
-                    setView("logs");
-                    void loadLogs();
-                  }}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <RotateCcw size={18} className={view === "logs" ? "text-primary" : "text-muted-foreground"} />
-                    <span className="truncate">Activity log</span>
-                  </div>
-                </button>
+                {isCustomerSupport ? (
+                  <>
+                    <button
+                      title="Confirmation"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "confirmation"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => setView("confirmation")}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <PhoneCall size={18} className={view === "confirmation" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Confirmation</span>
+                      </div>
+                    </button>
+                    <button
+                      title="Activity log"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "logs"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => {
+                        setView("logs");
+                        void loadLogs();
+                      }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <RotateCcw size={18} className={view === "logs" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Activity log</span>
+                      </div>
+                    </button>
+                    <button
+                      title="Settings"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "settings"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => setView("settings")}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Settings size={18} className={view === "settings" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Settings</span>
+                      </div>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      title="Orders"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "orders"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => setView("orders")}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <ShoppingBag size={18} className={view === "orders" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Orders</span>
+                      </div>
+                    </button>
+                    <button
+                      title="Confirmation"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "confirmation"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => setView("confirmation")}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <PhoneCall size={18} className={view === "confirmation" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Confirmation</span>
+                      </div>
+                    </button>
+                    <button
+                      title="Analytics"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "analytics"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => setView("analytics")}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <BarChart3 size={18} className={view === "analytics" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Analytics</span>
+                      </div>
+                    </button>
+                    <button
+                      title="Today’s OFD"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "today_ofd"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => setView("today_ofd")}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Truck size={18} className={view === "today_ofd" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Today’s OFD</span>
+                      </div>
+                    </button>
+                    <button
+                      title="Activity log"
+                      className={`group relative flex h-10 w-full items-center justify-between rounded-lg px-3 text-sm font-medium transition-colors duration-150 before:absolute before:bottom-2 before:left-0 before:top-2 before:w-0.5 before:rounded-full before:bg-primary before:opacity-0 before:transition-opacity ${
+                        view === "logs"
+                          ? "bg-accent/80 text-accent-foreground font-semibold before:opacity-100"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      onClick={() => {
+                        setView("logs");
+                        void loadLogs();
+                      }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <RotateCcw size={18} className={view === "logs" ? "text-primary" : "text-muted-foreground"} />
+                        <span className="truncate">Activity log</span>
+                      </div>
+                    </button>
+                  </>
+                )}
               </nav>
             </div>
 
@@ -981,83 +1047,32 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
 
             <div className="flex-1 overflow-y-auto py-4 space-y-4">
               <nav className="space-y-1">
-                <button
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                    view === "orders" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
-                  }`}
-                  onClick={() => {
-                    setView("orders");
-                    setMobileNavOpen(false);
-                  }}
-                >
-                  <ShoppingBag size={17} />
-                  <span>Orders</span>
-                </button>
-                <button
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                    view === "confirmation" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
-                  }`}
-                  onClick={() => {
-                    setView("confirmation");
-                    setMobileNavOpen(false);
-                  }}
-                >
-                  <PhoneCall size={17} />
-                  <span>Confirmation</span>
-                </button>
-                <button
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                    view === "analytics" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
-                  }`}
-                  onClick={() => {
-                    setView("analytics");
-                    setMobileNavOpen(false);
-                  }}
-                >
-                  <BarChart3 size={17} />
-                  <span>Analytics</span>
-                </button>
-                <button
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                    view === "today_ofd" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
-                  }`}
-                  onClick={() => {
-                    setView("today_ofd");
-                    setMobileNavOpen(false);
-                  }}
-                >
-                  <Truck size={17} />
-                  <span>Today’s OFD</span>
-                </button>
-                <button
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                    view === "logs" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
-                  }`}
-                  onClick={() => {
-                    setView("logs");
-                    setMobileNavOpen(false);
-                    void loadLogs();
-                  }}
-                >
-                  <RotateCcw size={17} />
-                  <span>Activity log</span>
-                </button>
-                {isAdmin && (
+                {isCustomerSupport ? (
                   <>
                     <button
-                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm font-medium transition ${
-                        view === "copied_logs" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "confirmation" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
                       }`}
                       onClick={() => {
-                        setView("copied_logs");
+                        setView("confirmation");
                         setMobileNavOpen(false);
                       }}
                     >
-                      <div className="flex items-center gap-3">
-                        <ClipboardCheck size={17} className={view === "copied_logs" ? "text-primary" : "text-muted-foreground"} />
-                        <span>Copied logs</span>
-                      </div>
-                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[9px] font-bold text-primary border border-primary/20">Admin</span>
+                      <PhoneCall size={17} />
+                      <span>Confirmation</span>
+                    </button>
+                    <button
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "logs" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setView("logs");
+                        setMobileNavOpen(false);
+                        void loadLogs();
+                      }}
+                    >
+                      <RotateCcw size={17} />
+                      <span>Activity log</span>
                     </button>
                     <button
                       className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
@@ -1071,19 +1086,114 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
                       <Settings size={17} />
                       <span>Settings</span>
                     </button>
+                  </>
+                ) : (
+                  <>
                     <button
-                      type="button"
-                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                        view === "users" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "orders" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
                       }`}
                       onClick={() => {
-                        setView("users");
+                        setView("orders");
                         setMobileNavOpen(false);
                       }}
                     >
-                      <UsersRound size={17} className={view === "users" ? "text-primary" : "text-muted-foreground"} />
-                      <span>Manage users</span>
+                      <ShoppingBag size={17} />
+                      <span>Orders</span>
                     </button>
+                    <button
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "confirmation" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setView("confirmation");
+                        setMobileNavOpen(false);
+                      }}
+                    >
+                      <PhoneCall size={17} />
+                      <span>Confirmation</span>
+                    </button>
+                    <button
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "analytics" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setView("analytics");
+                        setMobileNavOpen(false);
+                      }}
+                    >
+                      <BarChart3 size={17} />
+                      <span>Analytics</span>
+                    </button>
+                    <button
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "today_ofd" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setView("today_ofd");
+                        setMobileNavOpen(false);
+                      }}
+                    >
+                      <Truck size={17} />
+                      <span>Today’s OFD</span>
+                    </button>
+                    <button
+                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        view === "logs" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setView("logs");
+                        setMobileNavOpen(false);
+                        void loadLogs();
+                      }}
+                    >
+                      <RotateCcw size={17} />
+                      <span>Activity log</span>
+                    </button>
+                    {isAdmin && (
+                      <>
+                        <button
+                          className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm font-medium transition ${
+                            view === "copied_logs" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                          }`}
+                          onClick={() => {
+                            setView("copied_logs");
+                            setMobileNavOpen(false);
+                          }}
+                        >
+                          <div className="flex items-center gap-3">
+                            <ClipboardCheck size={17} className={view === "copied_logs" ? "text-primary" : "text-muted-foreground"} />
+                            <span>Copied logs</span>
+                          </div>
+                          <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[9px] font-bold text-primary border border-primary/20">Admin</span>
+                        </button>
+                        <button
+                          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                            view === "settings" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                          }`}
+                          onClick={() => {
+                            setView("settings");
+                            setMobileNavOpen(false);
+                          }}
+                        >
+                          <Settings size={17} />
+                          <span>Settings</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                            view === "users" ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-muted"
+                          }`}
+                          onClick={() => {
+                            setView("users");
+                            setMobileNavOpen(false);
+                          }}
+                        >
+                          <UsersRound size={17} className={view === "users" ? "text-primary" : "text-muted-foreground"} />
+                          <span>Manage users</span>
+                        </button>
+                      </>
+                    )}
                   </>
                 )}
               </nav>
@@ -1107,25 +1217,27 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
             <h1 className="text-base font-semibold text-foreground leading-tight">{viewCopy.title}</h1>
           </div>
           <span className="hidden sm:inline-flex items-center rounded-full bg-accent/70 px-2.5 py-0.5 text-[10px] font-semibold text-accent-foreground ml-2">
-            {userRole === "admin" ? "Administrator" : "Operations"}
+            {userRole === "admin" ? "Administrator" : isCustomerSupport ? "Customer Support" : "Operations"}
           </span>
         </div>
 
         {/* Right utility cluster: Search + LiveStatus + ThemeToggle + AccountMenu */}
         <div className="flex items-center gap-2.5">
-          <div className="relative hidden md:flex items-center w-56 lg:w-72">
-            <Search size={14} className="absolute left-3 text-muted-foreground pointer-events-none" />
-            <input
-              value={search}
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setView("orders");
-                setPage(1);
-              }}
-              placeholder="Search orders, customer, AWB..."
-              className="h-9 w-full rounded-lg border border-input bg-card pl-9 pr-3 text-xs text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
-            />
-          </div>
+          {!isCustomerSupport && (
+            <div className="relative hidden md:flex items-center w-56 lg:w-72">
+              <Search size={14} className="absolute left-3 text-muted-foreground pointer-events-none" />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setView("orders");
+                  setPage(1);
+                }}
+                placeholder="Search orders, customer, AWB..."
+                className="h-9 w-full rounded-lg border border-input bg-card pl-9 pr-3 text-xs text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+              />
+            </div>
+          )}
           <LiveStatus preview={preview} />
           <ThemeToggle />
           <AccountMenu
@@ -1141,7 +1253,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
       {/* 3. MAIN CONTENT CONTAINER (Wrapper offset lg:pl-[248px]) */}
       <main className="flex-1 lg:pl-[248px]">
         <div className="page-container">
-          {view === "orders" && (
+          {!isCustomerSupport && view === "orders" && (
             <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
               <div>
                 <h2 className="text-base font-bold tracking-tight text-foreground">Order Management</h2>
@@ -1159,7 +1271,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
             </div>
           )}
 
-          {error && !/signal timed out|timeout|timed out|abort/i.test(error) && (
+          {!isCustomerSupport && error && !/signal timed out|timeout|timed out|abort/i.test(error) && (
             <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
               <div className="flex items-center gap-2">
                 <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground font-bold text-[10px]">
@@ -1174,7 +1286,8 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
           )}
 
           {/* ORDERS VIEW PANEL */}
-          <section className={`panel overflow-hidden ${view !== "orders" ? "view-hidden" : ""}`}>
+          {!isCustomerSupport && (
+            <section className={`panel overflow-hidden ${view !== "orders" ? "view-hidden" : ""}`}>
             {/* Status Tabs */}
             <nav
               className="flex items-center gap-1 overflow-x-auto border-b border-border bg-muted/40 p-1.5 scrollbar-none"
@@ -2170,22 +2283,28 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
               </footer>
             )}
           </section>
+          )}
 
           {/* CONFIRMATION PANEL */}
-          <ConfirmationPanel active={view === "confirmation"} preview={preview} isAdmin={isAdmin} />
+          <ConfirmationPanel active={view === "confirmation"} preview={preview} isAdmin={isAdmin} userRole={userRole} />
 
           {/* ANALYTICS & TODAY'S OFD PANEL */}
-          <AnalyticsPanel
-            active={view === "analytics" || view === "today_ofd"}
-            mode={view === "today_ofd" ? "today_ofd" : "overview"}
-            preview={preview}
-            isAdmin={isAdmin}
-          />
+          {!isCustomerSupport && (
+            <AnalyticsPanel
+              active={view === "analytics" || view === "today_ofd"}
+              mode={view === "today_ofd" ? "today_ofd" : "overview"}
+              preview={preview}
+              isAdmin={isAdmin}
+            />
+          )}
 
           {/* SETTINGS PANEL */}
           <SettingsPanel
             active={view === "settings"}
             isAdmin={isAdmin}
+            userRole={userRole}
+            userLabel={userLabel}
+            userEmail={userEmail}
             initialDays={data.unshippedOrdersWindowDays || 30}
             onSaved={() => void loadOrders()}
           />

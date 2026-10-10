@@ -12,11 +12,20 @@ import {
   ShieldCheck,
   Server,
   AlertCircle,
+  User,
+  PhoneCall,
+  LayoutGrid,
+  Table,
+  CheckCircle2,
+  Lock,
 } from "lucide-react";
 
 interface SettingsPanelProps {
   active: boolean;
   isAdmin: boolean;
+  userRole?: string;
+  userLabel?: string;
+  userEmail?: string;
   initialDays?: number;
   onSaved?: (newDays: number) => void;
 }
@@ -41,6 +50,9 @@ const TRIGGER_EVENTS = [
 export default function SettingsPanel({
   active,
   isAdmin,
+  userRole = "",
+  userLabel = "",
+  userEmail = "",
   initialDays = 30,
   onSaved,
 }: SettingsPanelProps) {
@@ -51,6 +63,12 @@ export default function SettingsPanel({
   const [successMessage, setSuccessMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("");
+  const [layoutPref, setLayoutPref] = useState<"sheets" | "cards">(() => {
+    if (typeof window !== "undefined") {
+      return (localStorage.getItem("satmi_confirmation_view_layout") as "sheets" | "cards") || "sheets";
+    }
+    return "sheets";
+  });
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -59,7 +77,7 @@ export default function SettingsPanel({
   }, []);
 
   useEffect(() => {
-    if (!active || !isAdmin) return;
+    if (!active) return;
     const timer = setTimeout(() => {
       setLoading(true);
       fetch("/api/settings")
@@ -73,7 +91,7 @@ export default function SettingsPanel({
         .finally(() => setLoading(false));
     }, 0);
     return () => clearTimeout(timer);
-  }, [active, isAdmin]);
+  }, [active]);
 
   async function handleSave() {
     setSaving(true);
@@ -112,14 +130,253 @@ export default function SettingsPanel({
   if (!isAdmin) {
     return (
       <div className={`space-y-6 ${!active ? "view-hidden" : ""}`}>
-        <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
-            <AlertCircle size={24} />
+        {/* Top Page Header */}
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border/80 pb-5">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-wider text-primary">
+              Support Workspace
+            </p>
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">
+              Customer Support Settings
+            </h1>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Personal workspace preferences and verification queue configuration
+            </p>
           </div>
-          <h3 className="text-base font-bold text-foreground">Access Restricted</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            You need Administrator privileges to access and configure system settings.
-          </p>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-500">
+              <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Agent Active
+            </span>
+          </div>
+        </div>
+
+        {/* Grid of Structured Cards */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {/* CARD 1: Support Agent Profile */}
+          <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden">
+            <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                  <User size={18} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-sm font-bold tracking-tight text-foreground">
+                    Agent Profile
+                  </h2>
+                  <p className="text-xs text-muted-foreground">Account and assigned role</p>
+                </div>
+              </div>
+              <span className="rounded-md border border-primary/20 bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary capitalize">
+                {userRole === "support_agent" || userRole === "customer_support" ? "Customer Support" : userRole ? userRole.replaceAll("_", " ") : "Support Agent"}
+              </span>
+            </header>
+
+            <div className="p-6 space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-1">
+                  <span className="text-[11px] text-muted-foreground font-medium">Full Name</span>
+                  <p className="font-bold text-foreground text-sm truncate">{userLabel || "Customer Support Agent"}</p>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-1">
+                  <span className="text-[11px] text-muted-foreground font-medium">Email Address</span>
+                  <p className="font-bold text-foreground text-sm truncate">{userEmail || "support@satmi.in"}</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-2.5">
+                <span className="font-bold text-foreground block text-xs">Assigned Operational Permissions:</span>
+                <ul className="space-y-2 text-[11px] text-muted-foreground">
+                  <li className="flex items-center gap-2 text-foreground font-medium">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span>Customer Confirmation Calls &amp; Approvals</span>
+                  </li>
+                  <li className="flex items-center gap-2 text-foreground font-medium">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span>Logging Call Attempts (Callbacks &amp; Unreachable)</span>
+                  </li>
+                  <li className="flex items-center gap-2 text-foreground font-medium">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span>Logging Customer Rejections &amp; Order Cancellations</span>
+                  </li>
+                  <li className="flex items-center gap-2 text-foreground font-medium">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span>Activity Audit Trail for your account</span>
+                  </li>
+                  <li className="flex items-center gap-2 opacity-70">
+                    <Lock size={14} className="text-muted-foreground shrink-0" />
+                    <span>Order Shipments &amp; Inventory Operations (Operations Only)</span>
+                  </li>
+                  <li className="flex items-center gap-2 opacity-70">
+                    <Lock size={14} className="text-muted-foreground shrink-0" />
+                    <span>Shipping Delay Justifications (Operations Only)</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          {/* CARD 2: Confirmation Calling Workflow Preferences */}
+          <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden">
+            <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 text-blue-500">
+                  <PhoneCall size={18} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-sm font-bold tracking-tight text-foreground">
+                    Confirmation View Preferences
+                  </h2>
+                  <p className="text-xs text-muted-foreground">Customize your verification queue layout</p>
+                </div>
+              </div>
+            </header>
+
+            <div className="p-6 space-y-5">
+              <div>
+                <span className="block text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2.5">
+                  Default Queue Layout
+                </span>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLayoutPref("sheets");
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("satmi_confirmation_view_layout", "sheets");
+                      }
+                    }}
+                    className={`flex items-start gap-3 p-3.5 rounded-xl border text-left transition-all ${
+                      layoutPref === "sheets"
+                        ? "border-primary bg-primary/10 text-primary shadow-xs ring-1 ring-primary/30"
+                        : "border-border bg-card text-foreground hover:bg-muted/40"
+                    }`}
+                  >
+                    <Table size={18} className="shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-xs font-bold block">Spreadsheet View</span>
+                      <span className="text-[10px] text-muted-foreground">Dense tabular layout for fast calling</span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLayoutPref("cards");
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("satmi_confirmation_view_layout", "cards");
+                      }
+                    }}
+                    className={`flex items-start gap-3 p-3.5 rounded-xl border text-left transition-all ${
+                      layoutPref === "cards"
+                        ? "border-primary bg-primary/10 text-primary shadow-xs ring-1 ring-primary/30"
+                        : "border-border bg-card text-foreground hover:bg-muted/40"
+                    }`}
+                  >
+                    <LayoutGrid size={18} className="shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-xs font-bold block">Cards View</span>
+                      <span className="text-[10px] text-muted-foreground">Expanded cards with full customer details</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-border">
+                <span className="block text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">
+                  Calling Guidance Note
+                </span>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  When calling customers, always verify their delivery address, pincode, and confirm whether they prefer COD cash payment or UPI upon delivery.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          {/* CARD 3: System Overview (Read-Only) */}
+          <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden">
+            <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-500">
+                  <Server size={18} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-sm font-bold tracking-tight text-foreground">
+                    Connected Integrations
+                  </h2>
+                  <p className="text-xs text-muted-foreground">Live channels for order fulfillment</p>
+                </div>
+              </div>
+              <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-500">
+                Live
+              </span>
+            </header>
+
+            <div className="p-6">
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-1">
+                  <dt className="text-muted-foreground font-semibold text-[11px]">Primary Carrier</dt>
+                  <dd className="font-bold text-foreground text-sm">Shiprocket API v2</dd>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-1">
+                  <dt className="text-muted-foreground font-semibold text-[11px]">Store Channel</dt>
+                  <dd className="font-bold text-foreground text-sm">Satmi (Shopify)</dd>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-1">
+                  <dt className="text-muted-foreground font-semibold text-[11px]">Unshipped Orders Window</dt>
+                  <dd className="font-bold text-foreground text-sm">{days} Days (Admin managed)</dd>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-1">
+                  <dt className="text-muted-foreground font-semibold text-[11px]">Sync Mode</dt>
+                  <dd className="font-bold text-foreground text-sm">Real-time Webhook</dd>
+                </div>
+              </dl>
+            </div>
+          </section>
+
+          {/* CARD 4: Confirmation & Risk Policy */}
+          <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden">
+            <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-500">
+                  <ShieldCheck size={18} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-sm font-bold tracking-tight text-foreground">
+                    Confirmation &amp; Risk Policy
+                  </h2>
+                  <p className="text-xs text-muted-foreground">Automated RTO verification criteria</p>
+                </div>
+              </div>
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-500">
+                Enforced
+              </span>
+            </header>
+
+            <div className="p-6 space-y-3 text-xs">
+              <p className="text-muted-foreground leading-relaxed">
+                Orders are automatically routed to the <strong>Verification Queue</strong> if:
+              </p>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2.5 rounded-xl border border-border bg-muted/20 p-3">
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-500 font-bold text-[10px]">
+                    1
+                  </span>
+                  <span className="text-foreground font-medium">
+                    Shiprocket ML risk prediction marks the order as <strong>High</strong> or <strong>Very High</strong> risk.
+                  </span>
+                </div>
+                <div className="flex items-center gap-2.5 rounded-xl border border-border bg-muted/20 p-3">
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-500 font-bold text-[10px]">
+                    2
+                  </span>
+                  <span className="text-foreground font-medium">
+                    The order contains checkout risk tags: <code>rto_prediction_high</code>, <code>high</code>, <code>very-high</code>, <code>high_rto</code>, or <code>high_risk</code>.
+                  </span>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
     );

@@ -950,7 +950,7 @@ function ConfirmationTableSkeleton({ rowCount = 7 }: { rowCount?: number }) {
   );
 }
 
-export default function ConfirmationPanel({ active, section = "confirmation", preview = false, isAdmin = false }: { active: boolean; preview?: boolean; section?: "confirmation" | "campaigns"; isAdmin?: boolean }) {
+export default function ConfirmationPanel({ active, section = "confirmation", preview = false, isAdmin = false, userRole = "" }: { active: boolean; preview?: boolean; section?: "confirmation" | "campaigns"; isAdmin?: boolean; userRole?: string }) {
   const [mode, setMode] = useState<Mode>("queue");
   const [data, setData] = useState<ConfirmationData>(() => preview ? samplePreviewData : emptyData);
   const [loading, setLoading] = useState(!preview);
@@ -1055,11 +1055,14 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   const [inspectingLogs, setInspectingLogs] = useState<DelayLogEntry[]>([]);
   const [inspectingLogsLoading, setInspectingLogsLoading] = useState(false);
 
-  const delayedOrdersNeedingPrompt = useMemo(() => {
-    return (data.delayedOrders || []).filter((o) => o.requiresPrompt && !dismissedDelayedOrderIds.has(o.id));
-  }, [data.delayedOrders, dismissedDelayedOrderIds]);
+  const isCustomerSupportAgent = userRole === "customer_support" || userRole === "support_agent";
 
-  const activeDelayedOrder = delayedOrdersNeedingPrompt[currentDelayedIndex] || delayedOrdersNeedingPrompt[0] || null;
+  const delayedOrdersNeedingPrompt = useMemo(() => {
+    if (isCustomerSupportAgent) return [];
+    return (data.delayedOrders || []).filter((o) => o.requiresPrompt && !dismissedDelayedOrderIds.has(o.id));
+  }, [data.delayedOrders, dismissedDelayedOrderIds, isCustomerSupportAgent]);
+
+  const activeDelayedOrder = isCustomerSupportAgent ? null : (delayedOrdersNeedingPrompt[currentDelayedIndex] || delayedOrdersNeedingPrompt[0] || null);
 
   const handleDismissDelayedOrder = useCallback(() => {
     if (!activeDelayedOrder) return;
@@ -1072,7 +1075,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
 
   // Intercept and prevent Escape key while mandatory delay modal is active (unless admin bypasses)
   useEffect(() => {
-    if (!activeDelayedOrder) return;
+    if (isCustomerSupportAgent || !activeDelayedOrder) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (isAdmin) {
@@ -1085,7 +1088,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [activeDelayedOrder, isAdmin, handleDismissDelayedOrder]);
+  }, [activeDelayedOrder, isAdmin, handleDismissDelayedOrder, isCustomerSupportAgent]);
 
   const [customTabs, setCustomTabs] = useState<Array<{ id: string; label: string; dateFrom: string; dateTo: string }>>(() => {
     if (typeof window === "undefined") return [];
@@ -2675,14 +2678,16 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
         )}
       </Modal>
 
-      {/* MANDATORY DELAY REASON MODAL (UNCLOSEABLE FOR AGENTS, DISMISSIBLE FOR ADMIN) */}
-      <MandatoryDelayDialog
-        order={activeDelayedOrder}
-        submitting={delaySubmitting}
-        onSubmit={handleDelaySubmit}
-        isAdmin={isAdmin}
-        onDismiss={handleDismissDelayedOrder}
-      />
+      {/* MANDATORY DELAY REASON MODAL (ADMIN / OPERATIONS ONLY, NEVER SHOWN TO CUSTOMER SUPPORT) */}
+      {!isCustomerSupportAgent && activeDelayedOrder && (
+        <MandatoryDelayDialog
+          order={activeDelayedOrder}
+          submitting={delaySubmitting}
+          onSubmit={handleDelaySubmit}
+          isAdmin={isAdmin}
+          onDismiss={handleDismissDelayedOrder}
+        />
+      )}
 
       {/* DELAY LOGS AUDIT TRAIL MODAL (CLICKABLE FROM DELAY PILL) */}
       <Modal

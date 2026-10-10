@@ -183,7 +183,11 @@ async function handleGET(request: Request) {
           GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).bind(now).all<{date:string;count:number}>();
 
   // Query confirmed orders sitting unfulfilled for > 24 hours after being confirmed
-  const delayedOrdersPromise = runtime.DB.prepare(`
+  // Only queried for admins/operations/managers - customer support agents are never prompted for shipping delays
+  const isAgent = ["support_agent", "customer_support"].includes(access.user.role);
+  const delayedOrdersPromise = isAgent
+    ? Promise.resolve({ results: [] as Record<string, unknown>[] })
+    : runtime.DB.prepare(`
     SELECT o.id, o.channel_order_id AS "channelOrderId", o.customer_name AS "customerName",
       o.customer_phone AS "customerPhone", o.customer_city AS "customerCity", o.customer_state AS "customerState",
       o.total, o.status, o.confirmed_at AS "confirmedAt",
@@ -281,7 +285,10 @@ async function handleGET(request: Request) {
 async function handlePOST(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
-  if (["support_agent","support_manager","warehouse"].includes(access.user.role)) return Response.json({error:"Order confirmation access required"},{status:403});
+  const allowedConfirmationRoles = ["admin", "operations", "support_manager", "support_agent", "customer_support"];
+  if (!allowedConfirmationRoles.includes(access.user.role)) {
+    return Response.json({ error: "Order confirmation access required" }, { status: 403 });
+  }
   if (!sameOrigin(request) || !isSameOrigin(request)) return Response.json({ error: "Invalid request origin" }, { status: 403 });
   const runtime = getRuntimeEnv();
   await ensureConfirmationSchema(runtime.DB);
@@ -355,6 +362,7 @@ async function handlePOST(request: Request) {
       return Response.json({ok:true});
     }
     if (action === "refresh_contacts") {
+      if (!isAdmin(access.user) && access.user.role !== "operations") return Response.json({ error: "Administrator access required" }, { status: 403 });
       const after = Math.max(0, Number(body.after) || 0);
       const rows = await runtime.DB.prepare(`SELECT id,channel_order_id AS "channelOrderId",customer_phone AS "customerPhone",raw_json AS "rawJson" FROM orders WHERE id>? AND LOWER(channel_name) LIKE '%shopify%' ORDER BY id LIMIT 50`).bind(after).all<{id:number;channelOrderId:string;customerPhone:string;rawJson:string}>();
       const contacts = await shopifyOrderContacts(runtime, rows.results.map(row => row.channelOrderId));
@@ -406,6 +414,7 @@ async function handlePOST(request: Request) {
       return Response.json({customerPhone:phone,phoneMasked:!completePhone(phone) && Boolean(phone)});
     }
     if (action === "create_campaign") {
+      if (!isAdmin(access.user)) return Response.json({ error: "Administrator access required" }, { status: 403 });
       const name = String(body.name || "").trim();
       const description = String(body.description || "").trim();
       const inputCriteria = body.criteria && typeof body.criteria === "object" ? body.criteria as Record<string, unknown> : {};
@@ -438,12 +447,14 @@ async function handlePOST(request: Request) {
       return Response.json({ ok: true, campaignId });
     }
     if (action === "reorder_campaigns") {
+      if (!isAdmin(access.user)) return Response.json({ error: "Administrator access required" }, { status: 403 });
       const ids = Array.isArray(body.campaignIds) ? body.campaignIds.map(String) : [];
       if (!ids.length) throw new Error("Campaign order is required");
       await runtime.DB.batch(ids.map((id, index) => runtime.DB.prepare("UPDATE campaigns SET position=?,updated_at=? WHERE id=?").bind(index, now, id)));
       return Response.json({ ok: true });
     }
     if (action === "set_campaign_routing") {
+      if (!isAdmin(access.user)) return Response.json({ error: "Administrator access required" }, { status: 403 });
       const campaignId = String(body.campaignId || "");
       if (campaignId !== "cmp_default_high_rto") throw new Error("Manual override is only available for the permanent campaign");
       await runtime.DB.prepare("UPDATE campaigns SET auto_assign=?,updated_at=? WHERE id=? AND is_active=TRUE")
@@ -451,6 +462,7 @@ async function handlePOST(request: Request) {
       return Response.json({ ok: true });
     }
     if (action === "deactivate_campaign") {
+      if (!isAdmin(access.user)) return Response.json({ error: "Administrator access required" }, { status: 403 });
       const campaignId = String(body.campaignId || "");
       if (!campaignId) throw new Error("Campaign is required");
       await runtime.DB.batch([

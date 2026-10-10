@@ -137,10 +137,11 @@ async function handlePOST(request: Request) {
   await ensureSchema(runtime.DB);
 
   if (action === "create") {
+    const ALLOWED_ROLES = ["admin", "customer_support", "support_manager", "support_agent", "operations", "warehouse", "user"];
     const email = String(body.email || "").trim().toLowerCase();
     const name = String(body.name || "").trim();
     const password = String(body.password || "");
-    const role = ["admin", "support_manager", "support_agent", "operations", "warehouse", "user"].includes(String(body.role)) ? String(body.role) : "user";
+    const role = ALLOWED_ROLES.includes(String(body.role)) ? String(body.role) : "user";
     if (!name || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
       return Response.json({ error: "A name, valid email, and password of at least 8 characters are required" }, { status: 400 });
     }
@@ -182,6 +183,16 @@ async function handlePOST(request: Request) {
       ON CONFLICT (id) DO NOTHING
     `).bind(newId, email, password, name, role).run().catch(() => null);
 
+    // Sync to support_agents if applicable
+    if (["admin", "customer_support", "support_manager", "support_agent"].includes(role)) {
+      await runtime.DB.prepare(`
+        INSERT INTO support_agents (user_id, email, name, role, available)
+        VALUES (?, ?, ?, ?, true)
+        ON CONFLICT (user_id) DO UPDATE
+        SET email = EXCLUDED.email, name = EXCLUDED.name, role = EXCLUDED.role, available = true
+      `).bind(newId, email, name || email, role).run().catch(() => null);
+    }
+
     await audit(access.user, "auth.user_created", `Added dashboard user ${email}`, {
       targetUserId: newId,
       targetEmail: email,
@@ -196,9 +207,10 @@ async function handlePOST(request: Request) {
   if (!userId) return Response.json({ error: "User is required" }, { status: 400 });
 
   if (action === "update_info") {
+    const ALLOWED_ROLES = ["admin", "customer_support", "support_manager", "support_agent", "operations", "warehouse", "user"];
     const email = String(body.email || "").trim().toLowerCase();
     const name = String(body.name || "").trim();
-    const role = ["admin", "support_manager", "support_agent", "operations", "warehouse", "user"].includes(String(body.role)) ? String(body.role) : undefined;
+    const role = ALLOWED_ROLES.includes(String(body.role)) ? String(body.role) : undefined;
 
     if (!name || (email && !/^\S+@\S+\.\S+$/.test(email))) {
       return Response.json({ error: "A valid name and email address are required" }, { status: 400 });
@@ -227,6 +239,20 @@ async function handlePOST(request: Request) {
       WHERE id = ?
     `).bind(email || "", name, role || "", role || "", userId).run().catch(() => null);
 
+    if (role && ["admin", "customer_support", "support_manager", "support_agent"].includes(role)) {
+      await runtime.DB.prepare(`
+        INSERT INTO support_agents (user_id, email, name, role, available)
+        VALUES (?, ?, ?, ?, true)
+        ON CONFLICT (user_id) DO UPDATE
+        SET role = EXCLUDED.role,
+            name = CASE WHEN ? != '' THEN ? ELSE support_agents.name END,
+            email = CASE WHEN ? != '' THEN ? ELSE support_agents.email END,
+            available = true
+      `).bind(userId, email || "", name || "", role, name || "", name || "", email || "", email || "").run().catch(() => null);
+    } else if (role) {
+      await runtime.DB.prepare("UPDATE support_agents SET available = false WHERE user_id = ?").bind(userId).run().catch(() => null);
+    }
+
     await audit(access.user, "auth.user_updated", "Updated dashboard user details", {
       targetUserId: userId,
       name,
@@ -237,7 +263,8 @@ async function handlePOST(request: Request) {
   }
 
   if (action === "set_role") {
-    const role = ["admin", "support_manager", "support_agent", "operations", "warehouse", "user"].includes(String(body.role)) ? String(body.role) : "user";
+    const ALLOWED_ROLES = ["admin", "customer_support", "support_manager", "support_agent", "operations", "warehouse", "user"];
+    const role = ALLOWED_ROLES.includes(String(body.role)) ? String(body.role) : "user";
     if (userId === access.user.id && role !== "admin") {
       return Response.json({ error: "You cannot remove your own administrator access" }, { status: 400 });
     }
@@ -249,6 +276,19 @@ async function handlePOST(request: Request) {
     `).bind(role, userId).run().catch(() => null);
 
     await runtime.DB.prepare("UPDATE auth_users SET role = ? WHERE id = ?").bind(role, userId).run().catch(() => null);
+
+    if (["admin", "customer_support", "support_manager", "support_agent"].includes(role)) {
+      const u = await runtime.DB.prepare("SELECT email, name FROM auth_users WHERE id = ?").bind(userId).first<{ email: string; name: string }>();
+      await runtime.DB.prepare(`
+        INSERT INTO support_agents (user_id, email, name, role, available)
+        VALUES (?, ?, ?, ?, true)
+        ON CONFLICT (user_id) DO UPDATE
+        SET role = EXCLUDED.role, available = true
+      `).bind(userId, u?.email || "", u?.name || "", role).run().catch(() => null);
+    } else {
+      await runtime.DB.prepare("UPDATE support_agents SET available = false WHERE user_id = ?").bind(userId).run().catch(() => null);
+    }
+
     await audit(access.user, "auth.role_changed", "Changed a dashboard user role", { targetUserId: userId, role });
     return Response.json({ ok: true, message: "Role updated." });
   }

@@ -14,6 +14,9 @@ export async function GET(request: Request) {
 async function loadOrders(request: Request) {
   const access = await requireApiUser();
   if (access.response) return access.response;
+  if (["customer_support", "support_agent"].includes(access.user.role)) {
+    return Response.json({ error: "Access restricted to Confirmation Queue, Activity Logs, and Settings" }, { status: 403 });
+  }
   const runtime = getRuntimeEnv();
   await ensureCopiedOrdersSchema(runtime.DB);
   const url = new URL(request.url);

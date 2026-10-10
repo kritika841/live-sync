@@ -111,8 +111,9 @@ export default function AdminUsers({
         value: user.role,
         options: [
           { value: "admin", label: "Administrator" },
-          { value: "support_manager", label: "Support Manager" },
+          { value: "customer_support", label: "Customer Support" },
           { value: "support_agent", label: "Support Agent" },
+          { value: "support_manager", label: "Support Manager" },
           { value: "operations", label: "Operations" },
           { value: "warehouse", label: "Warehouse" },
           { value: "user", label: "User" },
@@ -275,11 +276,12 @@ export default function AdminUsers({
               className="h-9 rounded-lg border border-input bg-card px-3 text-sm text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
             >
               <option value="user">User</option>
-              <option value="admin">Administrator</option>
-              <option value="support_manager">Support manager</option>
+              <option value="customer_support">Customer support</option>
               <option value="support_agent">Support agent</option>
+              <option value="support_manager">Support manager</option>
               <option value="operations">Operations</option>
               <option value="warehouse">Warehouse</option>
+              <option value="admin">Administrator</option>
             </select>
           </label>
           <div className="pt-2 flex justify-end gap-2">
@@ -375,11 +377,12 @@ export default function AdminUsers({
                             value: user.role,
                             options: [
                               "user",
-                              "admin",
-                              "support_manager",
+                              "customer_support",
                               "support_agent",
+                              "support_manager",
                               "operations",
                               "warehouse",
+                              "admin",
                             ].map((value) => ({ value, label: value.replaceAll("_", " ") })),
                           },
                         ]);

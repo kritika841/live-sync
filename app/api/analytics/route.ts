@@ -214,19 +214,7 @@ async function handleGET(request: Request) {
           if (!status && indiaDateFromValue(row.ndrRaisedAt) === selectedDate) status = "UNDELIVERED";
           if (!status) status = selectedDate === currentIndiaDate ? String(row.status || "") : "UNRESOLVED AFTER OFD";
           if (selectedDate < currentIndiaDate && isOpenDeliveryStatus(status)) status = "UNRESOLVED AFTER OFD";
-          let attemptNumber = Number(row.attemptNumber || 0);
-          if (!attemptNumber) {
-            const firstOfdDate = indiaDateFromValue(row.firstOutForDeliveryAt);
-            const latestOfdDate = indiaDateFromValue(row.outForDeliveryAt);
-            if (firstOfdDate && firstOfdDate === selectedDate) {
-              attemptNumber = 1;
-            } else if (latestOfdDate && latestOfdDate === selectedDate && firstOfdDate && firstOfdDate !== selectedDate) {
-              const ndrAtt = Number(row.ndrAttempts || 0);
-              attemptNumber = Math.max(2, ndrAtt + (statusBucket(status) === "undelivered" ? 0 : 1));
-            } else {
-              attemptNumber = 1;
-            }
-          }
+          const attemptNumber = Math.max(1, Number(row.attemptNumber || 1));
 
           const audit = auditByOrder.get(String(row.id));
           let eventsLog = [];
@@ -240,8 +228,8 @@ async function handleGET(request: Request) {
             ...row,
             status,
             latestKnownStatus: undefined,
-            attemptNumber: Math.max(1, attemptNumber),
-            attemptBasis: "recorded_ofd_days",
+            attemptNumber,
+            attemptBasis: "recorded_ofd_cohorts",
             previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
             webhookCount: Number(audit?.webhook_count || 0),
             eventsLog,
@@ -249,41 +237,62 @@ async function handleGET(request: Request) {
             notes: audit?.notes || "",
           };
         });
+
+      const { calculateCohortMetrics } = await import("../../../lib/ofd-attempt");
+      const cohortMetrics = calculateCohortMetrics(orders, selectedDate, currentIndiaDate);
       const total = orders.length;
-      const bucketCounts = { delivered: 0, undelivered: 0, stillOut: 0, unresolved: 0, rto: 0, other: 0 };
-      const attemptCounts = { first: 0, second: 0, third: 0, later: 0, unknown: 0 };
-      for (const order of orders) {
-        const bucket = statusBucket(order.status);
-        bucketCounts[bucket] += 1;
-        const attempt = Number(order.attemptNumber);
-        if (!attempt) attemptCounts.unknown += 1;
-        else if (attempt === 1) attemptCounts.first += 1;
-        else if (attempt === 2) attemptCounts.second += 1;
-        else if (attempt === 3) attemptCounts.third += 1;
-        else attemptCounts.later += 1;
-      }
       const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
+
       const resultPayload = {
         date: selectedDate,
         metrics: {
           total: metric(total, total),
-          delivered: metric(bucketCounts.delivered, total),
-          undelivered: metric(bucketCounts.undelivered, total),
-          stillOut: metric(bucketCounts.stillOut, total),
-          unresolved: metric(bucketCounts.unresolved, total),
-          firstAttemptOFD: metric(attemptCounts.first, total),
-          secondAttemptOFD: metric(attemptCounts.second, total),
-          unknownAttemptOFD: metric(attemptCounts.unknown, total),
-          thirdAttemptOFD: metric(attemptCounts.third, total),
-          laterAttemptOFD: metric(attemptCounts.later, total),
+          delivered: { count: cohortMetrics.total.delivered, percent: cohortMetrics.total.deliveredPercent },
+          undelivered: metric(cohortMetrics.total.undelivered, total),
+          stillOut: metric(cohortMetrics.total.stillOut, total),
+          unresolved: metric(cohortMetrics.total.unresolved, total),
+          firstAttemptOFD: {
+            count: cohortMetrics.firstAttempt.count,
+            percent: cohortMetrics.firstAttempt.percent,
+            deliveredCount: cohortMetrics.firstAttempt.delivered,
+            deliveredPercent: cohortMetrics.firstAttempt.deliveredPercent,
+            undeliveredCount: cohortMetrics.firstAttempt.undelivered,
+            stillOutCount: cohortMetrics.firstAttempt.stillOut,
+          },
+          secondAttemptOFD: {
+            count: cohortMetrics.secondAttempt.count,
+            percent: cohortMetrics.secondAttempt.percent,
+            deliveredCount: cohortMetrics.secondAttempt.delivered,
+            deliveredPercent: cohortMetrics.secondAttempt.deliveredPercent,
+            undeliveredCount: cohortMetrics.secondAttempt.undelivered,
+            stillOutCount: cohortMetrics.secondAttempt.stillOut,
+          },
+          thirdAttemptOFD: {
+            count: cohortMetrics.thirdAttempt.count,
+            percent: cohortMetrics.thirdAttempt.percent,
+            deliveredCount: cohortMetrics.thirdAttempt.delivered,
+            deliveredPercent: cohortMetrics.thirdAttempt.deliveredPercent,
+            undeliveredCount: cohortMetrics.thirdAttempt.undelivered,
+            stillOutCount: cohortMetrics.thirdAttempt.stillOut,
+          },
+          laterAttemptOFD: {
+            count: cohortMetrics.laterAttempt.count,
+            percent: cohortMetrics.laterAttempt.percent,
+            deliveredCount: cohortMetrics.laterAttempt.delivered,
+            deliveredPercent: cohortMetrics.laterAttempt.deliveredPercent,
+            undeliveredCount: cohortMetrics.laterAttempt.undelivered,
+            stillOutCount: cohortMetrics.laterAttempt.stillOut,
+          },
           previousUndelivered: metric(previousUndelivered, total),
-          rto: metric(bucketCounts.rto, total),
-          other: metric(bucketCounts.other, total),
+          rto: metric(cohortMetrics.total.rto, total),
+          cohortFlow: cohortMetrics.cohortFlow,
         },
-        attemptBasis: "Recorded OFD days; courier attempt ordinals are not verified",
+        cohortMetrics,
+        attemptBasis: "Recorded OFD cohorts with verified rollover & attempt progression",
         trackingHistory,
         orders,
       };
+
 
       await runtime.DB.prepare(
         `INSERT INTO analytics_cache (cache_key, payload, updated_at, is_immutable)

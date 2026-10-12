@@ -1,13 +1,45 @@
 import type { PostgresDatabase } from "./database";
+import { deriveOrderAttemptNumber } from "./ofd-attempt";
 
 const ndrSql = "(UPPER(TRIM(status)) IN ('UNDELIVERED', 'NDR', 'NDR PENDING') OR UPPER(TRIM(status)) LIKE 'UNDELIVERED%')";
 const indiaDateSql = (column: string) =>
   `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
 const latestOfdDateSql = indiaDateSql("out_for_delivery_at");
 const firstOfdDateSql = indiaDateSql("first_out_for_delivery_at");
+const deliveredDateSql = indiaDateSql("delivered_at");
 
-export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string) {
-  return db
+export interface OfdOrderRecord {
+  id: number | string;
+  channelOrderId: string;
+  customerName: string;
+  customerPhone: string;
+  customerCity: string;
+  customerState: string;
+  status: string;
+  paymentMethod: string;
+  total: number;
+  awb: string;
+  courier: string;
+  shippedAt: string;
+  firstOutForDeliveryAt: string;
+  outForDeliveryAt: string;
+  deliveredAt: string;
+  ndrReason: string;
+  ndrAttempts: number;
+  ndrRaisedAt: string;
+  shippingCost: number;
+  recordedOfdDays: number;
+  attemptNumber: number;
+  previousUndelivered: boolean;
+  latestKnownStatus?: string;
+  [key: string]: unknown;
+}
+
+export async function loadOfdRecords(
+  db: PostgresDatabase,
+  selectedDate: string
+): Promise<{ results: OfdOrderRecord[] }> {
+  const res = await db
     .prepare(
       `
       WITH event_orders AS (
@@ -41,10 +73,13 @@ export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string)
           COALESCE(
             selected_event.ofd_at,
             CASE WHEN ${latestOfdDateSql} = ? THEN out_for_delivery_at END,
-            CASE WHEN ${firstOfdDateSql} = ? THEN first_out_for_delivery_at END
+            CASE WHEN ${firstOfdDateSql} = ? THEN first_out_for_delivery_at END,
+            CASE WHEN ${deliveredDateSql} = ? THEN COALESCE(NULLIF(out_for_delivery_at, ''), first_out_for_delivery_at) END
           ) AS selected_ofd_at,
-          NULLIF((SELECT COUNT(*) FROM deduped_ofd_days previous
-            WHERE previous.order_id = orders.id AND previous.ofd_date <= ?), 0)::integer AS attempt_number,
+          GREATEST(
+            COALESCE((SELECT COUNT(DISTINCT previous.ofd_date) FROM deduped_ofd_days previous WHERE previous.order_id = orders.id AND previous.ofd_date <= ?), 0),
+            COALESCE((SELECT COUNT(DISTINCT audit.ofd_date) FROM today_ofd_audit audit WHERE audit.order_id = orders.id AND audit.ofd_date <= ?), 0)
+          )::integer AS recorded_ofd_days,
           EXISTS(SELECT 1 FROM matching_events failed
             WHERE failed.order_id = orders.id AND failed.event_date < ? AND (${ndrSql})) AS previous_undelivered
         FROM orders
@@ -53,6 +88,7 @@ export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string)
         WHERE selected_event.ofd_at IS NOT NULL
            OR ${latestOfdDateSql} = ?
            OR ${firstOfdDateSql} = ?
+           OR (${deliveredDateSql} = ? AND (first_out_for_delivery_at != '' OR out_for_delivery_at != ''))
       )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
         customer_phone AS customerPhone,
@@ -61,7 +97,7 @@ export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string)
         shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
         selected_ofd_at AS outForDeliveryAt, delivered_at AS deliveredAt,
         ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
-        shipping_cost AS shippingCost, attempt_number AS attemptNumber,
+        shipping_cost AS shippingCost, recorded_ofd_days AS recordedOfdDays,
         previous_undelivered AS previousUndelivered,
         (SELECT outcome.status FROM matching_events outcome
           WHERE outcome.order_id = selected_orders.id
@@ -81,7 +117,54 @@ export async function loadOfdRecords(db: PostgresDatabase, selectedDate: string)
       selectedDate,
       selectedDate,
       selectedDate,
+      selectedDate,
+      selectedDate,
+      selectedDate,
       selectedDate
     )
     .all<Record<string, unknown>>();
+
+  const mapped: OfdOrderRecord[] = (res.results || []).map((row) => {
+    const attemptNumber = deriveOrderAttemptNumber(
+      {
+        id: String(row.id),
+        status: String(row.status || ""),
+        firstOutForDeliveryAt: String(row.firstOutForDeliveryAt || ""),
+        outForDeliveryAt: String(row.outForDeliveryAt || ""),
+        deliveredAt: String(row.deliveredAt || ""),
+        ndrAttempts: Number(row.ndrAttempts || 0),
+        attemptNumber: Number(row.recordedOfdDays || 0),
+      },
+      selectedDate,
+      Number(row.recordedOfdDays || 0)
+    );
+
+    return {
+      id: row.id as string | number,
+      channelOrderId: String(row.channelOrderId || ""),
+      customerName: String(row.customerName || ""),
+      customerPhone: String(row.customerPhone || ""),
+      customerCity: String(row.customerCity || ""),
+      customerState: String(row.customerState || ""),
+      status: String(row.status || ""),
+      paymentMethod: String(row.paymentMethod || ""),
+      total: Number(row.total || 0),
+      awb: String(row.awb || ""),
+      courier: String(row.courier || ""),
+      shippedAt: String(row.shippedAt || ""),
+      firstOutForDeliveryAt: String(row.firstOutForDeliveryAt || ""),
+      outForDeliveryAt: String(row.outForDeliveryAt || ""),
+      deliveredAt: String(row.deliveredAt || ""),
+      ndrReason: String(row.ndrReason || ""),
+      ndrAttempts: Number(row.ndrAttempts || 0),
+      ndrRaisedAt: String(row.ndrRaisedAt || ""),
+      shippingCost: Number(row.shippingCost || 0),
+      recordedOfdDays: Number(row.recordedOfdDays || 0),
+      attemptNumber,
+      previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
+      latestKnownStatus: row.latestKnownStatus ? String(row.latestKnownStatus) : undefined,
+    };
+  });
+
+  return { results: mapped };
 }

@@ -1,6 +1,7 @@
 import type { PostgresDatabase } from "./database";
 import { logActivity } from "./database";
 import { loadOfdRecords } from "./ofd";
+import { deriveOrderAttemptNumber } from "./ofd-attempt";
 import fs from "fs";
 import path from "path";
 
@@ -268,17 +269,20 @@ export async function syncTodayOfdAudit(
     else if (outcome === "undelivered") totalUndelivered++;
     else if (outcome === "rto") totalRto++;
 
-    // Calculate attempt number: If first OFD date was before targetDate, it's at least attempt 2
-    let attemptNumber = Number(o.attemptNumber || 0);
-    if (!attemptNumber) {
-      const firstOfdDate = o.firstOutForDeliveryAt ? String(o.firstOutForDeliveryAt).slice(0, 10) : "";
-      if (firstOfdDate && firstOfdDate < targetDate) {
-        const ndrAttempts = Number(o.ndrAttempts || 0);
-        attemptNumber = Math.max(2, ndrAttempts + (outcome === "undelivered" ? 0 : 1));
-      } else {
-        attemptNumber = 1;
-      }
-    }
+    // Calculate attempt number using comprehensive cohort derivation
+    const attemptNumber = deriveOrderAttemptNumber(
+      {
+        id: String(o.id),
+        status: currentStatus,
+        firstOutForDeliveryAt: String(o.firstOutForDeliveryAt || ""),
+        outForDeliveryAt: String(o.outForDeliveryAt || ""),
+        deliveredAt,
+        ndrAttempts: Number(o.ndrAttempts || 0),
+        attemptNumber: Number(o.attemptNumber || 0),
+      },
+      targetDate,
+      Number(o.recordedOfdDays || o.attemptNumber || 0)
+    );
 
     preparedValues.push([
       targetDate,
@@ -562,4 +566,30 @@ export async function saveEodExportToFile(
   const filePath = path.join(outDir, `ofd-audit-${targetDate}.csv`);
   fs.writeFileSync(filePath, csv, "utf-8");
   return filePath;
+}
+
+/**
+ * Backfills OFD audit records and generates CSV reports for a range of dates.
+ */
+export async function backfillOfdAuditRange(
+  db: PostgresDatabase,
+  startDate: string,
+  endDate: string = getIndiaDate()
+) {
+  const current = new Date(startDate);
+  const end = new Date(endDate);
+  const results = [];
+
+  while (current <= end) {
+    const dStr = current.toISOString().slice(0, 10);
+    try {
+      const res = await syncTodayOfdAudit(db, dStr);
+      results.push(res);
+    } catch (err) {
+      console.warn(`Failed to sync OFD audit for ${dStr}:`, err);
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  return results;
 }

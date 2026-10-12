@@ -31,6 +31,10 @@ import {
 interface MetricItem {
   count: number;
   percent: number;
+  deliveredCount?: number;
+  deliveredPercent?: number;
+  undeliveredCount?: number;
+  stillOutCount?: number;
 }
 
 interface AnalyticsData {
@@ -1000,30 +1004,36 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
 
                 <div className="rounded-xl border border-border bg-card p-3.5 shadow-xs">
-                  <p className="text-[11px] font-medium text-muted-foreground">1st recorded OFD day</p>
+                  <p className="text-[11px] font-medium text-sky-600 dark:text-sky-400">1st Attempt OFD</p>
                   <strong className="text-xl font-bold text-foreground mt-1 block">
-                    {ofdMetrics.firstAttemptOFD?.percent || 0}%{" "}
-                    <span className="text-xs font-normal text-muted-foreground">({formatNumber(ofdMetrics.firstAttemptOFD?.count || 0)})</span>
+                    {formatNumber(ofdMetrics.firstAttemptOFD?.count || 0)}{" "}
+                    <span className="text-xs font-normal text-muted-foreground">({ofdMetrics.firstAttemptOFD?.percent || 0}%)</span>
                   </strong>
-                  <small className="text-[10px] text-muted-foreground">First day out</small>
+                  <small className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold block mt-0.5">
+                    {ofdMetrics.firstAttemptOFD?.deliveredPercent ?? ofdMetrics.firstAttemptOFD?.percent ?? 0}% delivered ({formatNumber(ofdMetrics.firstAttemptOFD?.deliveredCount || 0)})
+                  </small>
                 </div>
 
                 <div className="rounded-xl border border-border bg-card p-3.5 shadow-xs">
-                  <p className="text-[11px] font-medium text-amber-600 dark:text-amber-400">2nd recorded OFD day</p>
+                  <p className="text-[11px] font-medium text-amber-600 dark:text-amber-400">2nd Attempt OFD</p>
                   <strong className="text-xl font-bold text-foreground mt-1 block">
-                    {ofdMetrics.secondAttemptOFD?.percent || 0}%{" "}
-                    <span className="text-xs font-normal text-muted-foreground">({formatNumber(ofdMetrics.secondAttemptOFD?.count || 0)})</span>
+                    {formatNumber(ofdMetrics.secondAttemptOFD?.count || 0)}{" "}
+                    <span className="text-xs font-normal text-muted-foreground">({ofdMetrics.secondAttemptOFD?.percent || 0}%)</span>
                   </strong>
-                  <small className="text-[10px] text-muted-foreground">Second OFD day</small>
+                  <small className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold block mt-0.5">
+                    {ofdMetrics.secondAttemptOFD?.deliveredPercent ?? ofdMetrics.secondAttemptOFD?.percent ?? 0}% delivered ({formatNumber(ofdMetrics.secondAttemptOFD?.deliveredCount || 0)})
+                  </small>
                 </div>
 
                 <div className="rounded-xl border border-border bg-card p-3.5 shadow-xs">
-                  <p className="text-[11px] font-medium text-orange-600 dark:text-orange-400">3rd recorded OFD day</p>
+                  <p className="text-[11px] font-medium text-orange-600 dark:text-orange-400">3rd Attempt OFD</p>
                   <strong className="text-xl font-bold text-foreground mt-1 block">
-                    {ofdMetrics.thirdAttemptOFD?.percent || 0}%{" "}
-                    <span className="text-xs font-normal text-muted-foreground">({formatNumber(ofdMetrics.thirdAttemptOFD?.count || 0)})</span>
+                    {formatNumber(ofdMetrics.thirdAttemptOFD?.count || 0)}{" "}
+                    <span className="text-xs font-normal text-muted-foreground">({ofdMetrics.thirdAttemptOFD?.percent || 0}%)</span>
                   </strong>
-                  <small className="text-[10px] text-muted-foreground">Third OFD day</small>
+                  <small className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold block mt-0.5">
+                    {ofdMetrics.thirdAttemptOFD?.deliveredPercent ?? ofdMetrics.thirdAttemptOFD?.percent ?? 0}% delivered ({formatNumber(ofdMetrics.thirdAttemptOFD?.deliveredCount || 0)})
+                  </small>
                 </div>
 
                 <div className="rounded-xl border border-border bg-card p-3.5 shadow-xs">
@@ -1032,7 +1042,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     {ofdMetrics.previousUndelivered?.percent || 0}%{" "}
                     <span className="text-xs font-normal text-muted-foreground">({formatNumber(ofdMetrics.previousUndelivered?.count || 0)})</span>
                   </strong>
-                  <small className="text-[10px] text-muted-foreground">Had prior failed attempt</small>
+                  <small className="text-[10px] text-muted-foreground">Re-attempt cohort</small>
                 </div>
 
                 <div className="rounded-xl border border-border bg-card p-3.5 shadow-xs">
@@ -1051,6 +1061,139 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <span className="text-xs font-normal text-muted-foreground">({formatNumber(ofdMetrics.unresolved?.count || 0)})</span>
                   </strong>
                   <small className="text-[10px] text-muted-foreground">No final delivery scan</small>
+                </div>
+              </div>
+
+              {/* OFD COHORT PROGRESSION & ROLLOVER MATH SECTION */}
+              <div className="rounded-xl border border-primary/20 bg-linear-to-r from-primary/5 via-card to-emerald-500/5 p-4 sm:p-5 shadow-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3 mb-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="size-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center font-bold text-sm">
+                      ∑
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-foreground">Delivery Cohort Math & Progression Flow</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Verified breakdown: Fresh packages + Rollover re-attempts from previous days
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                      <ShieldCheck size={13} />
+                      Daily Audit Snapshot Preserved
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                  {/* STEP 1: FRESH 1ST ATTEMPT */}
+                  <div className="rounded-xl border border-sky-500/25 bg-card/80 p-4 shadow-2xs space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400 flex items-center gap-1.5">
+                        <span className="size-2 rounded-full bg-sky-500" />
+                        1st Attempt Cohort
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                        Fresh Orders (Y)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-2xl font-black text-foreground">
+                        {formatNumber(ofdMetrics.firstAttemptOFD?.count || 0)}
+                      </span>
+                      <span className="text-xs text-muted-foreground ml-1.5">went out today</span>
+                    </div>
+                    <div className="space-y-1.5 pt-1 text-xs border-t border-border/50">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Delivered:</span>
+                        <strong className="text-emerald-600 dark:text-emerald-400">
+                          {formatNumber(ofdMetrics.firstAttemptOFD?.deliveredCount || 0)} ({ofdMetrics.firstAttemptOFD?.deliveredPercent || 0}%)
+                        </strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Undelivered / Still out:</span>
+                        <strong className="text-amber-600 dark:text-amber-400">
+                          {formatNumber((ofdMetrics.firstAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.firstAttemptOFD?.stillOutCount || 0))}
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-sky-500/5 border border-sky-500/15 p-2 text-[11px] text-muted-foreground">
+                      ➜ <strong className="text-foreground">{formatNumber((ofdMetrics.firstAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.firstAttemptOFD?.stillOutCount || 0))} orders</strong> roll over to become tomorrow’s <strong>2nd Attempt</strong> candidates.
+                    </div>
+                  </div>
+
+                  {/* STEP 2: 2ND ATTEMPT ROLLOVER */}
+                  <div className="rounded-xl border border-amber-500/25 bg-card/80 p-4 shadow-2xs space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+                        <span className="size-2 rounded-full bg-amber-500" />
+                        2nd Attempt Cohort
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                        Prior Failed (40% X)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-2xl font-black text-foreground">
+                        {formatNumber(ofdMetrics.secondAttemptOFD?.count || 0)}
+                      </span>
+                      <span className="text-xs text-muted-foreground ml-1.5">re-attempted today</span>
+                    </div>
+                    <div className="space-y-1.5 pt-1 text-xs border-t border-border/50">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Delivered on 2nd:</span>
+                        <strong className="text-emerald-600 dark:text-emerald-400">
+                          {formatNumber(ofdMetrics.secondAttemptOFD?.deliveredCount || 0)} ({ofdMetrics.secondAttemptOFD?.deliveredPercent || 0}%)
+                        </strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Undelivered / Still out:</span>
+                        <strong className="text-orange-600 dark:text-orange-400">
+                          {formatNumber((ofdMetrics.secondAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.secondAttemptOFD?.stillOutCount || 0))}
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-amber-500/5 border border-amber-500/15 p-2 text-[11px] text-muted-foreground">
+                      ➜ <strong className="text-foreground">{formatNumber((ofdMetrics.secondAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.secondAttemptOFD?.stillOutCount || 0))} orders</strong> roll over to become tomorrow’s <strong>3rd Attempt</strong> candidates.
+                    </div>
+                  </div>
+
+                  {/* STEP 3: 3RD ATTEMPT & FINAL */}
+                  <div className="rounded-xl border border-orange-500/25 bg-card/80 p-4 shadow-2xs space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase tracking-wider text-orange-600 dark:text-orange-400 flex items-center gap-1.5">
+                        <span className="size-2 rounded-full bg-orange-500" />
+                        3rd Attempt Cohort
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400">
+                        Final Re-attempts
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-2xl font-black text-foreground">
+                        {formatNumber(ofdMetrics.thirdAttemptOFD?.count || 0)}
+                      </span>
+                      <span className="text-xs text-muted-foreground ml-1.5">re-attempted today</span>
+                    </div>
+                    <div className="space-y-1.5 pt-1 text-xs border-t border-border/50">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Delivered on 3rd:</span>
+                        <strong className="text-emerald-600 dark:text-emerald-400">
+                          {formatNumber(ofdMetrics.thirdAttemptOFD?.deliveredCount || 0)} ({ofdMetrics.thirdAttemptOFD?.deliveredPercent || 0}%)
+                        </strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Moved to RTO:</span>
+                        <strong className="text-rose-600 dark:text-rose-400">
+                          {formatNumber(ofdMetrics.rto?.count || 0)}
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-orange-500/5 border border-orange-500/15 p-2 text-[11px] text-muted-foreground">
+                      ➜ Final outcomes recorded: delivered orders closed, persistent failures routed to RTO.
+                    </div>
+                  </div>
                 </div>
               </div>
 

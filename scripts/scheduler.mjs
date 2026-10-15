@@ -35,9 +35,17 @@ export async function invokeJob(base,secret,path,fetcher=fetch){
 
 export function startScheduler(base,secret){
  const authSecret = secret || process.env.CRON_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'satmi-internal-cron-key';
+ const nextOneAm = () => {
+  const d = new Date();
+  d.setHours(1, 0, 0, 0);
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+  return d.getTime();
+ };
+
  const jobs=[
    {path:'/api/cron/fast-sync',every:15*60*1000,next:0},
-   {path:'/api/cron/sync',every:43200000,next:Date.now()+5*60*1000}
+   {path:'/api/cron/sync',every:43200000,next:Date.now()+5*60*1000},
+   {path:'/api/cron/nightly-reconcile',every:24*60*60*1000,next:nextOneAm()}
  ].map(j=>({...j,running:false}));
  const tick=()=>{for(const job of jobs){if(job.running||Date.now()<job.next)continue;job.running=true;job.next=Date.now()+job.every;
  invokeJob(base,authSecret,job.path).then(result=>{

@@ -1,7 +1,7 @@
 import { completePhone } from "../../../lib/contact";
 import { shopifyOrderContacts } from "../../../lib/shopify";
 import { errorResponse } from "../../../lib/http";
-import { ACTIONABLE_STATUS_SQL, extractOrderTags, isOrderHighRisk, routeConfirmationOrders } from "../../../lib/confirmation";
+import { ACTIONABLE_STATUS_SQL, extractOrderTags, HIGH_RISK_SQL, isOrderHighRisk, reconcileHighRiskConfirmationOrders, routeConfirmationOrders } from "../../../lib/confirmation";
 import { ensureConfirmationSchema, getRuntimeEnv } from "../../../lib/database";
 import { isAdmin, isSameOrigin, requireApiUser } from "../../../lib/auth/access";
 import { cachedValue, invalidateCache } from "../../../lib/server-cache";
@@ -82,6 +82,22 @@ async function handleGET(request: Request) {
   const monthFilter = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? String(url.searchParams.get("month")) : "";
   const dateBasis = url.searchParams.get("dateBasis") === "allotted" ? "allotted" : "order";
 
+  const lastSyncRow = await runtime.DB.prepare(
+    "SELECT value FROM sync_state WHERE key = 'last_sync_at'"
+  ).first<{ value: string }>().catch(() => null);
+  const lastSyncTime = Date.parse(lastSyncRow?.value || "");
+  const forceSync = url.searchParams.get("sync") === "true";
+  if (forceSync) {
+    const { syncRecentOrders } = await import("../../../lib/shiprocket");
+    await syncRecentOrders(runtime).catch(() => {});
+    await reconcileHighRiskConfirmationOrders(runtime.DB).catch(() => {});
+  } else if (!lastSyncTime || Date.now() - lastSyncTime > 90000) {
+    import("../../../lib/shiprocket").then(async ({ syncRecentOrders }) => {
+      await syncRecentOrders(runtime).catch(() => {});
+      await reconcileHighRiskConfirmationOrders(runtime.DB).catch(() => {});
+    }).catch(() => {});
+  }
+
   if (section === "delay_logs") {
     const orderId = Number(url.searchParams.get("orderId"));
     if (!orderId) return Response.json({ logs: [] });
@@ -126,9 +142,9 @@ async function handleGET(request: Request) {
   const fulfillment = url.searchParams.get("fulfillment") || "all";
 
   const dateCol = dateBasis === "allotted"
-    ? "COALESCE(NULLIF(ca.created_at, ''), NULLIF(o.order_date, ''), o.created_at)"
-    : "COALESCE(NULLIF(o.order_date, ''), o.created_at)";
-  const dateColumn = `SUBSTR(${dateCol}, 1, 10)`;
+    ? "(CASE WHEN ca.created_at IS NOT NULL AND ca.created_at != '' THEN TO_CHAR(ca.created_at::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(COALESCE(NULLIF(o.order_date, ''), o.created_at), 1, 10) END)"
+    : "SUBSTR(COALESCE(NULLIF(o.order_date, ''), o.created_at), 1, 10)";
+  const dateColumn = dateCol;
 
   if (dateFrom) { filters.push(`${dateColumn} >= ?`); filterValues.push(dateFrom); }
   if (dateTo) { filters.push(`${dateColumn} <= ?`); filterValues.push(dateTo); }
@@ -144,7 +160,7 @@ async function handleGET(request: Request) {
   }
   const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
   const joins = "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id";
-  const queueCondition = `LOWER(o.payment_method) != 'prepaid' AND (o.confirmation_status IN ('pending','callback','unreachable') OR (o.is_high_risk = TRUE AND o.confirmation_status NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
+  const queueCondition = `LOWER(COALESCE(o.payment_method, '')) != 'prepaid' AND (COALESCE(o.confirmation_status, '') IN ('pending','callback','unreachable') OR ((o.is_high_risk = TRUE OR ${HIGH_RISK_SQL}) AND COALESCE(o.confirmation_status, '') NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
 
   const listQuery = mode === "confirmed"
     ? runtime.DB.prepare(`SELECT ${orderColumns}
@@ -297,6 +313,13 @@ async function handlePOST(request: Request) {
   const action = String(body.action || "");
   const now = new Date().toISOString();
   try {
+    if (action === "sync_shiprocket") {
+      const { syncRecentOrders } = await import("../../../lib/shiprocket");
+      const syncResult = await syncRecentOrders(runtime);
+      await reconcileHighRiskConfirmationOrders(runtime.DB).catch(() => null);
+      invalidateCache("confirmation-summary-counts");
+      return Response.json({ ok: true, syncResult });
+    }
     if (action === "log_delay_reason") {
       if (!isAdmin(access.user) && access.user.role !== "operations" && access.user.role !== "support_manager") {
         return Response.json({ error: "Administrator access required" }, { status: 403 });

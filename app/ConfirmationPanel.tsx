@@ -454,6 +454,16 @@ function getOrderDateStr(order: ConfirmationOrder, basis: DateBasis): string {
   let rawDate = "";
   if (basis === "allotted") {
     rawDate = order.assignedAt || order.orderDate || order.confirmationUpdatedAt || order.confirmedAt || order.rejectedAt || "";
+    if (rawDate && (rawDate.endsWith("Z") || rawDate.includes("+00"))) {
+      try {
+        const d = new Date(rawDate);
+        if (!Number.isNaN(d.getTime())) {
+          return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+        }
+      } catch {
+        // fallback
+      }
+    }
   } else {
     rawDate = order.orderDate || order.confirmedAt || order.rejectedAt || order.assignedAt || "";
   }
@@ -1388,6 +1398,27 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
     finally { setBusy(false); }
   }
 
+  const [syncingShiprocket, setSyncingShiprocket] = useState(false);
+
+  async function syncShiprocket() {
+    if (preview || busy || syncingShiprocket) return;
+    setSyncingShiprocket(true);
+    setError("");
+    try {
+      await fetch("/api/confirmation", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
+        body: JSON.stringify({ action: "sync_shiprocket" }),
+      });
+      confirmationDataCache.clear();
+      await load(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Shiprocket sync failed");
+    } finally {
+      setSyncingShiprocket(false);
+    }
+  }
+
   async function revealPhone(order: ConfirmationOrder) {
     if (preview || busy) return;
     setBusy(true); setError("");
@@ -1794,6 +1825,9 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
 
       {section === "confirmation" && (
         <div className="confirmation-contact-toolbar">
+          <button disabled={busy || syncingShiprocket || preview} onClick={() => void syncShiprocket()}>
+            {syncingShiprocket ? "Syncing Shiprocket…" : "Sync Shiprocket Orders"}
+          </button>
           <button disabled={busy || preview} onClick={() => void refreshContacts()}>
             {busy ? "Working…" : "Refresh Shopify phones & tags"}
           </button>

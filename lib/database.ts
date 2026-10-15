@@ -51,6 +51,7 @@ const resultKeyAliases: Record<string, string> = {
   ndrraisedat: "ndrRaisedAt",
   previousundelivered: "previousUndelivered",
   attemptnumber: "attemptNumber",
+  attemptcount: "attemptCount",
   latestknownstatus: "latestKnownStatus",
   eventat: "eventAt",
   confirmationstatus: "confirmationStatus",

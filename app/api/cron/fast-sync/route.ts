@@ -28,6 +28,10 @@ async function handle(request: Request) {
     const result = await syncRecentOrders(runtime);
     const { syncTodayOfdAudit } = await import("../../../../lib/ofd-audit");
     await syncTodayOfdAudit(runtime.DB).catch(() => null);
+    // End-of-day pipeline: save webhook data (from 23:50 IST), then verify against Shiprocket and seal
+    // each passed day. A no-op unless a day is waiting to be closed.
+    const { runDayCloseCycle } = await import("../../../../lib/ofd-day-close");
+    await runDayCloseCycle(runtime).catch((error) => console.error("[cron] OFD day close failed:", error));
     invalidateCache();
     return Response.json({ ok: true, ...result, hasMore: Boolean(result.pending) });
   } catch (error) {

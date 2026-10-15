@@ -87,6 +87,50 @@ const DEFAULT_ORDER_TAGS = [
     filters.push("(copied_at IS NULL OR copied_at = '')");
   }
 
+  // Multi-product filter support (supports multiple ?product=A&product=B, || delimited, or single)
+  const rawProductParams = url.searchParams.getAll("product");
+  const products: string[] = [];
+  for (const raw of rawProductParams) {
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          products.push(...parsed.map((p) => String(p).trim()).filter(Boolean));
+          continue;
+        }
+      } catch {
+        // Fallback to plain text
+      }
+    }
+    if (raw.includes("||")) {
+      products.push(...raw.split("||").map((p) => p.trim()).filter(Boolean));
+    } else {
+      const trimmed = raw.trim();
+      if (trimmed) products.push(trimmed);
+    }
+  }
+
+  const productMode = url.searchParams.get("product_mode")?.trim().toLowerCase() || "exclude";
+  const isExclude =
+    productMode === "exclude" ||
+    productMode === "out_of_stock" ||
+    url.searchParams.get("exclude_product") === "true" ||
+    url.searchParams.get("exclude_product") === "1";
+
+  if (products.length > 0) {
+    if (isExclude) {
+      // Exclude orders containing ANY of the selected products
+      const excludeClauses = products.map(() => "LOWER(products_json) NOT LIKE LOWER(?)");
+      filters.push(`(products_json IS NULL OR (${excludeClauses.join(" AND ")}))`);
+      products.forEach((p) => filterValues.push(`%${p}%`));
+    } else {
+      // Include orders containing ANY of the selected products
+      const includeClauses = products.map(() => "LOWER(products_json) LIKE LOWER(?)");
+      filters.push(`(${includeClauses.join(" OR ")})`);
+      products.forEach((p) => filterValues.push(`%${p}%`));
+    }
+  }
+
   const windowDaysRow = await runtime.DB.prepare(
     "SELECT value FROM sync_state WHERE key = 'unshipped_orders_window_days'"
   ).first<{ value: string }>();
@@ -169,13 +213,20 @@ const DEFAULT_ORDER_TAGS = [
         GROUP BY status, is_high_risk, confirmation_status, "isPrepaid", "isHistoric"
       `).bind(cutoffDate, ...globalFilterValues).all<{status:string;isHigh:boolean;confirmationStatus:string;isPrepaid:boolean;isHistoric:boolean;total:number}>();
 
-  const optionsPromise = cachedValue("order-options", 86400000, async () => {
-    const [couriers,pickups] = await Promise.all([
+  const optionsPromise = cachedValue("order-options-v3", 900000, async () => {
+    const [couriers, pickups, liveProducts] = await Promise.all([
       runtime.DB.prepare("SELECT DISTINCT courier FROM orders WHERE courier<>'' ORDER BY courier").all<{courier:string}>(),
       runtime.DB.prepare("SELECT DISTINCT pickup_location AS pickup FROM orders WHERE pickup_location<>'' ORDER BY pickup_location").all<{pickup:string}>(),
+      import("../../../lib/shopify-products-db").then(m => m.getLiveShopifyProductsFromDb(runtime.DB)),
     ]);
-    return {couriers:couriers.results.map(r=>r.courier),pickups:pickups.results.map(r=>r.pickup),tags:DEFAULT_ORDER_TAGS};
-  }, { couriers: [], pickups: [], tags: DEFAULT_ORDER_TAGS });
+
+    return {
+      couriers: couriers.results.map(r=>r.courier),
+      pickups: pickups.results.map(r=>r.pickup),
+      tags: DEFAULT_ORDER_TAGS,
+      products: liveProducts,
+    };
+  }, { couriers: [], pickups: [], tags: DEFAULT_ORDER_TAGS, products: [] as string[] });
   const statePromise = runtime.DB.prepare(`SELECT key,value FROM sync_state WHERE key IN ('sync_status','last_sync_at','last_sync_count','last_sync_error')`).all<{key:string;value:string}>();
   const [rows,grouped,filterOptions,stateRows] = await Promise.all([rowsPromise,groupedPromise,optionsPromise,statePromise]);
   const counts = {new:0,ready:0,shipped:0,out_for_delivery:0,undelivered:0,delivered:0,rto:0,all:0};

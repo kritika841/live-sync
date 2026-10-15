@@ -93,3 +93,20 @@ export const syncReports = sqliteTable("sync_reports", {
 }, (table) => [
   index("idx_sync_reports_created_at").on(table.createdAt),
 ]);
+
+export const shopifyLiveProducts = sqliteTable("shopify_live_products", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  vendor: text("vendor").notNull().default(""),
+  status: text("status").notNull().default("ACTIVE"),
+  isLive: integer("is_live", { mode: "boolean" }).notNull().default(true),
+  variantsCount: integer("variants_count").notNull().default(1),
+  totalInventory: integer("total_inventory").notNull().default(0),
+  skus: text("skus").notNull().default(""),
+  rawJson: text("raw_json").notNull().default("{}"),
+  syncedAt: text("synced_at").notNull(),
+}, (table) => [
+  index("idx_shopify_live_products_live_title").on(table.isLive, table.title),
+  index("idx_shopify_live_products_title").on(table.title),
+]);
+

@@ -30,6 +30,7 @@ export interface OfdOrderRecord {
   shippingCost: number;
   recordedOfdDays: number;
   attemptNumber: number;
+  attemptCount?: number;
   previousUndelivered: boolean;
   latestKnownStatus?: string;
   [key: string]: unknown;
@@ -39,6 +40,13 @@ export async function loadOfdRecords(
   db: PostgresDatabase,
   selectedDate: string
 ): Promise<{ results: OfdOrderRecord[] }> {
+  const todayStr = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
   const res = await db
     .prepare(
       `
@@ -69,12 +77,13 @@ export async function loadOfdRecords(
           orders.customer_phone, orders.customer_city, orders.customer_state, orders.status,
           orders.payment_method, orders.total, orders.awb, orders.courier,
           orders.shipped_at, orders.first_out_for_delivery_at, orders.out_for_delivery_at, orders.delivered_at,
-          orders.ndr_reason, orders.ndr_attempts, orders.ndr_raised_at, orders.shipping_cost,
+          orders.ndr_reason, orders.ndr_attempts, orders.ndr_raised_at, orders.shipping_cost, orders.attempt_count,
           COALESCE(
-            selected_event.ofd_at,
+            CASE WHEN ? >= ? THEN selected_event.ofd_at END,
             CASE WHEN ${latestOfdDateSql} = ? THEN out_for_delivery_at END,
             CASE WHEN ${firstOfdDateSql} = ? THEN first_out_for_delivery_at END,
-            CASE WHEN ${deliveredDateSql} = ? THEN COALESCE(NULLIF(out_for_delivery_at, ''), first_out_for_delivery_at) END
+            CASE WHEN ${deliveredDateSql} = ? THEN COALESCE(NULLIF(out_for_delivery_at, ''), first_out_for_delivery_at) END,
+            selected_event.ofd_at
           ) AS selected_ofd_at,
           GREATEST(
             COALESCE((SELECT COUNT(DISTINCT previous.ofd_date) FROM deduped_ofd_days previous WHERE previous.order_id = orders.id AND previous.ofd_date <= ?), 0),
@@ -85,10 +94,11 @@ export async function loadOfdRecords(
         FROM orders
         LEFT JOIN deduped_ofd_days selected_event
           ON selected_event.order_id = orders.id AND selected_event.ofd_date = ?
-        WHERE selected_event.ofd_at IS NOT NULL
-           OR ${latestOfdDateSql} = ?
-           OR ${firstOfdDateSql} = ?
-           OR (${deliveredDateSql} = ? AND (first_out_for_delivery_at != '' OR out_for_delivery_at != ''))
+        WHERE (
+          ${latestOfdDateSql} = ?
+          OR (COALESCE(out_for_delivery_at, '') = '' AND ${firstOfdDateSql} = ?)
+          OR (? >= ? AND selected_event.ofd_at IS NOT NULL)
+        )
       )
       SELECT id, channel_order_id AS channelOrderId, customer_name AS customerName,
         customer_phone AS customerPhone,
@@ -97,7 +107,7 @@ export async function loadOfdRecords(
         shipped_at AS shippedAt, first_out_for_delivery_at AS firstOutForDeliveryAt,
         selected_ofd_at AS outForDeliveryAt, delivered_at AS deliveredAt,
         ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
-        shipping_cost AS shippingCost, recorded_ofd_days AS recordedOfdDays,
+        shipping_cost AS shippingCost, attempt_count AS "attemptCount", attempt_count AS attempt_count, attempt_count, recorded_ofd_days AS recordedOfdDays,
         previous_undelivered AS previousUndelivered,
         (SELECT outcome.status FROM matching_events outcome
           WHERE outcome.order_id = selected_orders.id
@@ -111,6 +121,7 @@ export async function loadOfdRecords(
     )
     .bind(
       selectedDate,
+      todayStr,
       selectedDate,
       selectedDate,
       selectedDate,
@@ -120,11 +131,41 @@ export async function loadOfdRecords(
       selectedDate,
       selectedDate,
       selectedDate,
+      selectedDate,
+      todayStr,
       selectedDate
     )
     .all<Record<string, unknown>>();
 
+  const orderIds = (res.results || []).map((r) => r.id).filter(Boolean);
+  const ledgerMap = new Map<string, { count: number; wasUndelivered: boolean }>();
+  if (orderIds.length > 0) {
+    const CHUNK = 500;
+    for (let i = 0; i < orderIds.length; i += CHUNK) {
+      const slice = orderIds.slice(i, i + CHUNK);
+      const ledgerRows = await db
+        .prepare(
+          `SELECT order_id, COUNT(DISTINCT ofd_date) as cnt,
+                  BOOL_OR(final_status IN ('UNDELIVERED', 'UNRESOLVED AFTER OFD')) as was_undel
+           FROM ofd_ledger
+           WHERE order_id IN (${slice.map(() => "?").join(",")}) AND ofd_date < ?
+           GROUP BY order_id`
+        )
+        .bind(...slice, selectedDate)
+        .all<{ order_id: string | number; cnt: number; was_undel: boolean }>()
+        .catch(() => ({ results: [] }));
+      for (const r of ledgerRows.results || []) {
+        ledgerMap.set(String(r.order_id), { count: Number(r.cnt || 0), wasUndelivered: Boolean(r.was_undel) });
+      }
+    }
+  }
+
   const mapped: OfdOrderRecord[] = (res.results || []).map((row) => {
+    const ledgerInfo = ledgerMap.get(String(row.id));
+    const priorLedgerCount = ledgerInfo?.count || 0;
+    const priorRecordedOfdDays = Math.max(Number(row.recordedOfdDays || 0), priorLedgerCount);
+    const wasPriorUndelivered = Boolean(row.previousUndelivered || ledgerInfo?.wasUndelivered);
+
     const attemptNumber = deriveOrderAttemptNumber(
       {
         id: String(row.id),
@@ -133,10 +174,11 @@ export async function loadOfdRecords(
         outForDeliveryAt: String(row.outForDeliveryAt || ""),
         deliveredAt: String(row.deliveredAt || ""),
         ndrAttempts: Number(row.ndrAttempts || 0),
-        attemptNumber: Number(row.recordedOfdDays || 0),
+        attemptNumber: priorRecordedOfdDays,
+        attemptCount: Number(row.attemptCount ?? row.attempt_count ?? row.attemptcount ?? 0),
       },
       selectedDate,
-      Number(row.recordedOfdDays || 0)
+      priorRecordedOfdDays
     );
 
     return {
@@ -159,9 +201,10 @@ export async function loadOfdRecords(
       ndrAttempts: Number(row.ndrAttempts || 0),
       ndrRaisedAt: String(row.ndrRaisedAt || ""),
       shippingCost: Number(row.shippingCost || 0),
-      recordedOfdDays: Number(row.recordedOfdDays || 0),
+      recordedOfdDays: priorRecordedOfdDays,
       attemptNumber,
-      previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
+      attemptCount: Number(row.attemptCount ?? row.attempt_count ?? row.attemptcount ?? attemptNumber),
+      previousUndelivered: Boolean(wasPriorUndelivered || attemptNumber > 1),
       latestKnownStatus: row.latestKnownStatus ? String(row.latestKnownStatus) : undefined,
     };
   });

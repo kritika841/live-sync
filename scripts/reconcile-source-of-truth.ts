@@ -3,22 +3,27 @@ import readline from "readline";
 import { getRuntimeEnv } from "../lib/database";
 import { loadOfdRecords } from "../lib/ofd";
 
-function parseCsvLine(text: string): string[] {
+function parseCsvLine(line: string): string[] {
   const result: string[] = [];
-  let cur = "";
+  let current = "";
   let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      inQuotes = !inQuotes;
-    } else if (c === "," && !inQuotes) {
-      result.push(cur);
-      cur = "";
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      result.push(current.trim().replace(/^"|"$/g, ''));
+      current = "";
     } else {
-      cur += c;
+      current += char;
     }
   }
-  result.push(cur);
+  result.push(current.trim().replace(/^"|"$/g, ''));
   return result;
 }
 
@@ -37,35 +42,43 @@ function cleanNum(val: unknown): number {
 function normalizeDate(str: string): string {
   const s = cleanStr(str);
   if (!s) return "";
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return `${s}T10:00:00+05:30`;
+  }
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s)) {
     return s.replace(" ", "T") + (s.includes("+") || s.includes("Z") ? "" : "+05:30");
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    return s.includes("+") || s.includes("Z") ? s : s + "+05:30";
   }
   return s;
 }
 
-function getLatestReportFile(): string {
+function getAllReportFiles(): string[] {
   const dir = "report";
   if (!fs.existsSync(dir)) throw new Error(`Directory ${dir} not found`);
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".csv"));
   if (!files.length) throw new Error("No report file found in report/");
-  files.sort((a, b) => fs.statSync(`${dir}/${b}`).mtimeMs - fs.statSync(`${dir}/${a}`).mtimeMs);
-  return `${dir}/${files[0]}`;
+  // Sort oldest first, so newer reports overwrite older reports
+  files.sort((a, b) => {
+    const idA = a.match(/\d{18,}/)?.[0] || "";
+    const idB = b.match(/\d{18,}/)?.[0] || "";
+    if (idA && idB && idA !== idB) return idA.localeCompare(idB);
+    return fs.statSync(`${dir}/${a}`).mtimeMs - fs.statSync(`${dir}/${b}`).mtimeMs;
+  });
+  return files.map((f) => `${dir}/${f}`);
 }
 
 export async function reconcileSourceOfTruth() {
-  const csvPath = getLatestReportFile();
-  console.log(`=== STARTING RECONCILIATION FROM SOURCE OF TRUTH CSV: ${csvPath} ===`);
+  const csvFiles = getAllReportFiles();
+  console.log(`=== STARTING RECONCILIATION FROM ${csvFiles.length} SOURCE OF TRUTH CSV REPORTS ===`);
 
-  const fileStream = fs.createReadStream(csvPath, { encoding: "utf-8" });
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
-
-  let header: string[] = [];
-  const headerMap = new Map<string, number>();
   const ordersMap = new Map<
     string,
     {
       orderId: string;
       status: string;
+      attemptCount: number;
       orderDate: string;
       shippedAt: string;
       deliveredAt: string;
@@ -84,26 +97,34 @@ export async function reconcileSourceOfTruth() {
     }
   >();
 
-  let lineCount = 0;
-  for await (const line of rl) {
-    lineCount++;
-    if (lineCount === 1) {
-      header = parseCsvLine(line).map((h) => h.trim());
-      header.forEach((h, i) => headerMap.set(h, i));
-      continue;
-    }
-    if (!line.trim()) continue;
-    const cols = parseCsvLine(line);
-    const channel = cleanStr(cols[headerMap.get("Channel")!]);
-    if (channel !== "Shopify_5") continue;
+  for (const csvPath of csvFiles) {
+    console.log(`Reading report: ${csvPath}...`);
+    const fileStream = fs.createReadStream(csvPath, { encoding: "utf-8" });
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
-    const oid = cleanStr(cols[headerMap.get("Order ID")!]);
-    if (!oid) continue;
+    let header: string[] = [];
+    const headerMap = new Map<string, number>();
 
-    if (!ordersMap.has(oid)) {
+    let lineCount = 0;
+    for await (const line of rl) {
+      lineCount++;
+      if (lineCount === 1) {
+        header = parseCsvLine(line).map((h) => h.trim());
+        header.forEach((h, i) => headerMap.set(h, i));
+        continue;
+      }
+      if (!line.trim()) continue;
+      const cols = parseCsvLine(line);
+      const channel = cleanStr(cols[headerMap.get("Channel")!]);
+      if (channel !== "Shopify_5") continue;
+
+      const oid = cleanStr(cols[headerMap.get("Order ID")!]);
+      if (!oid) continue;
+
       ordersMap.set(oid, {
         orderId: oid,
         status: cleanStr(cols[headerMap.get("Status")!]),
+        attemptCount: Math.max(1, Math.round(cleanNum(cols[headerMap.get("Attempt Count")!])) || 1),
         orderDate: normalizeDate(cols[headerMap.get("Channel Created At")!] || cols[headerMap.get("Shiprocket Created At")!]),
         shippedAt: normalizeDate(cols[headerMap.get("Order Shipped Date")!]),
         deliveredAt: normalizeDate(cols[headerMap.get("Order Delivered Date")!]),
@@ -121,9 +142,10 @@ export async function reconcileSourceOfTruth() {
         paymentMethod: cleanStr(cols[headerMap.get("Payment Method")!]).toLowerCase(),
       });
     }
+    console.log(`Loaded ${ordersMap.size} unique orders so far.`);
   }
 
-  console.log(`Parsed ${ordersMap.size} unique Shopify_5 orders from CSV. Performing database sync in chunks...`);
+  console.log(`Parsed ${ordersMap.size} total unique Shopify_5 orders across all reports. Performing database sync in chunks...`);
 
   const runtime = getRuntimeEnv();
   const db = runtime.DB;
@@ -145,6 +167,7 @@ export async function reconcileSourceOfTruth() {
     const chunk = ordersList.slice(i, i + chunkSize);
     const ids = chunk.map((o) => o.orderId);
     const statuses = chunk.map((o) => o.status);
+    const attemptCounts = chunk.map((o) => o.attemptCount);
     const deliveredAts = chunk.map((o) => o.deliveredAt);
     const shippedAts = chunk.map((o) => o.shippedAt);
     const ofdAts = chunk.map((o) => o.outForDeliveryAt);
@@ -164,10 +187,23 @@ export async function reconcileSourceOfTruth() {
       UPDATE orders
       SET
         status = u.st,
-        delivered_at = CASE WHEN u.del != '' THEN u.del ELSE orders.delivered_at END,
+        attempt_count = u.att_cnt,
+        delivered_at = CASE 
+          WHEN orders.delivered_at IS NOT NULL AND orders.delivered_at != '' AND SUBSTR(orders.delivered_at, 1, 10) = SUBSTR(u.del, 1, 10) THEN orders.delivered_at
+          WHEN u.del != '' THEN u.del 
+          ELSE orders.delivered_at 
+        END,
         shipped_at = CASE WHEN u.shp != '' THEN u.shp ELSE orders.shipped_at END,
-        out_for_delivery_at = CASE WHEN u.ofd != '' THEN u.ofd ELSE orders.out_for_delivery_at END,
-        first_out_for_delivery_at = CASE WHEN u.fofd != '' THEN u.fofd ELSE orders.first_out_for_delivery_at END,
+        out_for_delivery_at = CASE 
+          WHEN orders.out_for_delivery_at IS NOT NULL AND orders.out_for_delivery_at != '' AND SUBSTR(orders.out_for_delivery_at, 1, 10) = SUBSTR(u.ofd, 1, 10) THEN orders.out_for_delivery_at
+          WHEN u.ofd != '' THEN u.ofd 
+          ELSE orders.out_for_delivery_at 
+        END,
+        first_out_for_delivery_at = CASE 
+          WHEN orders.first_out_for_delivery_at IS NOT NULL AND orders.first_out_for_delivery_at != '' THEN orders.first_out_for_delivery_at
+          WHEN u.fofd != '' THEN u.fofd 
+          ELSE orders.first_out_for_delivery_at 
+        END,
         ndr_attempts = u.att,
         ndr_reason = CASE WHEN u.rsn != '' THEN u.rsn ELSE orders.ndr_reason END,
         ndr_raised_at = CASE WHEN u.ndrd != '' THEN u.ndrd ELSE orders.ndr_raised_at END,
@@ -181,14 +217,14 @@ export async function reconcileSourceOfTruth() {
         synced_at = NOW()
       FROM (
         SELECT * FROM UNNEST(
-          ?::text[], ?::text[], ?::text[], ?::text[], ?::text[], ?::text[],
+          ?::text[], ?::text[], ?::int[], ?::text[], ?::text[], ?::text[], ?::text[],
           ?::int[], ?::text[], ?::text[], ?::text[], ?::text[], ?::real[],
           ?::real[], ?::text[], ?::text[], ?::text[]
-        ) AS t(id, st, del, shp, ofd, fofd, att, rsn, ndrd, awb_val, cr, tot, sc, ct, stt, pm)
+        ) AS t(id, st, att_cnt, del, shp, ofd, fofd, att, rsn, ndrd, awb_val, cr, tot, sc, ct, stt, pm)
       ) u
       WHERE orders.channel_order_id = u.id
     `).bind(
-      ids, statuses, deliveredAts, shippedAts, ofdAts, firstOfdAts,
+      ids, statuses, attemptCounts, deliveredAts, shippedAts, ofdAts, firstOfdAts,
       ndrAttempts, ndrReasons, ndrDates, awbs, couriers, totals,
       shippingCosts, cities, states, paymentMethods
     ).run();
@@ -199,8 +235,8 @@ export async function reconcileSourceOfTruth() {
 
   console.log("=== ORDERS UPDATED SUCCESSFULLY. NOW PRECOMPUTING CACHE IN DATABASE ===");
 
-  // Clear non-immutable analytics_cache entries while preserving immutable prehistoric records
-  await db.prepare("DELETE FROM analytics_cache WHERE is_immutable = FALSE").run().catch(() => null);
+  // Clear analytics_cache entries
+  await db.prepare("DELETE FROM analytics_cache WHERE cache_key LIKE 'today_ofd_%' OR cache_key LIKE 'overview_%'").run().catch(() => null);
 
   // Precompute and store Today's OFD in database cache
   const todayStr = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());

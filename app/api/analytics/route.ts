@@ -16,11 +16,16 @@ import {
   lowRiskSql,
 } from "../../../lib/analytics-status";
 import { cachedValue, invalidateCache } from "../../../lib/server-cache";
+import { readClosedDay } from "../../../lib/ofd-ledger";
+import { calculateCohortMetrics, normalizeOfdStatus } from "../../../lib/ofd-attempt";
 
 export const dynamic = "force-dynamic";
 
 const isoDate = /^\d{4}-\d{2}-\d{2}$/;
-const indiaDateSql = (column: string) => `SUBSTR(${column}, 1, 10)`;
+// Convert timestamps to the Asia/Kolkata calendar day. A plain SUBSTR on a UTC timestamp
+// puts anything after 18:30 UTC (i.e. past midnight IST) on the wrong day.
+const indiaDateSql = (column: string) =>
+  `(CASE WHEN ${column} ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN TO_CHAR(${column}::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') ELSE SUBSTR(${column}, 1, 10) END)`;
 const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), created_at)");
 
 const orderAttemptNumberSql = `(
@@ -29,10 +34,27 @@ const orderAttemptNumberSql = `(
     WHEN ndr_attempts = 3 THEN 3
     WHEN ndr_attempts = 2 THEN 2
     WHEN ndr_attempts = 1 THEN 1
-    WHEN first_out_for_delivery_at != '' AND out_for_delivery_at != '' AND SUBSTR(first_out_for_delivery_at, 1, 10) != SUBSTR(out_for_delivery_at, 1, 10) THEN 2
+    WHEN first_out_for_delivery_at != '' AND out_for_delivery_at != '' AND ${indiaDateSql("first_out_for_delivery_at")} != ${indiaDateSql("out_for_delivery_at")} THEN 2
     ELSE 1
   END
 )`;
+
+/**
+ * Today's OFD summary for the overview card. Uses the exact same loader and status
+ * classification as the Today's OFD tab so the two can never disagree.
+ */
+async function computeTodayOfdSummary(db: Parameters<typeof loadOfdRecords>[0], date: string) {
+  const rows = await loadOfdRecords(db, date);
+  const orders = rows.results.map((row) => ({ ...row, status: normalizeOfdStatus(row, date, date) }));
+  const cohort = calculateCohortMetrics(orders, date, date);
+  return {
+    today_total: orders.length,
+    today_still_out: cohort.total.stillOut,
+    today_delivered: cohort.total.delivered,
+    today_undelivered: cohort.total.undelivered,
+    today_rto: cohort.total.rto,
+  };
+}
 
 
 const DEFAULT_COURIERS = [
@@ -108,34 +130,6 @@ function statusBucket(statusValue: unknown) {
   return "other" as const;
 }
 
-function isOpenDeliveryStatus(statusValue: unknown) {
-  const status = String(statusValue || "").trim().toUpperCase();
-  return [
-    "SHIPPED",
-    "IN TRANSIT",
-    "IN TRANSIT-EN-ROUTE",
-    "IN TRANSIT-AT DESTINATION HUB",
-    "REACHED AT DESTINATION HUB",
-    "REACHED DESTINATION HUB",
-    "PICKED UP",
-    "MISROUTED",
-    "UNTRACEABLE",
-    "OUT FOR DELIVERY",
-  ].includes(status);
-}
-
-function indiaDateFromValue(value: unknown) {
-  const source = String(value || "");
-  if (!source) return "";
-  const parsed = new Date(source);
-  if (Number.isNaN(parsed.getTime())) return source.slice(0, 10);
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(parsed);
-}
 
 export async function GET(request: Request) {
   try {
@@ -167,12 +161,15 @@ async function handleGET(request: Request) {
     const dbCacheKey = `today_ofd_${selectedDate}`;
     const isPastDate = selectedDate < currentIndiaDate;
     const cacheKey = `analytics-today-ofd-${selectedDate}`;
-    const ttl = forceRefresh ? 0 : (isPastDate ? 86400000 : 60000);
+    // Past days are no longer cached "forever": a late webhook/sync fix must show up.
+    const ttl = forceRefresh ? 0 : (isPastDate ? 300000 : 60000);
     if (forceRefresh) invalidateCache(cacheKey);
 
     const payload = await cachedValue(cacheKey, ttl, async () => {
       await ensureSchema(runtime.DB);
-      if (!forceRefresh) {
+      // Closed (passed) days are final: serve the stored payload regardless of age.
+      // Today is revalidated every 15 minutes (and by the live 60s memory cache above).
+      {
         const cached = await runtime.DB.prepare(
           isPastDate
             ? "SELECT payload FROM analytics_cache WHERE cache_key = ?"
@@ -181,8 +178,9 @@ async function handleGET(request: Request) {
           .bind(dbCacheKey)
           .first<{ payload: string | Record<string, unknown> }>()
           .catch(() => null);
-        if (cached?.payload) {
-          return typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
+        if (cached?.payload && !(forceRefresh && !isPastDate)) {
+          const parsed = typeof cached.payload === "string" ? JSON.parse(cached.payload) : cached.payload;
+          if (!isPastDate || parsed.closed === true) return parsed;
         }
       }
 
@@ -196,55 +194,91 @@ async function handleGET(request: Request) {
         cached: true,
       };
 
-      // Also ensure OFD audit is synchronized for today
-      const { syncTodayOfdAudit } = await import("../../../lib/ofd-audit");
-      await syncTodayOfdAudit(runtime.DB, selectedDate).catch(() => null);
+      // A day that has passed is CLOSED: its rows come from the permanent ledger and are
+      // never re-synced, recomputed or refreshed again.
+      const closedOrders = isPastDate ? await readClosedDay(runtime.DB, selectedDate) : null;
+
+      if (!closedOrders) {
+        // Only open days (today, or a past day not yet frozen) sync the audit table.
+        const { syncTodayOfdAudit } = await import("../../../lib/ofd-audit");
+        await syncTodayOfdAudit(runtime.DB, selectedDate).catch((error) => {
+          console.error(`[analytics] OFD audit sync failed for ${selectedDate}:`, error);
+          return null;
+        });
+      }
 
       const auditRows = await runtime.DB.prepare(
         "SELECT order_id, webhook_count, events_log_json, verified_status, notes FROM today_ofd_audit WHERE ofd_date = ?"
       ).bind(selectedDate).all<{ order_id: string; webhook_count: number; events_log_json: string; verified_status: string; notes: string }>().catch(() => ({ results: [] }));
       const auditByOrder = new Map(auditRows.results.map((r) => [String(r.order_id), r]));
 
-      const rows = await loadOfdRecords(runtime.DB, selectedDate);
-      const orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }> =
-        rows.results.map((row) => {
-          let status = String(row.latestKnownStatus || "");
-          if ((!status || isOpenDeliveryStatus(status)) && indiaDateFromValue(row.deliveredAt) === selectedDate)
-            status = "DELIVERED";
-          if (!status && indiaDateFromValue(row.ndrRaisedAt) === selectedDate) status = "UNDELIVERED";
-          if (!status) status = selectedDate === currentIndiaDate ? String(row.status || "") : "UNRESOLVED AFTER OFD";
-          if (selectedDate < currentIndiaDate && isOpenDeliveryStatus(status)) status = "UNRESOLVED AFTER OFD";
-          const attemptNumber = Math.max(1, Number(row.attemptNumber || 1));
+      const withAudit = (row: Record<string, unknown>) => {
+        const audit = auditByOrder.get(String(row.id));
+        let eventsLog: unknown[] = Array.isArray(row.eventsLog) ? (row.eventsLog as unknown[]) : [];
+        try {
+          if (audit?.events_log_json) eventsLog = JSON.parse(audit.events_log_json);
+        } catch {
+          // keep existing
+        }
+        return {
+          webhookCount: Number(audit?.webhook_count || row.webhookCount || 0),
+          eventsLog,
+          verifiedStatus: audit?.verified_status || String(row.verifiedStatus || "pending"),
+          notes: audit?.notes || String(row.notes || ""),
+        };
+      };
 
-          const audit = auditByOrder.get(String(row.id));
-          let eventsLog = [];
-          try {
-            eventsLog = audit?.events_log_json ? JSON.parse(audit.events_log_json) : [];
-          } catch {
-            eventsLog = [];
-          }
-
+      let orders: Array<Record<string, unknown> & { attemptNumber: number; previousUndelivered: boolean }>;
+      if (closedOrders) {
+        orders = closedOrders.map((row) => ({
+          ...row,
+          previousUndelivered: Boolean(row.previousUndelivered || row.attemptNumber > 1),
+          ...withAudit(row),
+        }));
+      } else {
+        const rows = await loadOfdRecords(runtime.DB, selectedDate);
+        orders = rows.results.map((row) => {
+          const status = normalizeOfdStatus(row, selectedDate, currentIndiaDate);
+          const attemptNumber = Math.max(1, Number(row.attemptNumber || row.attemptCount || 1));
           return {
             ...row,
             status,
             latestKnownStatus: undefined,
             attemptNumber,
+            attemptCount: Math.max(attemptNumber, Number(row.attemptCount || 1)),
             attemptBasis: "recorded_ofd_cohorts",
             previousUndelivered: Boolean(row.previousUndelivered || attemptNumber > 1),
-            webhookCount: Number(audit?.webhook_count || 0),
-            eventsLog,
-            verifiedStatus: audit?.verified_status || "pending",
-            notes: audit?.notes || "",
+            ...withAudit(row),
           };
         });
+      }
+      const dayIsClosed = Boolean(closedOrders);
+      const closeRow = dayIsClosed
+        ? await runtime.DB.prepare(
+            "SELECT state, verified, added, removed, changed, verified_orders, sealed_at FROM ofd_day_closes WHERE ofd_date = ?"
+          )
+            .bind(selectedDate)
+            .first<Record<string, unknown>>()
+            .catch(() => null)
+        : null;
+      const verification = closeRow
+        ? {
+            verified: Boolean(closeRow.verified),
+            added: Number(closeRow.added || 0),
+            removed: Number(closeRow.removed || 0),
+            changed: Number(closeRow.changed || 0),
+            sealedAt: String(closeRow.sealed_at || ""),
+          }
+        : null;
 
-      const { calculateCohortMetrics } = await import("../../../lib/ofd-attempt");
       const cohortMetrics = calculateCohortMetrics(orders, selectedDate, currentIndiaDate);
       const total = orders.length;
       const previousUndelivered = orders.filter((order) => order.previousUndelivered).length;
 
       const resultPayload = {
         date: selectedDate,
+        closed: dayIsClosed,
+        verification,
         metrics: {
           total: metric(total, total),
           delivered: { count: cohortMetrics.total.delivered, percent: cohortMetrics.total.deliveredPercent },
@@ -299,7 +333,7 @@ async function handleGET(request: Request) {
          VALUES (?, ?::jsonb, NOW(), ?)
          ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW(), is_immutable = EXCLUDED.is_immutable`
       )
-        .bind(dbCacheKey, JSON.stringify(resultPayload), isPastDate)
+        .bind(dbCacheKey, JSON.stringify(resultPayload), dayIsClosed)
         .run()
         .catch(() => null);
 
@@ -351,12 +385,11 @@ async function handleGET(request: Request) {
   const forceRefresh = url.searchParams.get("refresh") === "1";
   const dbCacheKey = `overview_${cacheKey}`;
 
-  const currentMonthStart = indiaToday().slice(0, 7) + "-01";
-  const cutoffDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const cutoffDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  // Prehistoric data: any query where requested end date 'to' is before cutoffDate OR in a past month
-  // These values represent closed, historical shipments and will NEVER change.
-  const isImmutable = Boolean(to && (to <= cutoffDate || to < currentMonthStart));
+  // Prehistoric data: any query where requested end date 'to' is older than 35 days.
+  // These values represent closed, historical shipments and will not change.
+  const isImmutable = Boolean(to && to <= cutoffDate);
   const ttl = forceRefresh ? 0 : (isImmutable ? 86400000 : 120000);
   if (forceRefresh) invalidateCache(cacheKey);
 
@@ -568,17 +601,8 @@ async function handleGET(request: Request) {
       // 9. Cached filter options
       getFilterOptions(runtime.DB),
 
-      // 10. Live Today's OFD activity summary
-      runtime.DB.prepare(`
-        SELECT 
-          COUNT(*) AS today_total,
-          SUM(CASE WHEN UPPER(TRIM(status)) = 'OUT FOR DELIVERY' THEN 1 ELSE 0 END) AS today_still_out,
-          SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS today_delivered,
-          SUM(CASE WHEN ${ndrSql} THEN 1 ELSE 0 END) AS today_undelivered,
-          SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS today_rto
-        FROM orders 
-        WHERE (SUBSTR(out_for_delivery_at, 1, 10) = ? OR SUBSTR(first_out_for_delivery_at, 1, 10) = ?)
-      `).bind(indiaToday(), indiaToday()).first<Record<string, unknown>>()
+      // 10. Live Today's OFD activity summary (same loader/classifier as the Today's OFD tab)
+      computeTodayOfdSummary(runtime.DB, indiaToday()),
     ]);
 
     const total = Number(summary?.total || 0);

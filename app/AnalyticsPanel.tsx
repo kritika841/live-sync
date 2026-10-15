@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePersistentState } from "./usePersistentState";
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -14,8 +15,8 @@ import {
   CreditCard,
   Download,
   ExternalLink,
-  FileSpreadsheet,
   Layers,
+  Loader2,
   MapPin,
   PackageCheck,
   Percent,
@@ -203,6 +204,8 @@ export interface OfdOrder {
 
 export interface OfdData {
   date: string;
+  closed?: boolean;
+  verification?: { verified: boolean; added: number; removed: number; changed: number; sealedAt: string } | null;
   metrics: Record<string, MetricItem>;
   attemptBasis?: string;
   trackingHistory?: { status: string; error?: string };
@@ -500,6 +503,162 @@ function MetricInfoButton({
   );
 }
 
+function OfdDashboardSkeleton({ date }: { date: string }) {
+  return (
+    <div className="space-y-6 animate-in fade-in duration-300" aria-busy="true" aria-label={`Loading OFD data for ${date}`}>
+      {/* Top Animated Progress & Sync Card */}
+      <div className="rounded-xl border border-primary/25 bg-gradient-to-r from-primary/10 via-card to-primary/5 p-4 shadow-xs">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="relative size-10 rounded-xl bg-primary/15 border border-primary/25 flex items-center justify-center text-primary shrink-0 shadow-xs">
+              <Truck size={20} className="animate-pulse" />
+              <span className="absolute -top-1 -right-1 size-2.5 rounded-full bg-primary animate-ping" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-foreground">
+                  Synchronizing Out For Delivery records
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-primary/15 text-primary border border-primary/20">
+                  {date}
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Aggregating live scans, calculating 1st / 2nd / 3rd attempt cohorts, and resolving delivery outcomes…
+              </p>
+            </div>
+          </div>
+
+          <div className="w-full sm:w-60 flex flex-col gap-1.5 shrink-0">
+            <div className="flex items-center justify-between text-[11px] font-semibold text-muted-foreground">
+              <span className="flex items-center gap-1.5 text-primary">
+                <RefreshCw size={11} className="animate-spin" />
+                <span>Computing cohorts…</span>
+              </span>
+              <span className="font-mono text-xs text-foreground font-bold">Please wait</span>
+            </div>
+            <div className="h-2 w-full bg-muted/80 rounded-full overflow-hidden border border-border/40">
+              <div className="h-full bg-gradient-to-r from-primary via-cyan-500 to-emerald-500 rounded-full animate-pulse w-4/5" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 10 Skeleton KPI Metric Cards Grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" aria-hidden="true">
+        {[
+          { label: "Went out for delivery", sub: "Total orders with OFD scan" },
+          { label: "Delivered", sub: "Successfully delivered" },
+          { label: "Undelivered", sub: "Failed delivery attempts" },
+          { label: "Still out for delivery", sub: "Active with courier agents" },
+          { label: "1st Attempt OFD", sub: "Delivered rate breakdown" },
+          { label: "2nd Attempt OFD", sub: "Delivered rate breakdown" },
+          { label: "3rd Attempt OFD", sub: "Delivered rate breakdown" },
+          { label: "Previously undelivered", sub: "Re-attempt cohort" },
+          { label: "Moved to RTO", sub: "Returned after OFD" },
+          { label: "Unresolved after OFD", sub: "No final delivery scan" },
+        ].map((item, idx) => (
+          <div
+            key={idx}
+            className="rounded-xl border border-border bg-card p-3.5 shadow-xs flex flex-col justify-between min-h-[92px]"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-medium text-muted-foreground">{item.label}</span>
+              <div className="skeleton-bone size-2 rounded-full" />
+            </div>
+            <div className="my-1.5">
+              <div className="skeleton-bone h-6 w-20 rounded-md" />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-muted-foreground/60">{item.sub}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Skeleton OFD Register Table Card */}
+      <div className="rounded-xl border border-border bg-card shadow-xs overflow-hidden" aria-hidden="true">
+        {/* Table Header Bar */}
+        <div className="border-b border-border bg-muted/20 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="skeleton-bone h-4 w-44 rounded-md mb-1.5" />
+            <div className="skeleton-bone h-3 w-64 rounded-xs" />
+          </div>
+          <div className="skeleton-bone h-6 w-24 rounded-md" />
+        </div>
+
+        {/* Filter tabs & Search Bar */}
+        <div className="border-b border-border px-5 py-2.5 bg-muted/10 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-1.5">
+            {["w-16", "w-24", "w-32", "w-24", "w-24", "w-24", "w-24"].map((w, i) => (
+              <div key={i} className={`skeleton-bone h-6 ${w} rounded-md`} />
+            ))}
+          </div>
+          <div className="skeleton-bone h-7 w-52 rounded-lg" />
+        </div>
+
+        {/* Table Grid */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="border-b border-border bg-muted/40 font-semibold text-muted-foreground">
+              <tr>
+                <th className="py-3 px-4">Order</th>
+                <th className="py-3 px-4">Attempt</th>
+                <th className="py-3 px-4">Customer</th>
+                <th className="py-3 px-4">OFD Time</th>
+                <th className="py-3 px-4">Status</th>
+                <th className="py-3 px-4">AWB / Courier</th>
+                <th className="py-3 px-4">Amount</th>
+                <th className="py-3 px-4">Webhooks</th>
+                <th className="py-3 px-4 text-center">Manual Audit</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {Array.from({ length: 8 }).map((_, rowIdx) => (
+                <tr key={rowIdx} className="hover:bg-muted/10">
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-4 w-24 rounded-xs mb-1" />
+                    <div className="skeleton-bone h-2.5 w-16 rounded-xs" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-5 w-20 rounded-full" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-4 w-28 rounded-xs mb-1" />
+                    <div className="skeleton-bone h-2.5 w-20 rounded-xs" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-3.5 w-16 rounded-xs" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-5 w-24 rounded-full" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-3.5 w-24 rounded-xs mb-1" />
+                    <div className="skeleton-bone h-2.5 w-28 rounded-xs" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-4 w-14 rounded-xs" />
+                  </td>
+                  <td className="py-3 px-4">
+                    <div className="skeleton-bone h-4 w-12 rounded-full" />
+                  </td>
+                  <td className="py-3 px-4 text-center">
+                    <div className="skeleton-bone h-6 w-20 rounded-md mx-auto" />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Per-date cache so switching dates / tabs shows data instantly while a silent refresh runs.
+const ofdCache = new Map<string, OfdData>();
+
 export default function AnalyticsPanel({ active, mode = "overview", preview = false }: AnalyticsPanelProps) {
   const [activeMode, setActiveMode] = useState<"overview" | "today_ofd">(mode);
 
@@ -509,47 +668,45 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
   const todayStr = useMemo(() => getTodayString(), []);
   const yesterdayStr = useMemo(() => addDaysToIso(getTodayString(), -1), []);
-  const [datePreset, setDatePreset] = useState<
+  const [datePreset, setDatePreset] = usePersistentState<
     "today" | "yesterday" | "7d" | "14d" | "30d" | "mtd" | "last_month" | "all" | "custom"
-  >("yesterday");
-  const [from, setFrom] = useState(() => yesterdayStr);
-  const [to, setTo] = useState(() => yesterdayStr);
+  >("satmi:analytics:datePreset", "yesterday");
+  const [from, setFrom] = usePersistentState("satmi:analytics:from", yesterdayStr);
+  const [to, setTo] = usePersistentState("satmi:analytics:to", yesterdayStr);
 
-  const [courier, setCourier] = useState("");
-  const [payment, setPayment] = useState("");
-  const [state, setState] = useState("");
+  const [courier, setCourier] = usePersistentState("satmi:analytics:courier", "");
+  const [payment, setPayment] = usePersistentState("satmi:analytics:payment", "");
+  const [state, setState] = usePersistentState("satmi:analytics:state", "");
 
-  const [activeTab, setActiveTab] = useState<"couriers" | "dates" | "states" | "ndr" | "products">(
+  const [activeTab, setActiveTab] = usePersistentState<"couriers" | "dates" | "states" | "ndr" | "products">(
+    "satmi:analytics:tab",
     "couriers"
   );
-  const [subSearch, setSubSearch] = useState("");
+  const [subSearch, setSubSearch] = usePersistentState("satmi:analytics:subSearch", "");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [error, setError] = useState("");
 
   // Today's OFD states
-  const [ofdDate, setOfdDate] = useState(todayStr);
-  const [ofdOutcome, setOfdOutcome] = useState<
+  const urlOfdDate =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("date") ||
+        new URLSearchParams(window.location.search).get("ofd_date")
+      : null;
+  const [ofdDate, setOfdDate] = useState<string>(
+    urlOfdDate && /^\d{4}-\d{2}-\d{2}$/.test(urlOfdDate) ? urlOfdDate : todayStr
+  );
+  const [ofdOutcome, setOfdOutcome] = usePersistentState<
     "all" | "delivered" | "undelivered" | "out" | "unresolved" | "attempt1" | "attempt2" | "attempt3"
-  >("all");
+  >("satmi:analytics:ofdOutcome", "all");
   const [ofdData, setOfdData] = useState<OfdData | null>(null);
   const [ofdLoading, setOfdLoading] = useState(false);
+  const ofdDateRef = useRef(ofdDate);
   const [ofdError, setOfdError] = useState("");
-  const [ofdSearch, setOfdSearch] = useState("");
+  const [ofdSearch, setOfdSearch] = usePersistentState("satmi:analytics:ofdSearch", "");
   const [selectedOrderEvents, setSelectedOrderEvents] = useState<OfdOrder | null>(null);
-  const [copySuccess, setCopySuccess] = useState(false);
   const [verifyingId, setVerifyingId] = useState<number | null>(null);
-
-  const sheetsOrigin = typeof window !== "undefined" ? window.location.origin : "https://satmi.in";
-  const googleSheetsFormula = `=IMPORTDATA("${sheetsOrigin}/api/export/today-ofd?format=csv&date=${ofdDate}")`;
-
-  function handleCopyFormula() {
-    navigator.clipboard.writeText(googleSheetsFormula).then(() => {
-      setCopySuccess(true);
-      setTimeout(() => setCopySuccess(false), 2500);
-    });
-  }
 
   async function handleVerify(orderId: number, status: "verified" | "discrepant") {
     setVerifyingId(orderId);
@@ -575,12 +732,16 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
     }
   }
 
+  // Background refresh: show whatever we already have for this date immediately and
+  // revalidate silently. The skeleton only appears when there is nothing at all to show.
   async function fetchOfd(refresh = false) {
     if (preview) return;
-    setOfdLoading(true);
-    setOfdError("");
+    const requestedDate = ofdDate;
+    const cachedForDate = ofdCache.get(requestedDate);
+    if (cachedForDate && ofdData?.date !== requestedDate) setOfdData(cachedForDate);
+    if (!cachedForDate && ofdData?.date !== requestedDate) setOfdLoading(true);
     try {
-      const res = await fetch(`/api/analytics?mode=today_ofd&date=${ofdDate}${refresh ? "&refresh=1" : ""}`, {
+      const res = await fetch(`/api/analytics?mode=today_ofd&date=${requestedDate}${refresh ? "&refresh=1" : ""}`, {
         cache: "no-store",
         headers: { "x-requested-with": "satmi-analytics" },
       });
@@ -589,18 +750,29 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
         throw new Error(payload.error || "Failed to load OFD records");
       }
       const json = (await res.json()) as OfdData;
-      setOfdData(json);
+      ofdCache.set(requestedDate, json);
+      setOfdError("");
+      setOfdData((prev) => (requestedDate === ofdDateRef.current ? json : prev));
     } catch (err) {
-      setOfdError(err instanceof Error ? err.message : "Error loading OFD records");
+      // Keep showing existing data on background failures; only surface an error if we have none.
+      if (!ofdCache.get(requestedDate)) {
+        setOfdError(err instanceof Error ? err.message : "Error loading OFD records");
+      }
     } finally {
       setOfdLoading(false);
     }
   }
 
   useEffect(() => {
-    if (active && activeMode === "today_ofd") {
-      void fetchOfd();
-    }
+    ofdDateRef.current = ofdDate;
+    if (!(active && activeMode === "today_ofd")) return;
+    void fetchOfd();
+    // A day that has passed is closed and never changes, so only today is polled.
+    if (ofdDate < todayStr) return;
+    const timer = setInterval(() => {
+      if (!document.hidden) void fetchOfd();
+    }, 60000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, activeMode, ofdDate]);
 
@@ -641,6 +813,12 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
       setTo("");
     }
   };
+
+  // A preset like "7d" saved yesterday must mean "the last 7 days from today" after a refresh.
+  useEffect(() => {
+    if (datePreset !== "custom") applyPreset(datePreset);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const queryParams = useMemo(() => {
     const params = new URLSearchParams();
@@ -779,6 +957,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
         const matches =
           String(order.channelOrderId || "").toLowerCase().includes(q) ||
           String(order.id).includes(q) ||
+          String(order.status || "").toLowerCase().includes(q) ||
           String(order.customerName || "").toLowerCase().includes(q) ||
           String(order.customerPhone || "").includes(q) ||
           String(order.awb || "").toLowerCase().includes(q) ||
@@ -826,16 +1005,6 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </button>
               </div>
 
-              {/* Google Sheets Live Formula Button */}
-              <button
-                type="button"
-                onClick={handleCopyFormula}
-                className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition shadow-xs"
-                title="Copy live auto-sync formula for Google Sheets"
-              >
-                {copySuccess ? <Check size={14} className="text-emerald-600" /> : <FileSpreadsheet size={14} />}
-                <span>{copySuccess ? "Formula Copied!" : "Auto-Sync to Google Sheet"}</span>
-              </button>
 
               {/* One-Click Download CSV */}
               <a
@@ -851,11 +1020,10 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               <button
                 type="button"
                 onClick={() => void fetchOfd(true)}
-                disabled={ofdLoading}
-                className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-xs disabled:opacity-50"
+                className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-xs"
                 title="Refresh OFD Activity"
               >
-                <RefreshCw size={14} className={ofdLoading ? "animate-spin text-primary" : "text-muted-foreground"} />
+                <RefreshCw size={14} className="text-muted-foreground" />
                 <span>Refresh</span>
               </button>
             </div>
@@ -888,7 +1056,17 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
             <div className="text-xs text-muted-foreground flex items-center gap-3">
               {historical ? (
-                <span className="text-amber-600 dark:text-amber-400 font-medium">Historical OFD archive</span>
+                <span className="text-amber-600 dark:text-amber-400 font-medium">
+                  {ofdData?.verification?.verified
+                    ? `Closed day · verified with Shiprocket${
+                        ofdData.verification.added + ofdData.verification.removed + ofdData.verification.changed > 0
+                          ? ` (${ofdData.verification.added + ofdData.verification.removed + ofdData.verification.changed} corrected)`
+                          : ""
+                      }`
+                    : ofdData?.closed
+                      ? "Closed day · final data"
+                      : "Day ended · finalising…"}
+                </span>
               ) : (
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
                   <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -898,53 +1076,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
             </div>
           </div>
 
-          {/* GOOGLE SHEETS LIVE AUTO-SYNC BANNER */}
-          <div className="mt-4 rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-4 flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-start gap-3.5 max-w-3xl">
-              <div className="size-10 rounded-xl bg-emerald-500/15 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5 shadow-xs">
-                <FileSpreadsheet size={20} />
-              </div>
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="text-xs font-bold text-foreground">Automated Google Sheets Live Sync</h4>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
-                    <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    Auto-Refreshes On Its Own
-                  </span>
-                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
-                    <ShieldCheck size={13} className="text-emerald-500" />
-                    EOD Snapshot Auto-Saved to Disk
-                  </span>
-                </div>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  Paste this formula in cell <strong>A1</strong> of your Google Sheet. It will automatically load all OFD orders and keep all delivery statuses updated throughout the day without manual downloads:
-                </p>
-                <div className="pt-1 flex flex-wrap items-center gap-2">
-                  <div className="flex items-center bg-card border border-border rounded-lg px-3 py-1.5 max-w-lg min-w-[280px] shadow-xs">
-                    <code className="text-[11px] font-mono text-primary select-all truncate">
-                      {googleSheetsFormula}
-                    </code>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleCopyFormula}
-                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 transition shadow-xs cursor-pointer active:scale-95"
-                  >
-                    {copySuccess ? <Check size={13} /> : <Copy size={13} />}
-                    <span>{copySuccess ? "Copied Formula!" : "Copy Formula for Sheet"}</span>
-                  </button>
-                  <a
-                    href={`/api/export/today-ofd?format=csv&date=${ofdDate}`}
-                    download={`satmi-today-ofd-${ofdDate}.csv`}
-                    className="text-xs font-medium text-muted-foreground hover:text-foreground underline px-1 flex items-center gap-1"
-                  >
-                    Direct CSV link <ExternalLink size={11} />
-                  </a>
-                </div>
-              </div>
-            </div>
-          </div>
         </header>
+
 
         {/* ERROR */}
         {ofdError && (
@@ -955,14 +1088,9 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
         )}
 
         <div className="p-5 space-y-6">
-          {ofdLoading && !ofdData && (
-            <div className="py-24 text-center space-y-3">
-              <RefreshCw size={28} className="animate-spin text-primary mx-auto" />
-              <p className="text-xs font-medium text-muted-foreground">Loading live OFD activity…</p>
-            </div>
-          )}
-
-          {ofdData && (
+          {ofdLoading && (!ofdData || ofdData.date !== ofdDate) ? (
+            <OfdDashboardSkeleton date={ofdDate} />
+          ) : ofdData ? (
             <>
               {/* OFD KPI METRICS GRID */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -1064,138 +1192,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               </div>
 
-              {/* OFD COHORT PROGRESSION & ROLLOVER MATH SECTION */}
-              <div className="rounded-xl border border-primary/20 bg-linear-to-r from-primary/5 via-card to-emerald-500/5 p-4 sm:p-5 shadow-xs">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3 mb-4">
-                  <div className="flex items-center gap-2.5">
-                    <div className="size-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center font-bold text-sm">
-                      ∑
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-foreground">Delivery Cohort Math & Progression Flow</h3>
-                      <p className="text-xs text-muted-foreground">
-                        Verified breakdown: Fresh packages + Rollover re-attempts from previous days
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                      <ShieldCheck size={13} />
-                      Daily Audit Snapshot Preserved
-                    </span>
-                  </div>
-                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-                  {/* STEP 1: FRESH 1ST ATTEMPT */}
-                  <div className="rounded-xl border border-sky-500/25 bg-card/80 p-4 shadow-2xs space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400 flex items-center gap-1.5">
-                        <span className="size-2 rounded-full bg-sky-500" />
-                        1st Attempt Cohort
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400">
-                        Fresh Orders (Y)
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-2xl font-black text-foreground">
-                        {formatNumber(ofdMetrics.firstAttemptOFD?.count || 0)}
-                      </span>
-                      <span className="text-xs text-muted-foreground ml-1.5">went out today</span>
-                    </div>
-                    <div className="space-y-1.5 pt-1 text-xs border-t border-border/50">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Delivered:</span>
-                        <strong className="text-emerald-600 dark:text-emerald-400">
-                          {formatNumber(ofdMetrics.firstAttemptOFD?.deliveredCount || 0)} ({ofdMetrics.firstAttemptOFD?.deliveredPercent || 0}%)
-                        </strong>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Undelivered / Still out:</span>
-                        <strong className="text-amber-600 dark:text-amber-400">
-                          {formatNumber((ofdMetrics.firstAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.firstAttemptOFD?.stillOutCount || 0))}
-                        </strong>
-                      </div>
-                    </div>
-                    <div className="rounded-lg bg-sky-500/5 border border-sky-500/15 p-2 text-[11px] text-muted-foreground">
-                      ➜ <strong className="text-foreground">{formatNumber((ofdMetrics.firstAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.firstAttemptOFD?.stillOutCount || 0))} orders</strong> roll over to become tomorrow’s <strong>2nd Attempt</strong> candidates.
-                    </div>
-                  </div>
-
-                  {/* STEP 2: 2ND ATTEMPT ROLLOVER */}
-                  <div className="rounded-xl border border-amber-500/25 bg-card/80 p-4 shadow-2xs space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-                        <span className="size-2 rounded-full bg-amber-500" />
-                        2nd Attempt Cohort
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                        Prior Failed (40% X)
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-2xl font-black text-foreground">
-                        {formatNumber(ofdMetrics.secondAttemptOFD?.count || 0)}
-                      </span>
-                      <span className="text-xs text-muted-foreground ml-1.5">re-attempted today</span>
-                    </div>
-                    <div className="space-y-1.5 pt-1 text-xs border-t border-border/50">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Delivered on 2nd:</span>
-                        <strong className="text-emerald-600 dark:text-emerald-400">
-                          {formatNumber(ofdMetrics.secondAttemptOFD?.deliveredCount || 0)} ({ofdMetrics.secondAttemptOFD?.deliveredPercent || 0}%)
-                        </strong>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Undelivered / Still out:</span>
-                        <strong className="text-orange-600 dark:text-orange-400">
-                          {formatNumber((ofdMetrics.secondAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.secondAttemptOFD?.stillOutCount || 0))}
-                        </strong>
-                      </div>
-                    </div>
-                    <div className="rounded-lg bg-amber-500/5 border border-amber-500/15 p-2 text-[11px] text-muted-foreground">
-                      ➜ <strong className="text-foreground">{formatNumber((ofdMetrics.secondAttemptOFD?.undeliveredCount || 0) + (ofdMetrics.secondAttemptOFD?.stillOutCount || 0))} orders</strong> roll over to become tomorrow’s <strong>3rd Attempt</strong> candidates.
-                    </div>
-                  </div>
-
-                  {/* STEP 3: 3RD ATTEMPT & FINAL */}
-                  <div className="rounded-xl border border-orange-500/25 bg-card/80 p-4 shadow-2xs space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-orange-600 dark:text-orange-400 flex items-center gap-1.5">
-                        <span className="size-2 rounded-full bg-orange-500" />
-                        3rd Attempt Cohort
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400">
-                        Final Re-attempts
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-2xl font-black text-foreground">
-                        {formatNumber(ofdMetrics.thirdAttemptOFD?.count || 0)}
-                      </span>
-                      <span className="text-xs text-muted-foreground ml-1.5">re-attempted today</span>
-                    </div>
-                    <div className="space-y-1.5 pt-1 text-xs border-t border-border/50">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Delivered on 3rd:</span>
-                        <strong className="text-emerald-600 dark:text-emerald-400">
-                          {formatNumber(ofdMetrics.thirdAttemptOFD?.deliveredCount || 0)} ({ofdMetrics.thirdAttemptOFD?.deliveredPercent || 0}%)
-                        </strong>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Moved to RTO:</span>
-                        <strong className="text-rose-600 dark:text-rose-400">
-                          {formatNumber(ofdMetrics.rto?.count || 0)}
-                        </strong>
-                      </div>
-                    </div>
-                    <div className="rounded-lg bg-orange-500/5 border border-orange-500/15 p-2 text-[11px] text-muted-foreground">
-                      ➜ Final outcomes recorded: delivered orders closed, persistent failures routed to RTO.
-                    </div>
-                  </div>
-                </div>
-              </div>
 
               {/* OFD REGISTER TABLE */}
               <div className="rounded-xl border border-border bg-card shadow-xs overflow-hidden">
@@ -1269,7 +1266,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                         <th className="py-3 px-4">Attempt</th>
                         <th className="py-3 px-4">Customer</th>
                         <th className="py-3 px-4">OFD Time</th>
-                        <th className="py-3 px-4">Outcome & Status</th>
+                        <th className="py-3 px-4">Status</th>
                         <th className="py-3 px-4">AWB / Courier</th>
                         <th className="py-3 px-4">Amount</th>
                         <th className="py-3 px-4">Webhooks</th>
@@ -1279,8 +1276,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     <tbody className="divide-y divide-border">
                       {shownOrders.map((order) => {
                         const isDelivered = /^(DELIVERED|DELIVERED TO CUSTOMER)$/i.test(order.status);
-                        const isUndelivered = /UNDELIVERED|NDR/i.test(order.status);
                         const isRto = /RTO/i.test(order.status);
+                        const isUndelivered = !isRto && /UNDELIVERED|NDR/i.test(order.status);
                         const isStillOut = /^OUT FOR DELIVERY$/i.test(order.status);
 
                         return (
@@ -1314,28 +1311,28 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                             </td>
                             <td className="py-3 px-4">
                               {isDelivered && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-                                  <Check size={12} /> Delivered
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                  <Check size={12} /> {String(order.status || "DELIVERED")}
                                 </span>
                               )}
                               {isStillOut && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-sky-500/15 text-sky-600 dark:text-sky-400">
-                                  <Truck size={12} /> Still OFD
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                                  <Truck size={12} /> {String(order.status || "OUT FOR DELIVERY")}
                                 </span>
                               )}
                               {isUndelivered && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-destructive/15 text-destructive">
-                                  <AlertTriangle size={12} /> Undelivered
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                                  <AlertTriangle size={12} /> {String(order.status || "UNDELIVERED")}
                                 </span>
                               )}
                               {isRto && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-600 dark:text-rose-400">
-                                  <TrendingDown size={12} /> RTO
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                                  <TrendingDown size={12} /> {String(order.status || "RTO")}
                                 </span>
                               )}
                               {!isDelivered && !isStillOut && !isUndelivered && !isRto && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-muted text-foreground">
-                                  {order.status || "Unknown"}
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-muted text-foreground">
+                                  {String(order.status || "Unknown")}
                                 </span>
                               )}
 
@@ -1498,7 +1495,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               )}
             </>
-          )}
+          ) : null}
         </div>
       </section>
     );
@@ -2018,8 +2015,8 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </article>
             </div>
 
-            {/* SECONDARY PARAMETERS GRID: In Transit, OFD, NDR Recovery, Avg TAT */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* SECONDARY PARAMETERS GRID: In Transit, OFD, Current NDR, NDR Recovery, Avg TAT */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
               {/* In Transit (0 Attempts) */}
               <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
@@ -2102,6 +2099,43 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               </div>
 
+              {/* Current NDR / Undelivered */}
+              <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="rounded bg-rose-500/10 px-2 py-0.5 text-[10px] font-bold text-rose-700 dark:text-rose-400 uppercase tracking-wider">
+                      Exceptions
+                    </span>
+                    <h3 className="text-xs font-semibold text-muted-foreground mt-1.5">Current NDR Orders</h3>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <MetricInfoButton
+                      title="Current NDR / Undelivered Orders"
+                      formula="Current Undelivered Orders ÷ Total Orders × 100"
+                      includedStatuses={PARAMETER_STATUSES.NDR}
+                      calculation={`${formatNumber(metrics.ndr.count)} ÷ ${formatNumber(metrics.total.count)} × 100 = ${metrics.ndr.percent}%`}
+                      explanation="Shipments that underwent delivery attempts but failed to deliver (e.g. consignee unavailable, customer phone unreachable, door locked) and are currently sitting in an NDR status awaiting re-attempt or customer escalation."
+                      notes={`Active in-flight NDR: ${formatNumber(metrics.ndr.count)} orders. Total historical NDR incidents experienced across this cohort: ${formatNumber(metrics.totalNdrExperienced.count)}.`}
+                    />
+                    <div className="flex size-9 items-center justify-center rounded-lg bg-rose-500/10 text-rose-600">
+                      <AlertTriangle size={18} />
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <strong className="text-2xl font-bold tracking-tight text-foreground">{formatNumber(metrics.ndr.count)}</strong>
+                  <span className="text-xs text-muted-foreground">({metrics.ndr.percent}% of total)</span>
+                </div>
+                <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>
+                    Total Incidents: <strong className="text-foreground">{formatNumber(metrics.totalNdrExperienced.count)}</strong>
+                  </span>
+                  <span>
+                    Status: <strong className="text-rose-600 dark:text-rose-400">Undelivered</strong>
+                  </span>
+                </div>
+              </div>
+
               {/* NDR / Undelivered Delivery Percentage (Recovery Rate) */}
               <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
                 <div className="flex items-center justify-between">
@@ -2164,16 +2198,22 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
                 <div className="mt-2 flex items-baseline gap-2">
                   <strong className="text-2xl font-bold tracking-tight text-foreground">
-                    {metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} days` : "—"}
+                    {metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} d` : "—"}
                   </strong>
-                  <span className="text-xs text-muted-foreground">dispatch to door</span>
+                  <span className="text-xs text-muted-foreground">shipped to door</span>
                 </div>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
-                    Dispatch: <strong className="text-foreground">{metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays}d` : "—"}</strong>
+                    Order to Door:{" "}
+                    <strong className="text-foreground">
+                      {metrics.avgOrderTatDays != null ? `${metrics.avgOrderTatDays} d` : "—"}
+                    </strong>
                   </span>
                   <span>
-                    Order Date: <strong className="text-foreground">{metrics.avgOrderTatDays != null ? `${metrics.avgOrderTatDays}d` : "—"}</strong>
+                    Courier TAT:{" "}
+                    <strong className="text-foreground">
+                      {metrics.avgShippedTatDays != null ? `${metrics.avgShippedTatDays} d` : "—"}
+                    </strong>
                   </span>
                 </div>
               </div>
@@ -2575,9 +2615,15 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                                   Unfulfilled
                                 </span>
                               ) : d.delivered === 0 ? (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
-                                  In Transit
-                                </span>
+                                d.inTransit > 0 || d.outForDelivery > 0 ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                                    In Transit (0%)
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-muted text-muted-foreground">
+                                    0%
+                                  </span>
+                                )
                               ) : (
                                 <span
                                   className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${

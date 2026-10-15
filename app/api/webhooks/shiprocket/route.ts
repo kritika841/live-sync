@@ -149,6 +149,17 @@ async function handlePOST(request: Request) {
       else if (awb) await runtime.DB.prepare(`${update}awb = ?`).bind(reason, attempts, attempts, raisedAt, awb).run();
       else if (channelOrderId) await runtime.DB.prepare(`${update}channel_order_id = ?`).bind(reason, attempts, attempts, raisedAt, channelOrderId).run();
     }
+
+    // Phase 1: Automated Webhook Attempt Engine
+    // Dynamically derives & updates attempt_count, OFD timestamps, and NDR rollover in real-time
+    const { processWebhookAttempt } = await import("../../../../lib/webhook-attempt-engine");
+    await processWebhookAttempt(
+      runtime.DB,
+      { shiprocketOrderId, channelOrderId, shipmentId, awb },
+      status,
+      eventAt,
+      payload
+    ).catch(() => null);
   }
 
   // Record into dedicated OFD audit table if applicable

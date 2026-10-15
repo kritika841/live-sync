@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePersistentState } from "./usePersistentState";
 import { isTransientRequestError, readJson } from "../lib/http";
 import Link from "next/link";
 import {
@@ -32,6 +33,7 @@ import AccountMenu from "./AccountMenu";
 import LiveStatus from "./LiveStatus";
 import ThemeToggle from "../components/ThemeToggle";
 import { Button } from "../components/ui/button";
+import { ShopifyProductFilter } from "../components/ShopifyProductFilter";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high" | "approved" | "low_approved";
@@ -76,7 +78,7 @@ type OrdersResponse = {
   perPage: number;
   totalPages: number;
   sync: Record<string, string>;
-  filterOptions: { couriers: string[]; pickups: string[]; tags: string[] };
+  filterOptions: { couriers: string[]; pickups: string[]; tags: string[]; products?: string[] };
   unshippedOrdersWindowDays?: number;
 };
 
@@ -115,7 +117,7 @@ const emptyData: OrdersResponse = {
   perPage: 50,
   totalPages: 1,
   sync: {},
-  filterOptions: { couriers: [], pickups: [], tags: [] },
+  filterOptions: { couriers: [], pickups: [], tags: [], products: [] },
 };
 
 function formatDate(value: string) {
@@ -241,10 +243,11 @@ export default function OrdersDashboard({
   }, [view, isCustomerSupport]);
 
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [tab, setTab] = useState<TabKey>("new");
-  const [risk, setRisk] = useState<RiskKey>("all");
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
+  const storageScope = `satmi:${userId || "anon"}:orders`;
+  const [tab, setTab] = usePersistentState<TabKey>(`${storageScope}:tab`, "new");
+  const [risk, setRisk] = usePersistentState<RiskKey>(`${storageScope}:risk`, "all");
+  const [page, setPage] = usePersistentState(`${storageScope}:page`, 1);
+  const [search, setSearch] = usePersistentState(`${storageScope}:search`, "");
   const [deferredSearch, setDeferredSearch] = useState(search);
 
   useEffect(() => {
@@ -254,34 +257,60 @@ export default function OrdersDashboard({
 
 const yesterdayValue = addDaysToIso(todayValue, -1);
 
-  const [payment, setPayment] = useState("");
-  const [courier, setCourier] = useState("");
-  const [tag, setTag] = useState("");
-  const [pickup, setPickup] = useState("");
-  const [from, setFrom] = useState(yesterdayValue);
-  const [to, setTo] = useState(yesterdayValue);
-  const [deliveredDate, setDeliveredDate] = useState("");
-  const [copiedFilter, setCopiedFilter] = useState<"all" | "copied" | "uncopied">("all");
-  const [sort, setSort] = useState<"newest" | "oldest">("newest");
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [data, setData] = useState<OrdersResponse>(() => {
+  const [payment, setPayment] = usePersistentState(`${storageScope}:payment`, "");
+  const [courier, setCourier] = usePersistentState(`${storageScope}:courier`, "");
+  const [tag, setTag] = usePersistentState(`${storageScope}:tag`, "");
+  const [pickup, setPickup] = usePersistentState(`${storageScope}:pickup`, "");
+  const [from, setFrom] = usePersistentState(`${storageScope}:from`, yesterdayValue);
+  const [to, setTo] = usePersistentState(`${storageScope}:to`, yesterdayValue);
+  const [deliveredDate, setDeliveredDate] = usePersistentState(`${storageScope}:deliveredDate`, "");
+  const [copiedFilter, setCopiedFilter] = usePersistentState<"all" | "copied" | "uncopied">(`${storageScope}:copiedFilter`, "all");
+  const [selectedProducts, setSelectedProducts] = usePersistentState<string[]>(`${storageScope}:products`, (() => {
     if (typeof window !== "undefined") {
       try {
-        const cached = sessionStorage.getItem("satmi_orders_cache");
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          if (parsed && Array.isArray(parsed.orders) && parsed.orders.length > 0) return parsed;
+        const url = new URL(window.location.href);
+        const raw = url.searchParams.getAll("product");
+        if (raw.length > 0) {
+          return raw.flatMap((p) => (p.includes("||") ? p.split("||") : [p])).filter(Boolean);
         }
-      } catch (err) {
-        void err;
+      } catch {
+        // ignore
       }
     }
-    return emptyData;
-  });
+    return [];
+  })());
+  const [productMode, setProductMode] = usePersistentState<"exclude" | "include">(`${storageScope}:productMode`, "exclude");
+  const product = selectedProducts.join("||");
+  function setProduct(val: string) {
+    setSelectedProducts(val ? [val] : []);
+  }
+  const [sort, setSort] = usePersistentState<"newest" | "oldest">(`${storageScope}:sort`, "newest");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [data, setData] = useState<OrdersResponse>(emptyData);
+  useEffect(() => {
+    try {
+      const cached = sessionStorage.getItem("satmi_orders_cache");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && Array.isArray(parsed.orders) && parsed.orders.length > 0) {
+          setData(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
   const [loadedQuery, setLoadedQuery] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
-  const [selectedOrders, setSelectedOrders] = useState<Map<number, string>>(new Map());
+  const [selectedOrders, setSelectedOrders] = usePersistentState<Map<number, string>>(
+    `${storageScope}:selectedOrders`,
+    new Map(),
+    {
+      encode: (m) => [...m.entries()],
+      decode: (raw) => new Map(Array.isArray(raw) ? (raw as [number, string][]) : []),
+    }
+  );
   const [selectingAll, setSelectingAll] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [copiedIdFeedback, setCopiedIdFeedback] = useState<number | null>(null);
@@ -319,12 +348,16 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
     if (courier) params.set("courier", courier);
     if (tag) params.set("tag", tag);
     if (pickup) params.set("pickup", pickup);
+    if (selectedProducts.length > 0) {
+      selectedProducts.forEach((p) => params.append("product", p));
+      params.set("product_mode", productMode);
+    }
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     if (copiedFilter !== "all") params.set("copied", copiedFilter);
     if (tab === "delivered" && deliveredDate) params.set("delivered_date", deliveredDate);
     return params.toString();
-  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, tag, from, to, copiedFilter, deliveredDate]);
+  }, [tab, risk, page, sort, deferredSearch, payment, courier, pickup, tag, selectedProducts, productMode, from, to, copiedFilter, deliveredDate]);
 
   const currentQuery = useRef(query);
   useEffect(() => {
@@ -571,6 +604,8 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
     setCourier("");
     setPickup("");
     setTag("");
+    setSelectedProducts([]);
+    setProductMode("exclude");
     setFrom("");
     setTo("");
     setDeliveredDate("");
@@ -740,6 +775,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
     courier ||
     pickup ||
     tag ||
+    selectedProducts.length > 0 ||
     from ||
     to ||
     (tab === "delivered" && deliveredDate) ||
@@ -751,6 +787,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
     courier,
     pickup,
     tag,
+    selectedProducts.length > 0 ? "products" : "",
     from || to ? "date" : "",
     tab === "delivered" ? deliveredDate : "",
     copiedFilter !== "all" ? copiedFilter : "",
@@ -1751,6 +1788,53 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
                   </span>
                 )}
 
+                {/* Product Badges */}
+                {selectedProducts.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {selectedProducts.map((p) => (
+                      <span
+                        key={p}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold shadow-2xs ${
+                          productMode === "exclude"
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-amber-500/20"
+                            : "border-primary/40 bg-card text-primary ring-1 ring-primary/20"
+                        }`}
+                      >
+                        <span className="max-w-[220px] truncate" title={p}>
+                          {productMode === "exclude" ? "Excludes: " : "Product: "} {p}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedProducts((prev) => prev.filter((item) => item !== p));
+                            setPage(1);
+                          }}
+                          className={`rounded-full p-0.5 transition cursor-pointer ${
+                            productMode === "exclude"
+                              ? "hover:bg-amber-500/20 text-amber-700 dark:text-amber-400"
+                              : "hover:bg-primary/20 text-primary"
+                          }`}
+                          title={`Clear ${p}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))}
+                    {selectedProducts.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedProducts([]);
+                          setPage(1);
+                        }}
+                        className="text-[11px] text-muted-foreground hover:text-foreground underline cursor-pointer ml-1"
+                      >
+                        Clear all products ({selectedProducts.length})
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 {/* Delivered Date Badge */}
                 {tab === "delivered" && deliveredDate && (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-card px-2.5 py-0.5 text-xs font-semibold text-primary shadow-2xs">
@@ -1890,6 +1974,43 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
                       <option value="all">All orders</option>
                       <option value="copied">Copied IDs</option>
                       <option value="uncopied">Not copied</option>
+                    </select>
+                  </label>
+
+                  {/* Searchable Multi-Select Live Shopify Product Filter */}
+                  <ShopifyProductFilter
+                    products={data.filterOptions.products || []}
+                    selectedProducts={selectedProducts}
+                    onChange={(newSelected) => {
+                      setSelectedProducts(newSelected);
+                      setPage(1);
+                    }}
+                    productMode={productMode}
+                    onProductModeChange={(newMode) => {
+                      setProductMode(newMode);
+                      setPage(1);
+                    }}
+                  />
+
+                  {/* Product Condition (Exclude / Out of stock vs Include) */}
+                  <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
+                    <span>Product condition</span>
+                    <select
+                      value={productMode}
+                      onChange={(e) => {
+                        setProductMode(e.target.value as "exclude" | "include");
+                        setPage(1);
+                      }}
+                      className={`h-9 rounded-lg border px-2.5 text-xs outline-none transition cursor-pointer ${
+                        selectedProducts.length > 0
+                          ? productMode === "exclude"
+                            ? "border-amber-500 bg-amber-500/15 text-amber-700 dark:text-amber-400 font-bold ring-1 ring-amber-500/30"
+                            : "border-primary bg-primary/15 text-primary font-bold ring-1 ring-primary/30"
+                          : "border-input bg-card text-foreground"
+                      }`}
+                    >
+                      <option value="exclude">Exclude (Out of stock)</option>
+                      <option value="include">Only include product(s)</option>
                     </select>
                   </label>
 
@@ -2132,13 +2253,39 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
                           </td>
 
                           <td className="px-4 py-3.5">
-                            <strong className="block text-sm font-medium text-foreground truncate max-w-xs">
-                              {firstProduct?.name || "—"}
-                            </strong>
-                            <small className="block text-xs text-muted-foreground">
-                              {firstProduct?.sku ? `SKU ${firstProduct.sku}` : ""}
-                              {order.products.length > 1 ? ` · +${order.products.length - 1} more` : ""}
-                            </small>
+                            <div className="flex items-start justify-between gap-1 group/prod">
+                              <div className="min-w-0">
+                                <strong
+                                  className="block text-sm font-medium text-foreground truncate max-w-xs"
+                                  title={firstProduct?.name}
+                                >
+                                  {firstProduct?.name || "—"}
+                                </strong>
+                                <small className="block text-xs text-muted-foreground">
+                                  {firstProduct?.sku ? `SKU ${firstProduct.sku}` : ""}
+                                  {order.products.length > 1 ? ` · +${order.products.length - 1} more` : ""}
+                                </small>
+                              </div>
+                              {firstProduct?.name && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (firstProduct.name) {
+                                      setSelectedProducts((prev) =>
+                                        prev.includes(firstProduct.name!) ? prev : [...prev, firstProduct.name!]
+                                      );
+                                      setProductMode("exclude");
+                                      setFilterOpen(true);
+                                      setPage(1);
+                                    }
+                                  }}
+                                  title={`Filter out orders with "${firstProduct.name}" (Out of stock)`}
+                                  className="opacity-0 group-hover/prod:opacity-100 transition-opacity text-[10px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25 rounded px-1.5 py-0.5 cursor-pointer shrink-0 mt-0.5"
+                                >
+                                  Exclude
+                                </button>
+                              )}
+                            </div>
                           </td>
 
                           <td className="px-4 py-3.5 tabular-nums text-xs text-foreground">

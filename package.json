@@ -22,6 +22,10 @@
     "scheduler": "node --env-file=.env.local scripts/scheduler.mjs",
     "catalog:fetch": "node --env-file=.env.local scripts/fetch-shopify-products.mjs",
     "analytics:precompute": "node --env-file=.env.local --import tsx scripts/precompute-prehistoric-analytics.ts",
+    "verify:ofd": "node --env-file=.env.local --import tsx scripts/verify-ofd-report.ts",
+    "reconcile:ofd": "node --env-file=.env.local --import tsx scripts/reconcile-ofd-csv.ts",
+    "ingest:ofd": "node --env-file=.env.local --import tsx scripts/ingest-ofd-csv.ts",
+    "close:ofd": "node --env-file=.env.local --import tsx scripts/close-ofd-day.ts",
     "vercel-build": "npm run build && node --import tsx scripts/bootstrap-production.ts"
   },
   "dependencies": {

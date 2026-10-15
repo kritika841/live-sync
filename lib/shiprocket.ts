@@ -4,10 +4,10 @@ import { ensureSchema, logActivity, setSyncState, type PostgresDatabase, type Ru
 import { routeConfirmationOrders, isOrderHighRisk } from "./confirmation";
 import { invalidateCache } from "./server-cache";
 
-const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
+export const API_ROOT = "https://apiv2.shiprocket.in/v1/external";
 type ShiprocketOrder = Record<string, unknown> & { id?: number; shipments?: Array<Record<string, unknown>> | Record<string, unknown>; products?: Array<Record<string, unknown>> };
 type ShiprocketNdr = Record<string, unknown> & { id?: number; shipment_id?: number; awb_code?: string };
-type TrackingOrderRef = { id: number; channelOrderId: string; shipmentId: number | null; awb: string };
+export type TrackingOrderRef = { id: number; channelOrderId: string; shipmentId: number | null; awb: string };
 type SyncMode = "full" | "incremental";
 type SyncChange = { orderId: number; channelOrderId: string; fields: string[]; statusBefore?: string; statusAfter?: string };
 export type SyncReport = {
@@ -191,6 +191,12 @@ function orderSnapshot(order: ShiprocketOrder) {
     shipmentId: numberValue(shipment.id || shipment.shipment_id) || null,
     productsJson: cleanJsonString(Array.isArray(order.products) ? order.products : []), rawJson: cleanJsonString(order),
     isHighRisk: isOrderHighRisk(order as unknown as Record<string, unknown>),
+    attemptCount: firstPositiveNumber(
+      (order as unknown as Record<string, unknown>).attempt_count,
+      (order as unknown as Record<string, unknown>).delivery_attempts,
+      (order as unknown as Record<string, unknown>).ndr_attempts,
+      (shipment as unknown as Record<string, unknown>).attempt_count
+    ) || null,
   };
 }
 
@@ -216,7 +222,7 @@ function trackingActivities(payload: Record<string, unknown>, awb: string) {
     : [];
 }
 
-async function syncTrackingHistories(db: PostgresDatabase, token: string, references: TrackingOrderRef[]) {
+export async function syncTrackingHistories(db: PostgresDatabase, token: string, references: TrackingOrderRef[]) {
   const unique = [...new Map(references.filter((item) => item.awb).map((item) => [item.awb, item])).values()];
   let eventCount = 0;
   for (let start = 0; start < unique.length; start += 50) {
@@ -363,7 +369,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
     const validSnapshots = chunk.map(orderSnapshot).filter((v) => Boolean(v.id));
     if (!validSnapshots.length) continue;
 
-    const rowPlaceholders = "(" + Array.from({ length: 30 }, () => "?").join(", ") + ")";
+    const rowPlaceholders = "(" + Array.from({ length: 31 }, () => "?").join(", ") + ")";
     const placeholders = validSnapshots.map(() => rowPlaceholders).join(", ");
     const values: unknown[] = [];
     for (const value of validSnapshots) {
@@ -374,7 +380,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         value.outForDeliveryAt, value.firstOutForDeliveryAt, value.status, value.statusCode,
         value.paymentMethod, value.paymentStatus, value.total, value.shippingCost, value.pickupLocation,
         value.awb, value.courier, value.shipmentId, value.productsJson, value.rawJson, syncedAt,
-        value.isHighRisk,
+        value.isHighRisk, value.attemptCount,
       );
     }
 
@@ -384,7 +390,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         customer_phone, customer_city, customer_state, order_date, created_at, updated_at, delivered_at,
         shipped_at, out_for_delivery_at, first_out_for_delivery_at,
         status, status_code, payment_method, payment_status, total, shipping_cost, pickup_location,
-        awb, courier, shipment_id, products_json, raw_json, synced_at, is_high_risk
+        awb, courier, shipment_id, products_json, raw_json, synced_at, is_high_risk, attempt_count
       ) VALUES ${placeholders}
       ON CONFLICT(id) DO UPDATE SET
         channel_order_id=excluded.channel_order_id, channel_id=excluded.channel_id,
@@ -413,6 +419,7 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         total=excluded.total, shipping_cost=CASE WHEN excluded.shipping_cost > 0 THEN excluded.shipping_cost ELSE orders.shipping_cost END,
         pickup_location=excluded.pickup_location, awb=excluded.awb,
         courier=excluded.courier, shipment_id=excluded.shipment_id,
+        attempt_count=GREATEST(COALESCE(orders.attempt_count, 1), COALESCE(excluded.attempt_count, 1)),
         products_json=excluded.products_json,
         raw_json=(
           excluded.raw_json::jsonb ||
@@ -688,22 +695,37 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
       await upsertOrders(db,result.data);
       return {count:result.data.length,total:Math.max(1,Number(result.meta?.pagination?.total_pages)||1)};
     };
-    // Always import the newest page even while draining a larger backlog.
+    // 1. Always import contiguous recent pages (1 through min(total, 5)) so recent orders are NEVER skipped
     const first = await page(1);
-    let imported=first.count;
-    let next=Math.max(2,cursor);
-    for(let i=0;i<4 && next<=first.total;i++,next++) imported+=(await page(next)).count;
-    const pending=next<=first.total;
+    let imported = first.count;
+    const contiguousLimit = Math.min(first.total, 5);
+    for (let p = 2; p <= contiguousLimit; p++) {
+      const res = await page(p);
+      imported += res.count;
+    }
+
+    // 2. Also advance any deeper backlog cursor beyond contiguousLimit
+    let next = Math.max(contiguousLimit + 1, cursor);
+    for (let i = 0; i < 3 && next <= first.total; i++, next++) {
+      const res = await page(next);
+      imported += res.count;
+    }
+
+    // 3. Reconcile any newly imported or updated high-risk confirmation orders
+    const { reconcileHighRiskConfirmationOrders } = await import("./confirmation");
+    await reconcileHighRiskConfirmationOrders(db).catch(() => null);
+
+    const pending = next <= first.total;
     const nowIso = new Date().toISOString();
-    await setSyncState(db,"fast_sync_cursor",pending?String(next):"1");
-    await setSyncState(db,"fast_sync_from",pending?from:new Date(Date.now()-fallbackLookback*86400000).toISOString().slice(0,10));
-    await setSyncState(db,"fast_sync_error","");
-    await setSyncState(db,"fast_sync_checked_at",nowIso);
-    await setSyncState(db,"fast_sync_last_at",nowIso);
-    await setSyncState(db,"last_sync_at",nowIso);
-    await setSyncState(db,"sync_status","completed");
+    await setSyncState(db, "fast_sync_cursor", pending ? String(next) : "1");
+    await setSyncState(db, "fast_sync_from", pending ? from : new Date(Date.now() - fallbackLookback * 86400000).toISOString().slice(0, 10));
+    await setSyncState(db, "fast_sync_error", "");
+    await setSyncState(db, "fast_sync_checked_at", nowIso);
+    await setSyncState(db, "fast_sync_last_at", nowIso);
+    await setSyncState(db, "last_sync_at", nowIso);
+    await setSyncState(db, "sync_status", "completed");
     invalidateCache();
-    return {imported,pending,nextPage:pending?next:null};
+    return { imported, pending, nextPage: pending ? next : null };
   } catch(error) {
     await setSyncState(db,"fast_sync_error",error instanceof Error?error.message:"Sync failed");
     throw error;

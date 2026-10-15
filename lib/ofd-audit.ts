@@ -2,6 +2,7 @@ import type { PostgresDatabase } from "./database";
 import { logActivity } from "./database";
 import { loadOfdRecords } from "./ofd";
 import { deriveOrderAttemptNumber } from "./ofd-attempt";
+import { isDayClosed } from "./ofd-ledger";
 import fs from "fs";
 import path from "path";
 
@@ -176,6 +177,7 @@ export function determineDeliveryOutcome(
   return "still_ofd";
 }
 
+
 /**
  * Synchronizes today's OFD records from orders & webhook_events into today_ofd_audit table.
  */
@@ -184,6 +186,10 @@ export async function syncTodayOfdAudit(
   targetDate: string = getIndiaDate()
 ) {
   await ensureOfdAuditSchema(db);
+  // A passed day with a sealed ledger is final: never re-sync / rewrite it.
+  if (targetDate < getIndiaDate() && (await isDayClosed(db, targetDate))) {
+    return { targetDate, total: 0, delivered: 0, stillOfd: 0, undelivered: 0, rto: 0, webhookCount: 0, skipped: "closed" as const };
+  }
   const now = new Date().toISOString();
 
   // 1. Fetch all OFD records for targetDate using optimized loadOfdRecords

@@ -34,6 +34,7 @@ import LiveStatus from "./LiveStatus";
 import ThemeToggle from "../components/ThemeToggle";
 import { Button } from "../components/ui/button";
 import { ShopifyProductFilter } from "../components/ShopifyProductFilter";
+import { OrderAttemptsTimeline } from "../components/OrderAttemptsTimeline";
 
 type TabKey = "new" | "ready" | "shipped" | "out_for_delivery" | "undelivered" | "delivered" | "rto" | "all";
 type RiskKey = "all" | "low" | "high" | "approved" | "low_approved";
@@ -58,6 +59,11 @@ type Order = {
   courier: string;
   products: Array<{ name?: string; sku?: string; quantity?: number }>;
   syncedAt: string;
+  ndrReason?: string;
+  ndrAttempts?: number;
+  ndrRaisedAt?: string;
+  firstOutForDeliveryAt?: string;
+  outForDeliveryAt?: string;
   confirmationNote?: string;
   confirmationStatus?: string;
   confirmationUpdatedAt?: string;
@@ -317,6 +323,7 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
   const [logsData, setLogsData] = useState<LogsResponse>({ logs: [], sync: {} });
   const [logsLoading, setLogsLoading] = useState(true);
   const [dismissingOrderId, setDismissingOrderId] = useState<number | null>(null);
+  const [selectedOrderForAttempts, setSelectedOrderForAttempts] = useState<Order | null>(null);
 
   async function dismissApprovedOrder(order: Order) {
     if (!confirm(`Are you sure you want to dismiss approved order #${order.channelOrderId || order.id}? It will be revoked from approved.`)) {
@@ -2327,6 +2334,19 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
                             >
                               <span>{order.status || "New"}</span>
                             </span>
+                            {order.ndrReason && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedOrderForAttempts(order)}
+                                className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400 bg-rose-500/10 hover:bg-rose-500/20 px-2 py-0.5 rounded border border-rose-500/20 max-w-[190px] truncate text-left transition cursor-pointer"
+                                title={`NDR: ${order.ndrReason} (Click to inspect all attempt reasons)`}
+                              >
+                                <span className="font-bold shrink-0">
+                                  {order.ndrAttempts && order.ndrAttempts > 1 ? `Att ${order.ndrAttempts}:` : "NDR:"}
+                                </span>
+                                <span className="truncate">{order.ndrReason}</span>
+                              </button>
+                            )}
                             {order.confirmationStatus === "confirmed" && (
                               <small className="block text-[11px] text-muted-foreground mt-1">
                                 Conf: {order.confirmationNote || "Saved"}
@@ -2565,6 +2585,50 @@ const yesterdayValue = addDaysToIso(todayValue, -1);
           )}
         </div>
       </main>
+
+      {/* DELIVERY ATTEMPTS & NDR TIMELINE MODAL */}
+      {selectedOrderForAttempts && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-xl shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-4 border-b border-border flex items-center justify-between bg-muted/20">
+              <div>
+                <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
+                  <span>Order #{selectedOrderForAttempts.channelOrderId || selectedOrderForAttempts.id}</span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-400 font-semibold border border-rose-500/30">
+                    {selectedOrderForAttempts.status}
+                  </span>
+                </h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {selectedOrderForAttempts.customerName} • {selectedOrderForAttempts.courier} ({selectedOrderForAttempts.awb})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedOrderForAttempts(null)}
+                className="size-7 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto space-y-4">
+              <OrderAttemptsTimeline
+                orderId={selectedOrderForAttempts.id}
+                channelOrderId={selectedOrderForAttempts.channelOrderId}
+                awb={selectedOrderForAttempts.awb}
+              />
+            </div>
+            <div className="p-3 border-t border-border flex justify-end bg-muted/20">
+              <button
+                type="button"
+                onClick={() => setSelectedOrderForAttempts(null)}
+                className="px-3 py-1.5 rounded-lg border border-border bg-card text-xs font-semibold text-foreground hover:bg-muted cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

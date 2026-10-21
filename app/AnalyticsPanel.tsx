@@ -28,10 +28,18 @@ import {
   Truck,
   X,
 } from "lucide-react";
+import { NdrReasonsPlot } from "../components/NdrReasonsPlot";
+import { OrderAttemptsTimeline } from "../components/OrderAttemptsTimeline";
+import { DeliveryAttemptLightbox } from "../components/DeliveryAttemptLightbox";
+import { ExceptionsLightbox } from "../components/ExceptionsLightbox";
+import { TrendLineChart } from "../components/TrendLineChart";
 
 interface MetricItem {
   count: number;
   percent: number;
+  rateOfShipped?: number;
+  percentOfDelivered?: number;
+  deliveryRate?: number;
   deliveredCount?: number;
   deliveredPercent?: number;
   undeliveredCount?: number;
@@ -104,7 +112,20 @@ interface AnalyticsData {
   };
   byCourier?: Array<{ name: string; total: number; delivered: number; outcomes: number; rate: number }>;
   byState?: Array<{ name: string; total: number; delivered: number; outcomes: number; rate: number }>;
-  ndrReasons: Array<{ reason: string; count: number; percent: number }>;
+  ndrReasons: Array<{
+    reason: string;
+    count: number;
+    percent: number;
+    attempt1Count?: number;
+    attempt2Count?: number;
+    attempt3PlusCount?: number;
+  }>;
+  ndrAttemptTotals?: {
+    all: number;
+    attempt1: number;
+    attempt2: number;
+    attempt3Plus: number;
+  };
   courierWise: Array<{
     name: string;
     total: number;
@@ -128,6 +149,7 @@ interface AnalyticsData {
     deliveryRate: number;
     closedDeliveryRate: number;
     rtoRate: number;
+    avgTatDays?: number | null;
   }>;
   dateWise: Array<{
     date: string;
@@ -154,6 +176,7 @@ interface AnalyticsData {
   filterOptions: {
     couriers: string[];
     states: string[];
+    products?: string[];
   };
   dataQuality: {
     source: string;
@@ -677,6 +700,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   const [courier, setCourier] = usePersistentState("satmi:analytics:courier", "");
   const [payment, setPayment] = usePersistentState("satmi:analytics:payment", "");
   const [state, setState] = usePersistentState("satmi:analytics:state", "");
+  const [product, setProduct] = usePersistentState("satmi:analytics:product", "");
 
   const [activeTab, setActiveTab] = usePersistentState<"couriers" | "dates" | "states" | "ndr" | "products">(
     "satmi:analytics:tab",
@@ -707,6 +731,15 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
   const [ofdSearch, setOfdSearch] = usePersistentState("satmi:analytics:ofdSearch", "");
   const [selectedOrderEvents, setSelectedOrderEvents] = useState<OfdOrder | null>(null);
   const [verifyingId, setVerifyingId] = useState<number | null>(null);
+
+  // Dedicated Lightbox modals
+  const [selectedAttemptCohort, setSelectedAttemptCohort] = useState<number | null>(null);
+  const [exceptionsLightbox, setExceptionsLightbox] = useState<"ndr" | "rto" | null>(null);
+  const [selectedOrderTimelineModal, setSelectedOrderTimelineModal] = useState<{
+    id: string | number;
+    channelOrderId?: string;
+    awb?: string;
+  } | null>(null);
 
   async function handleVerify(orderId: number, status: "verified" | "discrepant") {
     setVerifyingId(orderId);
@@ -827,8 +860,9 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
     if (courier) params.set("courier", courier);
     if (payment) params.set("payment", payment);
     if (state) params.set("state", state);
+    if (product) params.set("product", product);
     return params.toString();
-  }, [from, to, courier, payment, state]);
+  }, [from, to, courier, payment, state, product]);
 
   const currentQueryRef = useRef(queryParams);
   useEffect(() => {
@@ -1453,6 +1487,13 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                         </div>
                       </div>
 
+                      {/* Granular Attempt-by-Attempt NDR & Delivery History */}
+                      <OrderAttemptsTimeline
+                        orderId={selectedOrderEvents.id}
+                        channelOrderId={selectedOrderEvents.channelOrderId}
+                        awb={selectedOrderEvents.awb}
+                      />
+
                       <div>
                         <h4 className="font-bold text-foreground mb-2 text-xs uppercase tracking-wider">
                           Live Webhook Ingestion Events ({selectedOrderEvents.eventsLog?.length || 0})
@@ -1691,13 +1732,35 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               ))}
             </select>
 
-            {(courier || payment || state || datePreset !== "30d") && (
+            {/* Product Filter */}
+            <select
+              value={product}
+              onChange={(e) => setProduct(e.target.value)}
+              className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition focus:outline-none shadow-xs max-w-[180px] truncate ${
+                product
+                  ? "border-primary bg-primary/10 text-primary font-semibold ring-1 ring-primary/30"
+                  : "border-border bg-card text-foreground hover:bg-muted/50"
+              }`}
+              title="Filter Analytics by Specific Product"
+            >
+              <option value="">
+                All Products {data?.filterOptions?.products ? `(${data.filterOptions.products.length})` : ""}
+              </option>
+              {data?.filterOptions?.products?.map((p) => (
+                <option key={p} value={p} title={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+
+            {(courier || payment || state || product || datePreset !== "30d") && (
               <button
                 type="button"
                 onClick={() => {
                   setCourier("");
                   setPayment("");
                   setState("");
+                  setProduct("");
                   applyPreset("30d");
                 }}
                 className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-muted-foreground hover:text-foreground transition rounded-md hover:bg-muted"
@@ -1848,7 +1911,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
                 <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>
-                    1st Attempt: <strong className="text-foreground">{metrics.firstAttemptDelivered.percent}%</strong>
+                    1st Attempt: <strong className="text-foreground">{metrics.firstAttemptDelivered.percent}% share</strong>
                   </span>
                   <span>
                     Revenue: <strong className="text-foreground">{formatCurrency(data.financials.deliveredRevenue)}</strong>
@@ -1937,7 +2000,14 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </article>
 
               {/* 5. RTO % */}
-              <article className="rounded-xl border border-destructive/20 bg-card p-4 shadow-xs relative group hover:border-destructive/40 transition">
+              <article
+                role="button"
+                tabIndex={0}
+                onClick={() => setExceptionsLightbox("rto")}
+                onKeyDown={(e) => { if (e.key === "Enter") setExceptionsLightbox("rto"); }}
+                title="Click to view RTO reasons and attempt history"
+                className="rounded-xl border border-destructive/20 bg-card p-4 shadow-xs relative group hover:border-destructive/40 transition cursor-pointer"
+              >
                 <div className="flex items-start justify-between">
                   <div>
                     <span className="rounded bg-destructive/10 px-2 py-0.5 text-[10px] font-bold text-destructive uppercase tracking-wider">
@@ -1945,7 +2015,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     </span>
                     <h3 className="text-xs font-semibold text-muted-foreground mt-2">RTO % (Return to Origin)</h3>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                     <MetricInfoButton
                       title="RTO % (Return to Origin)"
                       formula="RTO ÷ Total Shipped × 100"
@@ -2100,7 +2170,14 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
               </div>
 
               {/* Current NDR / Undelivered */}
-              <div className="rounded-xl border border-border bg-card p-4 shadow-xs relative">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => setExceptionsLightbox("ndr")}
+                onKeyDown={(e) => { if (e.key === "Enter") setExceptionsLightbox("ndr"); }}
+                title="Click to view all NDR reasons and attempt history"
+                className="rounded-xl border border-border bg-card p-4 shadow-xs relative cursor-pointer hover:border-rose-500/40 transition"
+              >
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="rounded bg-rose-500/10 px-2 py-0.5 text-[10px] font-bold text-rose-700 dark:text-rose-400 uppercase tracking-wider">
@@ -2108,7 +2185,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                     </span>
                     <h3 className="text-xs font-semibold text-muted-foreground mt-1.5">Current NDR Orders</h3>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                     <MetricInfoButton
                       title="Current NDR / Undelivered Orders"
                       formula="Current Undelivered Orders ÷ Total Orders × 100"
@@ -2221,13 +2298,13 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
 
             {/* ATTEMPTS BREAKDOWN & PAYMENT RATIOS SPLIT */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Delivery Attempts Breakdown Card */}
+              {/* Delivery Attempts Breakdown Card - Numbers & Percentages Separated */}
               <article className="rounded-xl border border-border bg-card p-5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-border/60 pb-3">
                   <div>
                     <h3 className="text-sm font-bold text-foreground">Delivery Attempt Breakdown</h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Success rate categorized by number of attempts required to achieve delivery
+                      Success rate categorized by number of attempts required to achieve delivery. Click any row to open the dedicated Histogram Lightbox.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -2235,9 +2312,9 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       title="Delivery Attempt Breakdown"
                       formula="Delivered on Attempt N ÷ Total Delivered × 100"
                       includedStatuses={PARAMETER_STATUSES.DELIVERED}
-                      calculation={`1st attempt: ${metrics.firstAttemptDelivered.percent}% (${formatNumber(metrics.firstAttemptDelivered.count)}) · 2nd attempt: ${metrics.secondAttemptDelivered.percent}% (${formatNumber(metrics.secondAttemptDelivered.count)}) · 3rd attempt: ${metrics.thirdAttemptDelivered.percent}% (${formatNumber(metrics.thirdAttemptDelivered.count)})`}
+                      calculation={`1st attempt: ${(metrics.shipped?.count > 0 ? ((metrics.firstAttemptDelivered.count / metrics.shipped.count) * 100).toFixed(1) : 0)}% of shipped · ${(metrics.delivered?.count > 0 ? ((metrics.firstAttemptDelivered.count / metrics.delivered.count) * 100).toFixed(1) : 0)}% of deliveries (${formatNumber(metrics.firstAttemptDelivered.count)})`}
                       explanation="Measures the distribution of delivery attempts required to successfully deliver packages. 1st attempt delivered succeeded on the initial delivery run with 0 prior failed attempts. 2nd and 3rd attempts succeeded after re-attempting following NDR exceptions."
-                      notes="All attempt percentages are calculated out of total delivered shipments in this cohort."
+                      notes="Delivery Rate (% of Shipped) measures batch conversion. Share of Delivered measures the proportion among successful deliveries."
                     />
                     <span className="rounded bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground uppercase tracking-wide">
                       Funnel
@@ -2245,100 +2322,240 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   </div>
                 </div>
 
-                <div className="mt-4 space-y-3.5">
-                  {/* First Attempt */}
-                  <div>
-                    <div className="flex items-center justify-between text-xs font-medium">
-                      <span className="text-foreground flex items-center gap-2">
-                        <span className="size-2 rounded-full bg-emerald-500" />
-                        1st Attempt Delivery %
-                      </span>
-                      <span className="text-foreground">
-                        <strong>{metrics.firstAttemptDelivered.percent}%</strong>{" "}
-                        <span className="text-muted-foreground">({formatNumber(metrics.firstAttemptDelivered.count)})</span>
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-2 w-full bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-                        style={{ width: `${Math.min(100, metrics.firstAttemptDelivered.percent)}%` }}
-                      />
-                    </div>
-                  </div>
+                {(() => {
+                  const shippedTotal = metrics.shipped?.count || 0;
+                  const deliveredTotal = metrics.delivered?.count || 0;
 
-                  {/* Second Attempt */}
-                  <div>
-                    <div className="flex items-center justify-between text-xs font-medium">
-                      <span className="text-foreground flex items-center gap-2">
-                        <span className="size-2 rounded-full bg-amber-500" />
-                        2nd Attempt Delivery %
-                      </span>
-                      <span className="text-foreground">
-                        <strong>{metrics.secondAttemptDelivered.percent}%</strong>{" "}
-                        <span className="text-muted-foreground">
-                          ({formatNumber(metrics.secondAttemptDelivered.count)})
-                        </span>
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-2 w-full bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-amber-500 rounded-full transition-all duration-500"
-                        style={{ width: `${Math.min(100, Math.max(3, metrics.secondAttemptDelivered.percent))}%` }}
-                      />
-                    </div>
-                  </div>
+                  const att1Count = metrics.firstAttemptDelivered?.count || 0;
+                  const att1ShippedPct = shippedTotal > 0 ? Number(((att1Count / shippedTotal) * 100).toFixed(1)) : (metrics.firstAttemptDelivered?.rateOfShipped ?? 0);
+                  const att1DeliveredPct = deliveredTotal > 0 ? Number(((att1Count / deliveredTotal) * 100).toFixed(1)) : (metrics.firstAttemptDelivered?.percentOfDelivered ?? 0);
 
-                  {/* Third Attempt */}
-                  <div>
-                    <div className="flex items-center justify-between text-xs font-medium">
-                      <span className="text-foreground flex items-center gap-2">
-                        <span className="size-2 rounded-full bg-orange-500" />
-                        3rd Attempt Delivery %
-                      </span>
-                      <span className="text-foreground">
-                        <strong>{metrics.thirdAttemptDelivered.percent}%</strong>{" "}
-                        <span className="text-muted-foreground">({formatNumber(metrics.thirdAttemptDelivered.count)})</span>
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-2 w-full bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-orange-500 rounded-full transition-all duration-500"
-                        style={{ width: `${Math.min(100, Math.max(2, metrics.thirdAttemptDelivered.percent))}%` }}
-                      />
-                    </div>
-                  </div>
+                  const att2Count = metrics.secondAttemptDelivered?.count || 0;
+                  const att2ShippedPct = shippedTotal > 0 ? Number(((att2Count / shippedTotal) * 100).toFixed(1)) : (metrics.secondAttemptDelivered?.rateOfShipped ?? 0);
+                  const att2DeliveredPct = deliveredTotal > 0 ? Number(((att2Count / deliveredTotal) * 100).toFixed(1)) : (metrics.secondAttemptDelivered?.percentOfDelivered ?? 0);
 
-                  {/* Later Attempt */}
-                  {metrics.laterAttemptDelivered.count > 0 && (
-                    <div>
-                      <div className="flex items-center justify-between text-xs font-medium">
-                        <span className="text-foreground flex items-center gap-2">
-                          <span className="size-2 rounded-full bg-rose-500" />
-                          4th+ Attempt Delivery %
-                        </span>
-                        <span className="text-foreground">
-                          <strong>{metrics.laterAttemptDelivered.percent}%</strong>{" "}
-                          <span className="text-muted-foreground">
-                            ({formatNumber(metrics.laterAttemptDelivered.count)})
-                          </span>
-                        </span>
-                      </div>
-                      <div className="mt-1.5 h-2 w-full bg-muted rounded-full overflow-hidden">
+                  const att3Count = metrics.thirdAttemptDelivered?.count || 0;
+                  const att3ShippedPct = shippedTotal > 0 ? Number(((att3Count / shippedTotal) * 100).toFixed(1)) : (metrics.thirdAttemptDelivered?.rateOfShipped ?? 0);
+                  const att3DeliveredPct = deliveredTotal > 0 ? Number(((att3Count / deliveredTotal) * 100).toFixed(1)) : (metrics.thirdAttemptDelivered?.percentOfDelivered ?? 0);
+
+                  const att4Count = metrics.laterAttemptDelivered?.count || 0;
+                  const att4ShippedPct = shippedTotal > 0 ? Number(((att4Count / shippedTotal) * 100).toFixed(1)) : (metrics.laterAttemptDelivered?.rateOfShipped ?? 0);
+                  const att4DeliveredPct = deliveredTotal > 0 ? Number(((att4Count / deliveredTotal) * 100).toFixed(1)) : (metrics.laterAttemptDelivered?.percentOfDelivered ?? 0);
+
+                  return (
+                    <>
+                      <div className="mt-4 space-y-3">
+                        {/* First Attempt */}
                         <div
-                          className="h-full bg-rose-500 rounded-full transition-all duration-500"
-                          style={{ width: `${Math.min(100, Math.max(2, metrics.laterAttemptDelivered.percent))}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
+                          onClick={() => setSelectedAttemptCohort(1)}
+                          className="p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:border-emerald-500/40 hover:bg-emerald-500/10 cursor-pointer transition-all duration-150 group"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="size-2.5 rounded-full bg-emerald-500" />
+                              <span className="font-bold text-xs text-foreground group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition">
+                                1st Attempt Delivery
+                              </span>
+                              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-700 dark:text-emerald-300">
+                                Initial Run
+                              </span>
+                            </div>
 
-                <div className="mt-4 pt-3 border-t border-border/60 flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Based on recorded delivery attempts before status resolution</span>
-                  <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                    {metrics.firstAttemptDelivered.percent}% delivered immediately
-                  </span>
-                </div>
+                            {/* Numbers and Percentages clearly separated */}
+                            <div className="flex items-center gap-2.5 text-xs flex-wrap">
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-[11px] text-muted-foreground">Delivered:</span>
+                                <strong className="text-sm font-extrabold text-foreground">
+                                  {formatNumber(att1Count)}
+                                </strong>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-500/20 text-emerald-800 dark:text-emerald-200">
+                                  {att1ShippedPct}% of Shipped
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-muted text-muted-foreground">
+                                  {att1DeliveredPct}% of Delivered
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="size-6 rounded-md bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 flex items-center justify-center opacity-80 group-hover:opacity-100 transition"
+                                title="View 1st Attempt Histogram & Orders"
+                              >
+                                <ArrowUpRight size={13} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="h-2 w-full bg-muted/60 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+                              style={{ width: `${Math.min(100, att1ShippedPct)}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Second Attempt */}
+                        <div
+                          onClick={() => setSelectedAttemptCohort(2)}
+                          className="p-3 rounded-xl border border-amber-500/20 bg-amber-500/5 hover:border-amber-500/40 hover:bg-amber-500/10 cursor-pointer transition-all duration-150 group"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="size-2.5 rounded-full bg-amber-500" />
+                              <span className="font-bold text-xs text-foreground group-hover:text-amber-600 dark:group-hover:text-amber-400 transition">
+                                2nd Attempt Delivery
+                              </span>
+                              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                                1st Re-attempt
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2.5 text-xs flex-wrap">
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-[11px] text-muted-foreground">Delivered:</span>
+                                <strong className="text-sm font-extrabold text-foreground">
+                                  {formatNumber(att2Count)}
+                                </strong>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/20 text-amber-800 dark:text-amber-200">
+                                  {att2ShippedPct}% of Shipped
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-muted text-muted-foreground">
+                                  {att2DeliveredPct}% of Delivered
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="size-6 rounded-md bg-amber-500/20 text-amber-700 dark:text-amber-300 flex items-center justify-center opacity-80 group-hover:opacity-100 transition"
+                                title="View 2nd Attempt Histogram & Orders"
+                              >
+                                <ArrowUpRight size={13} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="h-2 w-full bg-muted/60 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                              style={{ width: `${Math.min(100, Math.max(3, att2ShippedPct * 3))}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Third Attempt */}
+                        <div
+                          onClick={() => setSelectedAttemptCohort(3)}
+                          className="p-3 rounded-xl border border-orange-500/20 bg-orange-500/5 hover:border-orange-500/40 hover:bg-orange-500/10 cursor-pointer transition-all duration-150 group"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="size-2.5 rounded-full bg-orange-500" />
+                              <span className="font-bold text-xs text-foreground group-hover:text-orange-600 dark:group-hover:text-orange-400 transition">
+                                3rd Attempt Delivery
+                              </span>
+                              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-orange-500/20 text-orange-700 dark:text-orange-300">
+                                2nd Re-attempt
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2.5 text-xs flex-wrap">
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-[11px] text-muted-foreground">Delivered:</span>
+                                <strong className="text-sm font-extrabold text-foreground">
+                                  {formatNumber(att3Count)}
+                                </strong>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-orange-500/20 text-orange-800 dark:text-orange-200">
+                                  {att3ShippedPct}% of Shipped
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-muted text-muted-foreground">
+                                  {att3DeliveredPct}% of Delivered
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="size-6 rounded-md bg-orange-500/20 text-orange-700 dark:text-orange-300 flex items-center justify-center opacity-80 group-hover:opacity-100 transition"
+                                title="View 3rd Attempt Histogram & Orders"
+                              >
+                                <ArrowUpRight size={13} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="h-2 w-full bg-muted/60 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-orange-500 rounded-full transition-all duration-500"
+                              style={{ width: `${Math.min(100, Math.max(2, att3ShippedPct * 5))}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Later Attempt */}
+                        {att4Count > 0 && (
+                          <div
+                            onClick={() => setSelectedAttemptCohort(4)}
+                            className="p-3 rounded-xl border border-rose-500/20 bg-rose-500/5 hover:border-rose-500/40 hover:bg-rose-500/10 cursor-pointer transition-all duration-150 group"
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mb-2">
+                              <div className="flex items-center gap-2">
+                                <span className="size-2.5 rounded-full bg-rose-500" />
+                                <span className="font-bold text-xs text-foreground group-hover:text-rose-600 dark:group-hover:text-rose-400 transition">
+                                  4th+ Attempt Delivery
+                                </span>
+                                <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-700 dark:text-rose-300">
+                                  Escalated
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2.5 text-xs flex-wrap">
+                                <div className="flex items-baseline gap-1">
+                                  <span className="text-[11px] text-muted-foreground">Delivered:</span>
+                                  <strong className="text-sm font-extrabold text-foreground">
+                                    {formatNumber(att4Count)}
+                                  </strong>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-500/20 text-rose-800 dark:text-rose-200">
+                                    {att4ShippedPct}% of Shipped
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-muted text-muted-foreground">
+                                    {att4DeliveredPct}% of Delivered
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="size-6 rounded-md bg-rose-500/20 text-rose-700 dark:text-rose-300 flex items-center justify-center opacity-80 group-hover:opacity-100 transition"
+                                  title="View 4th+ Attempt Histogram & Orders"
+                                >
+                                  <ArrowUpRight size={13} />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="h-2 w-full bg-muted/60 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-rose-500 rounded-full transition-all duration-500"
+                                style={{ width: `${Math.min(100, Math.max(2, att4ShippedPct * 5))}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="mt-4 pt-3 border-t border-border/60 flex items-center justify-between text-xs text-muted-foreground flex-wrap gap-2">
+                        <span className="text-primary font-medium flex items-center gap-1">
+                          <ArrowUpRight size={12} /> Click any attempt row to open dedicated Histogram Lightbox
+                        </span>
+                        <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                          {att1ShippedPct}% initial run delivery rate ({att1DeliveredPct}% of deliveries)
+                        </span>
+                      </div>
+                    </>
+                  );
+                })()}
               </article>
 
               {/* COD vs Prepaid Ratio & Delivery Rates */}
@@ -2584,6 +2801,39 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                   <div className="p-3 bg-muted/30 border-b border-border text-xs text-muted-foreground">
                     <strong className="text-foreground">Order Cohort Maturation:</strong> Each row tracks orders placed on that calendar date. Recent orders (0–2 days old) are in fulfillment & line-haul transit, maturing into deliveries over 2–4 days.
                   </div>
+                  {(() => {
+                    const asc = [...(dateWise || [])].sort((a, b) => a.date.localeCompare(b.date));
+                    return (
+                      <div className="p-4 border-b border-border space-y-6">
+                        <div>
+                          <h4 className="text-xs font-bold text-foreground mb-1">Delivery % vs RTO % — day by day</h4>
+                          <TrendLineChart
+                            labels={asc.map((d) => d.date)}
+                            formatLabel={(l) => l.slice(5)}
+                            yMax={100}
+                            series={[
+                              { key: "dr", label: "Delivery % (of shipped)", color: "#10b981", values: asc.map((d) => d.deliveryRate) },
+                              { key: "rr", label: "RTO % (of shipped)", color: "#f43f5e", values: asc.map((d) => d.rtoRate), fill: false },
+                            ]}
+                          />
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-bold text-foreground mb-1">Order volume — day by day</h4>
+                          <TrendLineChart
+                            unit=""
+                            labels={asc.map((d) => d.date)}
+                            formatLabel={(l) => l.slice(5)}
+                            series={[
+                              { key: "tot", label: "Orders placed", color: "#6366f1", values: asc.map((d) => d.total) },
+                              { key: "del", label: "Delivered", color: "#10b981", values: asc.map((d) => d.delivered), fill: false },
+                              { key: "rto", label: "RTO", color: "#f43f5e", values: asc.map((d) => d.rto), fill: false },
+                              { key: "ndr", label: "NDR", color: "#f59e0b", values: asc.map((d) => d.ndr), fill: false },
+                            ]}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs">
                       <thead className="border-b border-border bg-muted/40 font-semibold text-muted-foreground">
@@ -2676,6 +2926,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                         <th className="py-3 px-4 text-right">Delivered</th>
                         <th className="py-3 px-4 text-right">Delivery % (Shipped)</th>
                         <th className="py-3 px-4 text-right">Closed Delivery %</th>
+                        <th className="py-3 px-4 text-right">Avg TAT</th>
                         <th className="py-3 px-4 text-right">RTO Count</th>
                         <th className="py-3 px-4 text-right">RTO %</th>
                       </tr>
@@ -2712,6 +2963,9 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                           <td className="py-3 px-4 text-right text-muted-foreground font-medium">
                             {s.closed === 0 ? "—" : `${s.closedDeliveryRate}%`}
                           </td>
+                          <td className="py-3 px-4 text-right text-foreground font-mono font-medium">
+                            {s.avgTatDays != null ? `${s.avgTatDays} d` : "—"}
+                          </td>
                           <td className="py-3 px-4 text-right text-destructive">{formatNumber(s.rto)}</td>
                           <td className="py-3 px-4 text-right text-destructive font-medium">
                             {s.shipped === 0 ? "—" : `${s.rtoRate}%`}
@@ -2720,7 +2974,7 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                       ))}
                       {filteredStates.length === 0 && (
                         <tr>
-                          <td colSpan={8} className="py-8 text-center text-xs text-muted-foreground">
+                          <td colSpan={9} className="py-8 text-center text-xs text-muted-foreground">
                             No state data found matching your search.
                           </td>
                         </tr>
@@ -2730,43 +2984,29 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
                 </div>
               )}
 
-              {/* 4. NDR REASONS BREAKDOWN */}
+              {/* 4. NDR REASONS BREAKDOWN - PLOTTED DISTRIBUTION */}
               {activeTab === "ndr" && (
-                <div className="p-5 space-y-4">
-                  <div className="border-b border-border/60 pb-3">
-                    <h3 className="text-sm font-bold text-foreground">Top Non-Delivery Reasons (NDR)</h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Detailed causes recorded when delivery attempts encountered exceptions
-                    </p>
-                  </div>
-
-                  <div className="space-y-3">
-                    {filteredNdrReasons.map((item) => (
-                      <div key={item.reason} className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-foreground" title={item.reason}>
-                            {item.reason}
-                          </span>
-                          <span className="text-muted-foreground">
-                            <strong className="text-foreground">{formatNumber(item.count)}</strong> incidents (
-                            {item.percent}% of NDRs)
-                          </span>
-                        </div>
-                        <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-amber-500 rounded-full transition-all duration-500"
-                            style={{ width: `${Math.min(100, (item.count / maxNdrCount) * 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                    {filteredNdrReasons.length === 0 && (
-                      <div className="py-12 text-center text-xs text-muted-foreground">
-                        No NDR reasons recorded for this cohort.
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <NdrReasonsPlot
+                  reasons={data?.ndrReasons || []}
+                  totals={data?.ndrAttemptTotals}
+                  subSearch={subSearch}
+                  productName={product}
+                  filters={{
+                    from: from || undefined,
+                    to: to || undefined,
+                    courier: courier || undefined,
+                    payment: payment || undefined,
+                    state: state || undefined,
+                    product: product || undefined,
+                  }}
+                  onOpenOrderTimeline={(ord) => {
+                    setSelectedOrderTimelineModal({
+                      id: ord.id,
+                      channelOrderId: ord.channelOrderId,
+                      awb: ord.awb,
+                    });
+                  }}
+                />
               )}
 
               {/* 5. PRODUCT-WISE DELIVERY % */}
@@ -2835,6 +3075,80 @@ export default function AnalyticsPanel({ active, mode = "overview", preview = fa
           </div>
         )}
       </div>
+
+      <ExceptionsLightbox
+        type={exceptionsLightbox}
+        onClose={() => setExceptionsLightbox(null)}
+        filters={{
+          from: from || undefined,
+          to: to || undefined,
+          courier: courier || undefined,
+          payment: payment || undefined,
+          state: state || undefined,
+          product: product || undefined,
+        }}
+        onOpenOrderTimeline={(ord) => {
+          setSelectedOrderTimelineModal({ id: ord.id as number, channelOrderId: ord.channelOrderId, awb: ord.awb });
+        }}
+      />
+
+      {/* DEDICATED ATTEMPT COHORT LIGHTBOX WITH HISTOGRAMS */}
+      {selectedAttemptCohort !== null && (
+        <DeliveryAttemptLightbox
+          isOpen={selectedAttemptCohort !== null}
+          onClose={() => setSelectedAttemptCohort(null)}
+          attempt={selectedAttemptCohort}
+          filters={{
+            from: from || undefined,
+            to: to || undefined,
+            courier: courier || undefined,
+            payment: payment || undefined,
+            state: state || undefined,
+            product: product || undefined,
+          }}
+          onOpenOrderTimeline={(ord) => {
+            setSelectedOrderTimelineModal({
+              id: ord.id,
+              channelOrderId: ord.channelOrderId,
+              awb: ord.awb,
+            });
+          }}
+        />
+      )}
+
+      {/* ORDER ATTEMPTS TIMELINE MODAL */}
+      {selectedOrderTimelineModal && (
+        <div className="fixed inset-0 z-60 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-xl shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-4 border-b border-border flex items-center justify-between bg-muted/20">
+              <div>
+                <h3 className="text-sm font-bold text-foreground">
+                  Order Attempt Progression — #{selectedOrderTimelineModal.channelOrderId || selectedOrderTimelineModal.id}
+                </h3>
+                {selectedOrderTimelineModal.awb && (
+                  <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                    AWB: {selectedOrderTimelineModal.awb}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedOrderTimelineModal(null)}
+                className="size-7 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto">
+              <OrderAttemptsTimeline
+                orderId={selectedOrderTimelineModal.id}
+                channelOrderId={selectedOrderTimelineModal.channelOrderId}
+                awb={selectedOrderTimelineModal.awb}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

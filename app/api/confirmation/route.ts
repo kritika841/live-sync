@@ -113,6 +113,46 @@ async function handleGET(request: Request) {
     return Response.json({ logs: logs.results });
   }
 
+  if (section === "call_logs") {
+    // Full agent call history (notes, outcomes, who called) — managers/admins only.
+    if (!["admin", "operations", "support_manager"].includes(access.user.role) && !isAdmin(access.user)) {
+      return Response.json({ error: "Administrator access required" }, { status: 403 });
+    }
+    const logFrom = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? String(url.searchParams.get("from")) : "";
+    const logTo = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? String(url.searchParams.get("to")) : "";
+    const outcome = String(url.searchParams.get("outcome") || "");
+    const logAgent = String(url.searchParams.get("agent") || "");
+    const q = String(url.searchParams.get("q") || "").trim();
+    const where: string[] = [];
+    const vals: unknown[] = [];
+    if (logFrom) { where.push("SUBSTR(a.created_at, 1, 10) >= ?"); vals.push(logFrom); }
+    if (logTo) { where.push("SUBSTR(a.created_at, 1, 10) <= ?"); vals.push(logTo); }
+    if (["confirmed", "rejected", "callback", "unreachable"].includes(outcome)) { where.push("a.outcome = ?"); vals.push(outcome); }
+    if (logAgent) { where.push("a.actor_id = ?"); vals.push(logAgent); }
+    if (q) {
+      where.push("(LOWER(a.note) LIKE ? OR LOWER(o.channel_order_id) LIKE ? OR LOWER(o.customer_name) LIKE ? OR o.customer_phone LIKE ?)");
+      const like = `%${q.toLowerCase()}%`;
+      vals.push(like, like, like, `%${q}%`);
+    }
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const logLimit = Math.max(1, Math.min(1000, Number(url.searchParams.get("limit")) || 300));
+    const [rows, totals] = await Promise.all([
+      runtime.DB.prepare(`
+        SELECT a.id, a.order_id AS "orderId", o.channel_order_id AS "channelOrderId", o.customer_name AS "customerName",
+          o.customer_phone AS "customerPhone", o.total, a.attempt_number AS "attemptNumber", a.outcome, a.note,
+          a.rejection_reason AS "rejectionReason", a.callback_at AS "callbackAt", a.next_action_at AS "nextActionAt",
+          a.created_at AS "createdAt", a.actor_id AS "actorId", a.actor_name AS "actorName", a.actor_role AS "actorRole"
+        FROM confirmation_attempts a LEFT JOIN orders o ON o.id = a.order_id
+        ${clause} ORDER BY a.created_at DESC, a.id DESC LIMIT ${logLimit}
+      `).bind(...vals).all<Record<string, unknown>>(),
+      runtime.DB.prepare(`
+        SELECT a.outcome AS outcome, COUNT(*)::int AS count
+        FROM confirmation_attempts a LEFT JOIN orders o ON o.id = a.order_id ${clause} GROUP BY a.outcome
+      `).bind(...vals).all<{ outcome: string; count: number }>(),
+    ]);
+    return Response.json({ logs: rows.results, totals: totals.results });
+  }
+
   if (section === "campaigns") {
     const [campaigns, candidates] = await Promise.all([
       runtime.DB.prepare(`SELECT c.id, c.name, c.description, c.criteria_json AS criteriaJson, c.position,
@@ -160,7 +200,7 @@ async function handleGET(request: Request) {
   }
   const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
   const joins = "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id LEFT JOIN campaigns c ON c.id=ca.campaign_id LEFT JOIN support_agents a ON a.user_id=o.confirmation_assignee_id";
-  const queueCondition = `LOWER(COALESCE(o.payment_method, '')) != 'prepaid' AND (COALESCE(o.confirmation_status, '') IN ('pending','callback','unreachable') OR ((o.is_high_risk = TRUE OR ${HIGH_RISK_SQL}) AND COALESCE(o.confirmation_status, '') NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
+  const queueCondition = `LOWER(COALESCE(o.payment_method, '')) != 'prepaid' AND (COALESCE(o.confirmation_status, '') IN ('pending','callback','unreachable') OR (o.is_high_risk = TRUE AND COALESCE(o.confirmation_status, '') NOT IN ('confirmed','rejected'))) AND ${ACTIONABLE_STATUS_SQL}`;
 
   const listQuery = mode === "confirmed"
     ? runtime.DB.prepare(`SELECT ${orderColumns}
@@ -178,21 +218,21 @@ async function handleGET(request: Request) {
       ORDER BY COALESCE(NULLIF(o.order_date,''),o.created_at) DESC, o.id DESC LIMIT ? OFFSET ?`).bind(now, ...filterValues, limit, offset);
 
   const totalMatchingPromise = mode === "confirmed"
-    ? runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${joins} WHERE o.confirmation_status='confirmed'${extraWhere}`).bind(...filterValues).first<{ total: number }>()
+    ? runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${filters.some(f => f.includes("ca.") || f.includes("c.") || f.includes("a.")) ? joins : ""} WHERE o.confirmation_status='confirmed'${extraWhere}`).bind(...filterValues).first<{ total: number }>()
     : mode === "rejected"
-      ? runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${joins} WHERE o.confirmation_status='rejected'${extraWhere}`).bind(...filterValues).first<{ total: number }>()
+      ? runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${filters.some(f => f.includes("ca.") || f.includes("c.") || f.includes("a.")) ? joins : ""} WHERE o.confirmation_status='rejected'${extraWhere}`).bind(...filterValues).first<{ total: number }>()
       : runtime.DB.prepare(`SELECT COUNT(*) AS total FROM orders o ${joins} WHERE ${queueCondition}
           AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
             AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))${extraWhere}`).bind(now, ...filterValues).first<{ total: number }>();
 
   const dateGroupsPromise = mode === "confirmed"
     ? runtime.DB.prepare(`SELECT ${dateColumn} AS date, COUNT(*)::int AS count
-        FROM orders o ${joins} WHERE o.confirmation_status='confirmed' GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).all<{date:string;count:number}>()
+        FROM orders o WHERE o.confirmation_status='confirmed' GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).all<{date:string;count:number}>()
     : mode === "rejected"
       ? runtime.DB.prepare(`SELECT ${dateColumn} AS date, COUNT(*)::int AS count
-          FROM orders o ${joins} WHERE o.confirmation_status='rejected' GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).all<{date:string;count:number}>()
+          FROM orders o WHERE o.confirmation_status='rejected' GROUP BY 1 ORDER BY 1 DESC LIMIT 120`).all<{date:string;count:number}>()
       : runtime.DB.prepare(`SELECT ${dateColumn} AS date, COUNT(*)::int AS count
-          FROM orders o ${joins}
+          FROM orders o ${dateBasis === "allotted" ? "LEFT JOIN campaign_assignments ca ON ca.order_id=o.id" : ""}
           WHERE ${queueCondition}
             AND NOT EXISTS (SELECT 1 FROM confirmation_attempts latest WHERE latest.order_id=o.id AND latest.next_action_at<>'' AND latest.next_action_at>?
               AND latest.id=(SELECT MAX(last_attempt.id) FROM confirmation_attempts last_attempt WHERE last_attempt.order_id=o.id))
@@ -242,7 +282,7 @@ async function handleGET(request: Request) {
   const visibleIds = orders.results.map((row) => Number(row.id));
   const attemptRows = visibleIds.length ? await runtime.DB.prepare(`SELECT id, order_id AS orderId, attempt_number AS attemptNumber,
     outcome, note, call_picked AS callPicked, rejection_reason AS rejectionReason, callback_at AS callbackAt,
-    next_action_at AS nextActionAt, created_at AS createdAt FROM confirmation_attempts
+    next_action_at AS nextActionAt, created_at AS createdAt, actor_name AS "actorName" FROM confirmation_attempts
     WHERE order_id IN (${visibleIds.map(() => "?").join(",")}) ORDER BY order_id, attempt_number`).bind(...visibleIds).all<Record<string, unknown>>() : { results: [] };
   const attemptsByOrder = new Map<number, Record<string, unknown>[]>();
   for (const attempt of attemptRows.results) {
@@ -496,32 +536,48 @@ async function handlePOST(request: Request) {
     }
     const orderId = Number(body.orderId);
     if (!orderId) throw new Error("Order is required");
-    const order = await runtime.DB.prepare("SELECT id,channel_order_id AS channelOrderId,confirmation_status AS confirmationStatus FROM orders WHERE id=?").bind(orderId).first<{ id: number; channelOrderId: string; confirmationStatus: string }>();
+    const order = await runtime.DB.prepare(`
+      SELECT o.id, o.channel_order_id AS "channelOrderId", o.confirmation_status AS "confirmationStatus",
+        (SELECT COUNT(*)::int FROM confirmation_attempts WHERE order_id = o.id) AS "attemptCount"
+      FROM orders o WHERE o.id = ?
+    `).bind(orderId).first<{ id: number; channelOrderId: string; confirmationStatus: string; attemptCount: number }>();
     if (!order) throw new Error("Order was not found");
 
     if (action === "dismiss_approved") {
       if (!isAdmin(access.user)) throw new Error("Only administrators can dismiss approved orders");
       const note = String(body.note || "Dismissed by administrator").trim();
       const reason = String(body.rejectionReason || "admin_dismissed").trim();
-      const attemptCount = await runtime.DB.prepare("SELECT COUNT(*) AS total FROM confirmation_attempts WHERE order_id=?").bind(orderId).first<{ total: number }>();
-      const attemptNumber = Number(attemptCount?.total || 0) + 1;
+      const attemptNumber = Number(order.attemptCount || 0) + 1;
       await runtime.DB.batch([
         runtime.DB.prepare(`INSERT INTO confirmation_attempts
-          (order_id,attempt_number,outcome,note,call_picked,rejection_reason,created_at)
-          VALUES (?,?,'rejected',?,TRUE,?,?)`).bind(orderId, attemptNumber, note, reason, now),
+          (order_id,attempt_number,outcome,note,call_picked,rejection_reason,created_at,actor_id,actor_name,actor_role)
+          VALUES (?,?,'rejected',?,TRUE,?,?,?,?,?)`).bind(orderId, attemptNumber, note, reason, now, access.user.id, access.user.name, access.user.role),
         runtime.DB.prepare("UPDATE orders SET confirmation_status='rejected',confirmation_updated_at=?,confirmed_at='',rejected_at=? WHERE id=?").bind(now, now, orderId),
         runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation','order.dismissed_approved','info',?,?,?,?,?,?)")
           .bind(`Order ${order.channelOrderId} approval dismissed by admin`, JSON.stringify({ orderId, note, actorId: access.user.id, actorName: access.user.name }), now, access.user.id, access.user.name, access.user.role),
       ]);
       invalidateCache("confirmation-summary-counts");
-      return Response.json({ ok: true, status: "rejected" });
+      return Response.json({
+        ok: true,
+        status: "rejected",
+        orderId,
+        attempt: {
+          attemptNumber,
+          outcome: "rejected",
+          note,
+          callPicked: true,
+          rejectionReason: reason,
+          createdAt: now,
+        },
+        rejectedAt: now,
+        confirmationUpdatedAt: now,
+      });
     }
 
     if (["confirmed", "rejected"].includes(order.confirmationStatus)) throw new Error("This order has already been completed");
     const note = String(body.note || "").trim();
     if (!note) throw new Error("A note is required");
-    const attemptCount = await runtime.DB.prepare("SELECT COUNT(*) AS total FROM confirmation_attempts WHERE order_id=?").bind(orderId).first<{ total: number }>();
-    const attemptNumber = Number(attemptCount?.total || 0) + 1;
+    const attemptNumber = Number(order.attemptCount || 0) + 1;
     if (["callback", "unreachable"].includes(action) && attemptNumber > 3) throw new Error("Only three recall attempts are allowed");
     if (!["confirm", "callback", "unreachable", "reject"].includes(action)) throw new Error("Unsupported confirmation action");
     const outcome = action === "confirm" ? "confirmed" : action === "reject" ? "rejected" : action;
@@ -533,15 +589,32 @@ async function handlePOST(request: Request) {
     const rejectedAt = action === "reject" ? now : "";
     await runtime.DB.batch([
       runtime.DB.prepare(`INSERT INTO confirmation_attempts
-        (order_id,attempt_number,outcome,note,call_picked,rejection_reason,callback_at,next_action_at,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)`).bind(orderId, attemptNumber, outcome, note, action !== "unreachable", reason, callbackAt, nextActionAt, now),
+        (order_id,attempt_number,outcome,note,call_picked,rejection_reason,callback_at,next_action_at,created_at,actor_id,actor_name,actor_role)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(orderId, attemptNumber, outcome, note, action !== "unreachable", reason, callbackAt, nextActionAt, now, access.user.id, access.user.name, access.user.role),
       runtime.DB.prepare(`UPDATE orders SET confirmation_status=?,confirmation_updated_at=?,confirmed_at=CASE WHEN ?<>'' THEN ? ELSE confirmed_at END,
         rejected_at=CASE WHEN ?<>'' THEN ? ELSE rejected_at END WHERE id=?`).bind(outcome, now, confirmedAt, confirmedAt, rejectedAt, rejectedAt, orderId),
       runtime.DB.prepare("INSERT INTO activity_logs (source,event_type,level,message,details_json,created_at,actor_id,actor_name,actor_role) VALUES ('confirmation',?,'info',?,?,?,?,?,?)")
         .bind(`order.${outcome}`, `Order ${order.channelOrderId} marked ${outcome}`, JSON.stringify({ orderId, note, rejectionReason: reason, nextActionAt, actorId: access.user.id, actorName: access.user.name, actorRole: access.user.role }), now, access.user.id, access.user.name, access.user.role),
     ]);
     invalidateCache("confirmation-summary-counts");
-    return Response.json({ ok: true, status: outcome });
+    return Response.json({
+      ok: true,
+      status: outcome,
+      orderId,
+      attempt: {
+        attemptNumber,
+        outcome,
+        note,
+        callPicked: action !== "unreachable",
+        rejectionReason: reason,
+        callbackAt,
+        nextActionAt,
+        createdAt: now,
+      },
+      confirmedAt,
+      rejectedAt,
+      confirmationUpdatedAt: now,
+    });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Confirmation action failed" }, { status: 422 });
   }

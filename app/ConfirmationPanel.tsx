@@ -2,6 +2,7 @@
 
 import { completePhone } from "../lib/contact";
 import { Modal } from "./Modal";
+import { CallLogModal } from "../components/CallLogModal";
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   PhoneCall, PhoneMissed, CheckCircle2, GripVertical, MoreHorizontal, Search,
@@ -1066,6 +1067,8 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   const [inspectingLogsLoading, setInspectingLogsLoading] = useState(false);
 
   const isCustomerSupportAgent = userRole === "customer_support" || userRole === "support_agent";
+  const [callLogOpen, setCallLogOpen] = useState(false);
+  const canViewCallLog = isAdmin || userRole === "operations" || userRole === "support_manager";
 
   const delayedOrdersNeedingPrompt = useMemo(() => {
     if (isCustomerSupportAgent) return [];
@@ -1292,7 +1295,8 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
           o.id === orderId ? { ...o, delayReason: result.delayReason || "", delayReasonUpdatedAt: result.delayReasonUpdatedAt || "" } : o
         ),
       }));
-      await load(true);
+      confirmationDataCache.clear();
+      void load(true);
       return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Failed to record delay reason");
@@ -1374,7 +1378,7 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
       loadAbort.current?.abort();
       loadAbort.current = null;
       confirmationDataCache.clear();
-      await load(true);
+      void load(true);
       return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Action failed");
@@ -1484,9 +1488,129 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
 
   async function submitOrderAction(event: FormEvent) {
     event.preventDefault();
-    if (!selectedOrder) return;
-    const complete = await post({ action: orderAction, orderId: selectedOrder.id, note, callbackAt: callbackAt ? new Date(callbackAt).toISOString() : "", rejectionReason });
-    if (complete) setSelectedOrder(null);
+    if (!selectedOrder || busy) return;
+    if (preview) { setError("Connection unavailable in preview"); return; }
+
+    const targetOrder = selectedOrder;
+    const action = orderAction;
+    const noteText = note.trim();
+    if (!noteText) {
+      setError("A note is required");
+      return;
+    }
+    const targetCallbackAt = callbackAt ? new Date(callbackAt).toISOString() : "";
+    const targetReason = rejectionReason;
+
+    setBusy(true);
+    setError("");
+
+    try {
+      const response = await fetch("/api/confirmation", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-requested-with": "satmi-orders-dashboard" },
+        body: JSON.stringify({
+          action,
+          orderId: targetOrder.id,
+          note: noteText,
+          callbackAt: targetCallbackAt,
+          rejectionReason: targetReason,
+        }),
+      });
+      const result = await readJson<{
+        ok: boolean;
+        status?: string;
+        orderId?: number;
+        attempt?: Attempt;
+        confirmedAt?: string;
+        rejectedAt?: string;
+        confirmationUpdatedAt?: string;
+        error?: string;
+      }>(response);
+
+      if (!result.ok) {
+        throw new Error(result.error || "Action failed");
+      }
+
+      // 1. Immediately dismiss modal so agent is never blocked
+      setSelectedOrder(null);
+      setNote("");
+      setCallbackAt("");
+
+      const now = new Date().toISOString();
+      const outcome = action === "confirm" ? "confirmed" : action === "reject" ? "rejected" : action;
+      const newAttempt: Attempt = result.attempt || {
+        attemptNumber: (targetOrder.attempts?.length || 0) + 1,
+        outcome,
+        note: noteText,
+        rejectionReason: targetReason,
+        nextActionAt: targetCallbackAt,
+        createdAt: now,
+      };
+
+      // 2. Optimistically update local state immediately
+      setData((current) => {
+        let nextQueue = current.queue;
+        let nextConfirmed = current.confirmed;
+        let nextRejected = current.rejected;
+        const nextCounts = { ...current.counts };
+
+        if (action === "confirm") {
+          nextQueue = current.queue.filter((o) => o.id !== targetOrder.id);
+          const updated: ConfirmationOrder = {
+            ...targetOrder,
+            confirmationStatus: "confirmed",
+            confirmedAt: result.confirmedAt || now,
+            confirmationUpdatedAt: result.confirmationUpdatedAt || now,
+            attempts: [...(targetOrder.attempts || []), newAttempt],
+          };
+          nextConfirmed = [updated, ...current.confirmed.filter((o) => o.id !== targetOrder.id)];
+          nextCounts.queue = Math.max(0, (nextCounts.queue || 0) - 1);
+          nextCounts.confirmed = (nextCounts.confirmed || 0) + 1;
+          nextCounts.approved = (nextCounts.approved || 0) + 1;
+        } else if (action === "reject") {
+          nextQueue = current.queue.filter((o) => o.id !== targetOrder.id);
+          const updated: ConfirmationOrder = {
+            ...targetOrder,
+            confirmationStatus: "rejected",
+            rejectedAt: result.rejectedAt || now,
+            confirmationUpdatedAt: result.confirmationUpdatedAt || now,
+            attempts: [...(targetOrder.attempts || []), newAttempt],
+          };
+          nextRejected = [updated, ...current.rejected.filter((o) => o.id !== targetOrder.id)];
+          nextCounts.queue = Math.max(0, (nextCounts.queue || 0) - 1);
+          nextCounts.rejected = (nextCounts.rejected || 0) + 1;
+        } else {
+          // Callback or unreachable: update order in place with new attempt
+          const updated: ConfirmationOrder = {
+            ...targetOrder,
+            confirmationStatus: outcome,
+            confirmationUpdatedAt: result.confirmationUpdatedAt || now,
+            attempts: [...(targetOrder.attempts || []), newAttempt],
+          };
+          nextQueue = current.queue.map((o) => (o.id === targetOrder.id ? updated : o));
+        }
+
+        const totalDiff = (action === "confirm" || action === "reject") && current.total ? 1 : 0;
+        return {
+          ...current,
+          queue: nextQueue,
+          confirmed: nextConfirmed,
+          rejected: nextRejected,
+          counts: nextCounts,
+          total: current.total !== undefined ? Math.max(0, current.total - totalDiff) : current.total,
+        };
+      });
+
+      // 3. Clear cache and trigger silent background reload
+      loadAbort.current?.abort();
+      loadAbort.current = null;
+      confirmationDataCache.clear();
+      void load(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Action failed");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function createCampaign(event: FormEvent) {
@@ -1831,6 +1955,11 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
           <button disabled={busy || preview} onClick={() => void refreshContacts()}>
             {busy ? "Working…" : "Refresh Shopify phones & tags"}
           </button>
+          {canViewCallLog && (
+            <button disabled={preview} onClick={() => setCallLogOpen(true)}>
+              Agent call log
+            </button>
+          )}
           <label className="confirmation-contact-filter">
             <Search size={16} />
             <input
@@ -2393,7 +2522,26 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
                           isAdmin ? (
                             <label className="confirmation-agent-select">
                               Agent
-                              <select value={order.confirmationAssigneeId || ""} disabled={busy} onChange={(event) => void post({ action: "assign_confirmation_agent", orderId: order.id, agentId: event.target.value })}>
+                              <select
+                                value={order.confirmationAssigneeId || ""}
+                                disabled={busy}
+                                onChange={(event) => {
+                                  const newAgentId = event.target.value;
+                                  const agentObj = data.agents.find((a) => a.userId === newAgentId);
+                                  const agentName = agentObj ? agentObj.name : "";
+                                  setData((current) => {
+                                    const update = (orders: ConfirmationOrder[]) =>
+                                      orders.map((o) => (o.id === order.id ? { ...o, confirmationAssigneeId: newAgentId, confirmationAssigneeName: agentName } : o));
+                                    return {
+                                      ...current,
+                                      queue: update(current.queue),
+                                      confirmed: update(current.confirmed),
+                                      rejected: update(current.rejected),
+                                    };
+                                  });
+                                  void post({ action: "assign_confirmation_agent", orderId: order.id, agentId: newAgentId });
+                                }}
+                              >
                                 <option key="unassigned" value="">Unassigned</option>
                                 {data.agents.map((agent) => <option key={agent.userId} value={agent.userId}>{agent.name}</option>)}
                               </select>
@@ -2722,6 +2870,8 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
           onDismiss={handleDismissDelayedOrder}
         />
       )}
+
+      {canViewCallLog && <CallLogModal open={callLogOpen} onClose={() => setCallLogOpen(false)} agents={data.agents} />}
 
       {/* DELAY LOGS AUDIT TRAIL MODAL (CLICKABLE FROM DELAY PILL) */}
       <Modal

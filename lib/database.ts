@@ -336,31 +336,49 @@ export async function ensureSchema(db: PostgresDatabase) {
   return schemaReady;
 }
 
-const confirmationSchemaRevision = "2026-09-24-delay-logs";
-export async function ensureConfirmationSchema(db: PostgresDatabase) {
-  await ensureSchema(db);
-  const current = await db.prepare("SELECT value FROM sync_state WHERE key='confirmation_schema_revision'").first<{value:string}>().catch(() => null);
-  if (current?.value === confirmationSchemaRevision) return;
+const confirmationSchemaRevision = "2026-10-21-attempt-actor";
+let confirmationSchemaChecked = false;
+let confirmationSchemaPromise: Promise<void> | undefined;
 
-  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_assignee_id TEXT NOT NULL DEFAULT ''").run().catch(() => null);
-  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delay_reason TEXT NOT NULL DEFAULT ''").run().catch(() => null);
-  await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delay_reason_updated_at TEXT NOT NULL DEFAULT ''").run().catch(() => null);
-  await db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_assignee ON orders (confirmation_assignee_id, confirmation_status, confirmation_updated_at DESC)").run().catch(() => null);
-  await db.prepare(`CREATE TABLE IF NOT EXISTS confirmation_delay_logs (
-    id BIGSERIAL PRIMARY KEY,
-    order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    channel_order_id TEXT NOT NULL DEFAULT '',
-    reason_code TEXT NOT NULL,
-    reason_text TEXT NOT NULL,
-    notes TEXT NOT NULL DEFAULT '',
-    hours_delayed DOUBLE PRECISION NOT NULL DEFAULT 0,
-    actor_id TEXT NOT NULL DEFAULT '',
-    actor_name TEXT NOT NULL DEFAULT '',
-    actor_role TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-  )`).run().catch(() => null);
-  await db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_delay_logs_order ON confirmation_delay_logs(order_id, created_at DESC)").run().catch(() => null);
-  await setSyncState(db, "confirmation_schema_revision", confirmationSchemaRevision).catch(() => null);
+export async function ensureConfirmationSchema(db: PostgresDatabase) {
+  if (confirmationSchemaChecked) return;
+  confirmationSchemaPromise ??= (async () => {
+    await ensureSchema(db);
+    const current = await db.prepare("SELECT value FROM sync_state WHERE key='confirmation_schema_revision'").first<{value:string}>().catch(() => null);
+    if (current?.value === confirmationSchemaRevision) {
+      confirmationSchemaChecked = true;
+      return;
+    }
+
+    await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_assignee_id TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+    await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delay_reason TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+    await db.prepare("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delay_reason_updated_at TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+    await db.prepare("ALTER TABLE confirmation_attempts ADD COLUMN IF NOT EXISTS actor_id TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+    await db.prepare("ALTER TABLE confirmation_attempts ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+    await db.prepare("ALTER TABLE confirmation_attempts ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT ''").run().catch(() => null);
+    await db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_attempts_created ON confirmation_attempts (created_at DESC)").run().catch(() => null);
+    await db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_confirmation_assignee ON orders (confirmation_assignee_id, confirmation_status, confirmation_updated_at DESC)").run().catch(() => null);
+    await db.prepare(`CREATE TABLE IF NOT EXISTS confirmation_delay_logs (
+      id BIGSERIAL PRIMARY KEY,
+      order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      channel_order_id TEXT NOT NULL DEFAULT '',
+      reason_code TEXT NOT NULL,
+      reason_text TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      hours_delayed DOUBLE PRECISION NOT NULL DEFAULT 0,
+      actor_id TEXT NOT NULL DEFAULT '',
+      actor_name TEXT NOT NULL DEFAULT '',
+      actor_role TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    )`).run().catch(() => null);
+    await db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_delay_logs_order ON confirmation_delay_logs(order_id, created_at DESC)").run().catch(() => null);
+    await setSyncState(db, "confirmation_schema_revision", confirmationSchemaRevision).catch(() => null);
+    confirmationSchemaChecked = true;
+  })().catch((err) => {
+    confirmationSchemaPromise = undefined;
+    throw err;
+  });
+  return confirmationSchemaPromise;
 }
 
 const copiedOrdersSchemaRevision = "2026-09-24-copied-logs-v1";
@@ -663,6 +681,8 @@ async function createSchema(db: PostgresDatabase) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_campaigns_position ON campaigns (is_active, position)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_campaign_assignments_campaign ON campaign_assignments (campaign_id, position)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_attempts_order ON confirmation_attempts (order_id, attempt_number)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_orders_conf_queue ON orders (confirmation_status, is_high_risk, order_date DESC) WHERE lower(payment_method) != 'prepaid'"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_confirmation_attempts_order_next ON confirmation_attempts (order_id, next_action_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_component_ledger_component ON component_ledger (component_id, created_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_inventory_products_sku ON inventory_products (sku)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_purchase_orders_status ON purchase_orders (status, expected_date)"),

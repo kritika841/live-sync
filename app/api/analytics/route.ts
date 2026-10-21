@@ -30,11 +30,32 @@ const orderAnalyticsDateSql = indiaDateSql("COALESCE(NULLIF(order_date, ''), cre
 
 const orderAttemptNumberSql = `(
   CASE
-    WHEN ndr_attempts >= 4 THEN 4
-    WHEN ndr_attempts = 3 THEN 3
+    WHEN attempt_count >= 4 THEN 4
+    WHEN attempt_count = 3 THEN 3
+    WHEN attempt_count = 2 THEN 2
+    WHEN attempt_count = 1 THEN 1
+    WHEN UPPER(status) LIKE '%4TH ATTEMPT%' THEN 4
+    WHEN UPPER(status) LIKE '%3RD ATTEMPT%' THEN 3
+    WHEN UPPER(status) LIKE '%2ND ATTEMPT%' THEN 2
+    WHEN UPPER(status) LIKE '%1ST ATTEMPT%' THEN 1
+    WHEN ndr_attempts >= 3 THEN 4
+    WHEN ndr_attempts = 2 THEN 3
+    WHEN ndr_attempts = 1 THEN 2
+    WHEN first_out_for_delivery_at != '' AND out_for_delivery_at != '' AND ${indiaDateSql("first_out_for_delivery_at")} != ${indiaDateSql("out_for_delivery_at")} THEN 2
+    ELSE 1
+  END
+)`;
+
+const ndrAttemptNumberSql = `(
+  CASE
+    WHEN ndr_attempts >= 3 THEN 3
     WHEN ndr_attempts = 2 THEN 2
     WHEN ndr_attempts = 1 THEN 1
-    WHEN first_out_for_delivery_at != '' AND out_for_delivery_at != '' AND ${indiaDateSql("first_out_for_delivery_at")} != ${indiaDateSql("out_for_delivery_at")} THEN 2
+    WHEN attempt_count >= 3 THEN 3
+    WHEN attempt_count = 2 THEN 2
+    WHEN attempt_count = 1 THEN 1
+    WHEN UPPER(status) LIKE '%3RD ATTEMPT%' OR UPPER(status) LIKE '%4TH ATTEMPT%' THEN 3
+    WHEN UPPER(status) LIKE '%2ND ATTEMPT%' THEN 2
     ELSE 1
   END
 )`;
@@ -73,29 +94,36 @@ const DEFAULT_COURIERS = [
   "OTHER",
 ];
 
-let filterOptionsCache: { couriers: string[]; states: string[]; expiresAt: number } | null = null;
+let filterOptionsCache: { couriers: string[]; states: string[]; products: string[]; expiresAt: number } | null = null;
 
-async function getFilterOptions(db: { prepare: (sql: string) => { all: <T>() => Promise<{ results: T[] }> } }): Promise<{ couriers: string[]; states: string[] }> {
+async function getFilterOptions(db: { prepare: (sql: string) => { all: <T>() => Promise<{ results: T[] }> } }): Promise<{ couriers: string[]; states: string[]; products: string[] }> {
   const now = Date.now();
   if (filterOptionsCache && filterOptionsCache.expiresAt > now) {
-    return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states };
+    return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states, products: filterOptionsCache.products };
   }
   try {
-    const [couriersRes, statesRes] = await Promise.all([
+    const [couriersRes, statesRes, productsRes] = await Promise.all([
       db.prepare("SELECT DISTINCT courier AS value FROM orders WHERE courier != '' AND courier IS NOT NULL ORDER BY courier").all<{ value: string }>(),
       db.prepare("SELECT DISTINCT customer_state AS value FROM orders WHERE customer_state != '' AND customer_state IS NOT NULL ORDER BY customer_state").all<{ value: string }>(),
+      db.prepare("SELECT title AS value FROM shopify_live_products WHERE title != '' AND title IS NOT NULL ORDER BY title").all<{ value: string }>().catch(() => ({ results: [] })),
     ]);
     const couriers = (couriersRes?.results || []).map((r) => r.value).filter(Boolean);
     const states = (statesRes?.results || []).map((r) => r.value).filter(Boolean);
+    let products = (productsRes?.results || []).map((r) => r.value).filter(Boolean);
+    if (!products.length) {
+      const dbProducts = await db.prepare("SELECT DISTINCT elem->>'name' AS value FROM orders, jsonb_array_elements(CASE WHEN products_json LIKE '[%' THEN products_json::jsonb ELSE '[]'::jsonb END) elem WHERE elem->>'name' IS NOT NULL AND elem->>'name' != '' ORDER BY value LIMIT 100").all<{ value: string }>().catch(() => ({ results: [] }));
+      products = (dbProducts?.results || []).map((r) => r.value).filter(Boolean);
+    }
     filterOptionsCache = {
       couriers: couriers.length ? couriers : DEFAULT_COURIERS,
       states,
+      products,
       expiresAt: now + 15 * 60 * 1000,
     };
-    return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states };
+    return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states, products: filterOptionsCache.products };
   } catch {
-    if (filterOptionsCache) return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states };
-    return { couriers: DEFAULT_COURIERS, states: [] };
+    if (filterOptionsCache) return { couriers: filterOptionsCache.couriers, states: filterOptionsCache.states, products: filterOptionsCache.products };
+    return { couriers: DEFAULT_COURIERS, states: [], products: [] };
   }
 }
 
@@ -356,6 +384,7 @@ async function handleGET(request: Request) {
   const courier = url.searchParams.get("courier")?.trim();
   const state = url.searchParams.get("state")?.trim();
   const risk = url.searchParams.get("risk")?.trim();
+  const product = url.searchParams.get("product")?.trim();
 
   if (from) {
     filters.push(`${orderAnalyticsDateSql} >= ?`);
@@ -379,6 +408,10 @@ async function handleGET(request: Request) {
   }
   if (risk === "high") filters.push(highRiskSql);
   if (risk === "low") filters.push(lowRiskSql);
+  if (product) {
+    filters.push("LOWER(products_json) LIKE LOWER(?)");
+    filterValues.push(`%${product}%`);
+  }
 
   const where = filters.length ? filters.join(" AND ") : "1 = 1";
   const cacheKey = `analytics-overview-${where}-${filterValues.join(":")}`;
@@ -415,6 +448,7 @@ async function handleGET(request: Request) {
       .replaceAll("courier", "o.courier")
       .replaceAll("order_date", "o.order_date")
       .replaceAll("created_at", "o.created_at")
+      .replaceAll("products_json", "o.products_json")
       .replaceAll("status", "o.status");
 
     // Execute all analytical queries concurrently for maximum performance
@@ -460,8 +494,8 @@ async function handleGET(request: Request) {
           SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${openPopulationSql} THEN 1 ELSE 0 END) AS prepaid_shipped,
           SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${deliveredSql} THEN 1 ELSE 0 END) AS prepaid_delivered,
           SUM(CASE WHEN LOWER(payment_method) = 'prepaid' AND ${closedSql} THEN 1 ELSE 0 END) AS prepaid_closed,
-          SUM(CASE WHEN (${ndrSql} OR ndr_attempts > 1 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS total_ndr_experienced,
-          SUM(CASE WHEN ${deliveredSql} AND (ndr_attempts > 1 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS ndr_delivered,
+          SUM(CASE WHEN (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS total_ndr_experienced,
+          SUM(CASE WHEN ${deliveredSql} AND (ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1) THEN 1 ELSE 0 END) AS ndr_delivered,
           AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_shipped_to_delivered_days,
           AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(COALESCE(NULLIF(order_date, ''), created_at)) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - COALESCE(NULLIF(order_date, ''), created_at)::timestamptz)) / 86400 END) AS avg_order_to_delivered_days,
           COALESCE(SUM(CASE WHEN ${deliveredSql} THEN total ELSE 0 END), 0) AS "deliveredRevenue",
@@ -475,15 +509,26 @@ async function handleGET(request: Request) {
         FROM orders WHERE ${where}
       `).bind(...filterValues).first<Record<string, unknown>>(),
 
-      // 2. NDR Reasons
+      // 2. NDR Reasons with Attempt breakdown
       runtime.DB.prepare(`
-        SELECT ${ndrReasonSql} AS reason, COUNT(*) AS count
+        SELECT 
+          ${ndrReasonSql} AS reason,
+          COUNT(*) AS count,
+          SUM(CASE WHEN ${ndrAttemptNumberSql} = 1 THEN 1 ELSE 0 END) AS attempt1_count,
+          SUM(CASE WHEN ${ndrAttemptNumberSql} = 2 THEN 1 ELSE 0 END) AS attempt2_count,
+          SUM(CASE WHEN ${ndrAttemptNumberSql} >= 3 THEN 1 ELSE 0 END) AS attempt3_plus_count
         FROM orders
-        WHERE ${where} AND (${ndrSql} OR ndr_attempts > 1 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL) OR ${orderAttemptNumberSql} > 1)
+        WHERE ${where} AND (${ndrSql} OR ndr_attempts > 0 OR (ndr_reason != '' AND ndr_reason IS NOT NULL) OR (ndr_raised_at != '' AND ndr_raised_at IS NOT NULL))
         GROUP BY reason
         ORDER BY count DESC
         LIMIT 50
-      `).bind(...filterValues).all<{ reason: string; count: number }>(),
+      `).bind(...filterValues).all<{
+        reason: string;
+        count: number;
+        attempt1_count: number;
+        attempt2_count: number;
+        attempt3_plus_count: number;
+      }>(),
 
       // 3. Courier-wise Delivery
       runtime.DB.prepare(`
@@ -519,7 +564,8 @@ async function handleGET(request: Request) {
           SUM(CASE WHEN ${openPopulationSql} THEN 1 ELSE 0 END) AS shipped,
           SUM(CASE WHEN ${deliveredSql} THEN 1 ELSE 0 END) AS delivered,
           SUM(CASE WHEN ${rtoSql} THEN 1 ELSE 0 END) AS rto,
-          SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed
+          SUM(CASE WHEN ${closedSql} THEN 1 ELSE 0 END) AS closed,
+          AVG(CASE WHEN ${deliveredSql} AND LENGTH(delivered_at) >= 10 AND LENGTH(shipped_at) >= 10 THEN EXTRACT(EPOCH FROM (delivered_at::timestamptz - shipped_at::timestamptz)) / 86400 END) AS avg_tat
         FROM orders WHERE ${where}
         GROUP BY state
         ORDER BY total DESC
@@ -531,6 +577,7 @@ async function handleGET(request: Request) {
         delivered: number;
         rto: number;
         closed: number;
+        avg_tat: number | null;
       }>(),
 
       // 5. Date-wise Delivery
@@ -676,10 +723,30 @@ async function handleGET(request: Request) {
       outForDelivery: metric(outForDelivery, shipped),
 
       // 7. Attempt breakdown
-      firstAttemptDelivered: metric(del1stAttempt, delivered > 0 ? delivered : 1),
-      secondAttemptDelivered: metric(del2ndAttempt, delivered > 0 ? delivered : 1),
-      thirdAttemptDelivered: metric(del3rdAttempt, delivered > 0 ? delivered : 1),
-      laterAttemptDelivered: metric(delLaterAttempt, delivered > 0 ? delivered : 1),
+      firstAttemptDelivered: {
+        ...metric(del1stAttempt, delivered > 0 ? delivered : 1),
+        rateOfShipped: percent(del1stAttempt, shipped),
+        percentOfDelivered: percent(del1stAttempt, delivered),
+        deliveryRate: percent(del1stAttempt, shipped),
+      },
+      secondAttemptDelivered: {
+        ...metric(del2ndAttempt, delivered > 0 ? delivered : 1),
+        rateOfShipped: percent(del2ndAttempt, shipped),
+        percentOfDelivered: percent(del2ndAttempt, delivered),
+        deliveryRate: percent(del2ndAttempt, shipped),
+      },
+      thirdAttemptDelivered: {
+        ...metric(del3rdAttempt, delivered > 0 ? delivered : 1),
+        rateOfShipped: percent(del3rdAttempt, shipped),
+        percentOfDelivered: percent(del3rdAttempt, delivered),
+        deliveryRate: percent(del3rdAttempt, shipped),
+      },
+      laterAttemptDelivered: {
+        ...metric(delLaterAttempt, delivered > 0 ? delivered : 1),
+        rateOfShipped: percent(delLaterAttempt, shipped),
+        percentOfDelivered: percent(delLaterAttempt, delivered),
+        deliveryRate: percent(delLaterAttempt, shipped),
+      },
 
       // 8. Payment ratios and delivery %
       cod: metric(cod, total),
@@ -734,7 +801,16 @@ async function handleGET(request: Request) {
       reason: r.reason,
       count: Number(r.count),
       percent: percent(Number(r.count), totalNdrExperienced),
+      attempt1Count: Number(r.attempt1_count || 0),
+      attempt2Count: Number(r.attempt2_count || 0),
+      attempt3PlusCount: Number(r.attempt3_plus_count || 0),
     })),
+    ndrAttemptTotals: {
+      all: totalNdrExperienced,
+      attempt1: ndrReasons.results.reduce((sum, r) => sum + Number(r.attempt1_count || 0), 0),
+      attempt2: ndrReasons.results.reduce((sum, r) => sum + Number(r.attempt2_count || 0), 0),
+      attempt3Plus: ndrReasons.results.reduce((sum, r) => sum + Number(r.attempt3_plus_count || 0), 0),
+    },
     courierWise: courierRows.results.map((r) => ({
       name: r.name,
       total: Number(r.total),
@@ -758,6 +834,7 @@ async function handleGET(request: Request) {
       deliveryRate: percent(Number(r.delivered), Number(r.shipped)),
       closedDeliveryRate: percent(Number(r.delivered), Number(r.closed)),
       rtoRate: percent(Number(r.rto), Number(r.shipped)),
+      avgTatDays: r.avg_tat != null ? Math.round(Number(r.avg_tat) * 10) / 10 : null,
     })),
     dateWise: dateRows.results.map((r) => ({
       date: r.dt,

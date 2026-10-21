@@ -175,6 +175,8 @@ const DEFAULT_ORDER_TAGS = [
       delivered_at AS deliveredAt, status,
       payment_method AS paymentMethod, payment_status AS paymentStatus, total,
       pickup_location AS pickupLocation, awb, courier, products_json AS productsJson,
+      ndr_reason AS ndrReason, ndr_attempts AS ndrAttempts, ndr_raised_at AS ndrRaisedAt,
+      first_out_for_delivery_at AS firstOutForDeliveryAt, out_for_delivery_at AS outForDeliveryAt,
       synced_at AS syncedAt, confirmation_status AS confirmationStatus,
       confirmation_updated_at AS confirmationUpdatedAt, confirmed_at AS confirmedAt, rejected_at AS rejectedAt,
       copied_at AS copiedAt, copied_by AS copiedBy, copied_by_name AS copiedByName, copied_count AS copiedCount,

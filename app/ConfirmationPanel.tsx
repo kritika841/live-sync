@@ -18,6 +18,7 @@ type ConfirmationOrder = {
   awb?: string; courier?: string; shippedAt?: string; deliveredAt?: string;
   paymentMethod: string; total: number; products: Array<{ name?: string; quantity?: number; sku?: string }>;
   confirmationStatus: string; campaignName?: string; confirmedAt?: string; rejectedAt?: string; phoneMasked?: boolean; tags: string[]; attempts: Attempt[];
+  isCartUpsell?: boolean;
   confirmationAssigneeId?: string; confirmationAssigneeName?: string;
   assignedAt?: string; confirmationUpdatedAt?: string;
   delayReason?: string; delayReasonUpdatedAt?: string;
@@ -65,6 +66,11 @@ type ConfirmationData = {
   hasMore?: boolean;
   nextOffset?: number;
   delayedOrders?: DelayedConfirmedOrder[];
+  settings?: {
+    persistentConfirmationQueue?: boolean;
+    callbackDelayHours?: number;
+    cartUpsellTag?: string;
+  };
 };
 type Mode = "queue" | "confirmed" | "rejected";
 type OrderAction = "confirm" | "callback" | "unreachable" | "reject";
@@ -1458,7 +1464,20 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
   }
 
   function openAction(order: ConfirmationOrder, action: OrderAction) {
-    setSelectedOrder(order); setOrderAction(action); setNote(""); setCallbackAt(""); setRejectionReason("customer_cancelled");
+    setSelectedOrder(order);
+    setOrderAction(action);
+    setNote("");
+    setRejectionReason("customer_cancelled");
+    if (action === "callback") {
+      const delayHours = Number(data.settings?.callbackDelayHours);
+      const effectiveHours = Number.isFinite(delayHours) && delayHours > 0 ? delayHours : 24;
+      const targetDate = new Date(Date.now() + effectiveHours * 60 * 60 * 1000);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const localStr = `${targetDate.getFullYear()}-${pad(targetDate.getMonth() + 1)}-${pad(targetDate.getDate())}T${pad(targetDate.getHours())}:${pad(targetDate.getMinutes())}`;
+      setCallbackAt(localStr);
+    } else {
+      setCallbackAt("");
+    }
   }
 
   function confirmationTags(order: ConfirmationOrder) {
@@ -1580,17 +1599,29 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
           nextCounts.queue = Math.max(0, (nextCounts.queue || 0) - 1);
           nextCounts.rejected = (nextCounts.rejected || 0) + 1;
         } else {
-          // Callback or unreachable: update order in place with new attempt
-          const updated: ConfirmationOrder = {
-            ...targetOrder,
-            confirmationStatus: outcome,
-            confirmationUpdatedAt: result.confirmationUpdatedAt || now,
-            attempts: [...(targetOrder.attempts || []), newAttempt],
-          };
-          nextQueue = current.queue.map((o) => (o.id === targetOrder.id ? updated : o));
+          // Callback or unreachable: update order in place if persistent queue is enabled, otherwise remove until cooldown expires
+          const isPersistent = Boolean(current.settings?.persistentConfirmationQueue);
+          const exhaustedAttempts = (targetOrder.attempts?.length || 0) + 1 >= 3;
+          if (!isPersistent || exhaustedAttempts) {
+            nextQueue = current.queue.filter((o) => o.id !== targetOrder.id);
+            nextCounts.queue = Math.max(0, (nextCounts.queue || 0) - 1);
+          } else {
+            const updated: ConfirmationOrder = {
+              ...targetOrder,
+              confirmationStatus: outcome,
+              confirmationUpdatedAt: result.confirmationUpdatedAt || now,
+              attempts: [...(targetOrder.attempts || []), newAttempt],
+            };
+            nextQueue = current.queue.map((o) => (o.id === targetOrder.id ? updated : o));
+          }
         }
 
-        const totalDiff = (action === "confirm" || action === "reject") && current.total ? 1 : 0;
+        const isRemovedFromQueue =
+          action === "confirm" ||
+          action === "reject" ||
+          !current.settings?.persistentConfirmationQueue ||
+          (targetOrder.attempts?.length || 0) + 1 >= 3;
+        const totalDiff = isRemovedFromQueue && current.total ? 1 : 0;
         return {
           ...current,
           queue: nextQueue,
@@ -2402,7 +2433,27 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
                         <div className="sheets-grid-row" role="row" key={order.id}>
                           <div className="sheets-grid-cell sheets-row-num" role="cell">{rowNumber}</div>
                           <div className="sheets-grid-cell sheets-col-order" role="cell">
-                            <strong>#{order.channelOrderId}</strong>
+                            <div style={{ display: "flex", alignItems: "center", gap: "5px", flexWrap: "wrap" }}>
+                              <strong>#{order.channelOrderId}</strong>
+                              {order.isCartUpsell && (
+                                <span
+                                  title="Order contains Custom Shopify Cart Upsell item — routed for confirmation"
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    padding: "1px 5px",
+                                    borderRadius: "4px",
+                                    fontSize: "9px",
+                                    fontWeight: 700,
+                                    background: "rgba(139, 92, 246, 0.15)",
+                                    color: "#a78bfa",
+                                    border: "1px solid rgba(139, 92, 246, 0.35)",
+                                  }}
+                                >
+                                  Cart Upsell
+                                </span>
+                              )}
+                            </div>
                             <small style={{ color: "hsl(var(--muted-foreground))", display: "block", fontSize: "10.5px" }}>₹{Number(order.total || 0).toLocaleString("en-IN")}</small>
                           </div>
                           <div className="sheets-grid-cell sheets-col-phone" role="cell">
@@ -2504,7 +2555,27 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
                   return (
                     <div className={`confirmation-order ${mode === "confirmed" ? "confirmed-order" : mode === "rejected" ? "rejected-order" : ""}`} key={order.id}>
                       <div className="confirmation-order-main">
-                        <strong>#{order.channelOrderId}</strong>
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                          <strong>#{order.channelOrderId}</strong>
+                          {order.isCartUpsell && (
+                            <span
+                              title="Order contains Custom Shopify Cart Upsell item — routed for confirmation"
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                padding: "1px 6px",
+                                borderRadius: "4px",
+                                fontSize: "9.5px",
+                                fontWeight: 700,
+                                background: "rgba(139, 92, 246, 0.15)",
+                                color: "#a78bfa",
+                                border: "1px solid rgba(139, 92, 246, 0.35)",
+                              }}
+                            >
+                              Cart Upsell
+                            </span>
+                          )}
+                        </div>
                         <small>
                           {mode === "confirmed" ? `Confirmed ${when(order.confirmedAt)}` : mode === "rejected" ? `Rejected ${when(order.rejectedAt)}` : `${when(order.orderDate)} · ${order.paymentMethod || "Payment unknown"} · ₹${Number(order.total || 0).toLocaleString("en-IN")}`}
                         </small>
@@ -2836,6 +2907,13 @@ export default function ConfirmationPanel({ active, section = "confirmation", pr
               </div>
             </header>
             {orderAction === "reject" && <div className="manual-warning"><strong>Dashboard record only</strong><span>You must cancel this order manually in Shiprocket.</span></div>}
+            {(orderAction === "callback" || orderAction === "unreachable") && (
+              <div style={{ padding: "8px 10px", borderRadius: "8px", fontSize: "11.5px", background: "hsl(var(--muted) / 0.35)", border: "1px solid hsl(var(--border))", color: "hsl(var(--muted-foreground))" }}>
+                {data.settings?.persistentConfirmationQueue
+                  ? "Persistent Queue is active: this order will remain visible in the confirmation queue after logging this attempt."
+                  : `Cooldown Queue is active: this order will temporarily hide until the recall timer (${data.settings?.callbackDelayHours ?? 24}h default) expires.`}
+              </div>
+            )}
             {orderAction === "callback" && <label>Callback time<input required type="datetime-local" value={callbackAt} onChange={(event) => setCallbackAt(event.target.value)} /></label>}
             {orderAction === "reject" && (
               <label>

@@ -99,18 +99,160 @@ export async function syncShopifyCatalog(runtime: RuntimeEnv, actorEmail: string
   return { productCount, variantCount, completedAt };
 }
 
-type ContactOrder = {name: string; phone?: string; tags: string[]; shippingAddress?: {phone?: string}; billingAddress?: {phone?: string}};
+export type ContactOrder = {
+  name: string;
+  phone?: string;
+  tags: string[];
+  customAttributes?: Array<{ key: string; value?: string | null }>;
+  shippingAddress?: { phone?: string };
+  billingAddress?: { phone?: string };
+  lineItems?: {
+    nodes: Array<{
+      title?: string;
+      sku?: string;
+      customAttributes?: Array<{ key: string; value?: string | null }>;
+    }>;
+  };
+};
+
+export function detectShopifyCartUpsell(contact: ContactOrder, customTag = "cart_upsell"): boolean {
+  const norm = (val: unknown) => String(val ?? "").trim().toLowerCase().replaceAll("_", " ").replaceAll("-", " ");
+  const targetNorm = norm(customTag);
+
+  for (const t of contact.tags || []) {
+    const nt = norm(t);
+    if (nt === targetNorm || nt.includes("upsell") || nt === "cart upsell") return true;
+  }
+
+  for (const attr of contact.customAttributes || []) {
+    const k = norm(attr.key);
+    const v = norm(attr.value);
+    if ((k === targetNorm || k.includes("upsell")) && !["false", "0", "no", ""].includes(v)) {
+      return true;
+    }
+  }
+
+  for (const item of contact.lineItems?.nodes || []) {
+    for (const attr of item.customAttributes || []) {
+      const k = norm(attr.key);
+      const v = norm(attr.value);
+      if ((k === targetNorm || k.includes("upsell")) && !["false", "0", "no", ""].includes(v)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 /** Exact Shopify order-name match, with bounded batches; no customer-name matching. */
 export async function shopifyOrderContacts(runtime: RuntimeEnv, names: string[]) {
   const unique = [...new Set(names.map(name => name.replace(/^#/, "")))];
   const result = new Map<string, ContactOrder>();
   for (let start=0; start<unique.length; start+=20) {
     const query = unique.slice(start,start+20).map(name => `name:${JSON.stringify("#"+name)}`).join(" OR ");
-    const data = await shopifyGraphql<{orders:{nodes:ContactOrder[]}}>(runtime, `query Contacts($query:String!) { orders(first:100, query:$query) { nodes { name phone tags shippingAddress { phone } billingAddress { phone } } } }`, {query});
+    const data = await shopifyGraphql<{orders:{nodes:ContactOrder[]}}>(
+      runtime,
+      `query Contacts($query:String!) {
+        orders(first:100, query:$query) {
+          nodes {
+            name
+            phone
+            tags
+            customAttributes { key value }
+            shippingAddress { phone }
+            billingAddress { phone }
+            lineItems(first: 50) {
+              nodes {
+                title
+                sku
+                customAttributes { key value }
+              }
+            }
+          }
+        }
+      }`,
+      { query }
+    );
     for (const order of data.orders.nodes) {
       const name=order.name.replace(/^#/, "");
       if(unique.includes(name)) result.set(name,order);
     }
   }
   return result;
+}
+
+export async function enrichRecentShopifyOrderTags(runtime: RuntimeEnv, orderIds: number[]) {
+  if (!orderIds.length || !shopifyConfigured(runtime)) return 0;
+  const uniqueIds = [...new Set(orderIds.filter(Boolean))].slice(0, 60);
+  if (!uniqueIds.length) return 0;
+
+  const [rows, upsellTagRow] = await Promise.all([
+    runtime.DB.prepare(`
+      SELECT id, channel_order_id AS "channelOrderId", customer_phone AS "customerPhone", raw_json AS "rawJson"
+      FROM orders
+      WHERE id IN (${uniqueIds.map(() => "?").join(",")})
+        AND LOWER(channel_name) LIKE '%shopify%'
+        AND (raw_json::jsonb->'shopify_tags' IS NULL OR raw_json::jsonb->'shopify_attributes' IS NULL)
+    `).bind(...uniqueIds).all<{ id: number; channelOrderId: string; customerPhone: string; rawJson: string }>(),
+    runtime.DB.prepare("SELECT value FROM sync_state WHERE key = 'cart_upsell_tag'").first<{ value: string }>().catch(() => null),
+  ]);
+
+  if (!rows.results.length) return 0;
+  const customUpsellTag = String(upsellTagRow?.value || "cart_upsell").trim();
+  const contacts = await shopifyOrderContacts(runtime, rows.results.map((r) => r.channelOrderId));
+  const { completePhone } = await import("./contact");
+  const { isOrderHighRisk, routeConfirmationOrders } = await import("./confirmation");
+
+  const touchedIds: number[] = [];
+  const statements = rows.results.flatMap((row) => {
+    const contact = contacts.get(row.channelOrderId.replace(/^#/, ""));
+    if (!contact) return [];
+    const phone = completePhone(contact.shippingAddress?.phone, contact.phone, contact.billingAddress?.phone, row.customerPhone);
+    let raw: Record<string, unknown> = {};
+    try {
+      raw = JSON.parse(row.rawJson || "{}");
+    } catch {
+      raw = {};
+    }
+    const isCartUpsell = detectShopifyCartUpsell(contact, customUpsellTag);
+    const mergedTags = isCartUpsell && !contact.tags.includes(customUpsellTag)
+      ? [...contact.tags, customUpsellTag]
+      : contact.tags;
+    const attrs = contact.customAttributes || [];
+    const mergedRaw = {
+      ...raw,
+      shopify_tags: mergedTags,
+      shopify_attributes: attrs,
+      ...(isCartUpsell ? { cart_upsell: true } : {}),
+    };
+    const highRisk = isOrderHighRisk(mergedRaw, customUpsellTag);
+    touchedIds.push(row.id);
+    return [
+      runtime.DB.prepare(`
+        UPDATE orders
+        SET customer_phone = CASE WHEN ? <> '' THEN ? ELSE customer_phone END,
+            raw_json = (raw_json::jsonb || jsonb_build_object(
+              'shopify_tags', ?::jsonb,
+              'shopify_attributes', ?::jsonb,
+              'cart_upsell', ?::jsonb
+            ))::text,
+            is_high_risk = (is_high_risk OR ?)
+        WHERE id = ?
+      `).bind(
+        phone || "",
+        phone || "",
+        JSON.stringify(mergedTags),
+        JSON.stringify(attrs),
+        JSON.stringify(isCartUpsell),
+        highRisk,
+        row.id
+      ),
+    ];
+  });
+
+  if (statements.length) {
+    await runtime.DB.batch(statements);
+    await routeConfirmationOrders(runtime.DB, touchedIds).catch(() => null);
+  }
+  return statements.length;
 }

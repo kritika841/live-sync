@@ -424,8 +424,12 @@ export async function upsertOrders(db: PostgresDatabase, orders: ShiprocketOrder
         raw_json=(
           excluded.raw_json::jsonb ||
           CASE
-            WHEN NULLIF(orders.raw_json, '') IS NOT NULL AND orders.raw_json::jsonb->'shopify_tags' IS NOT NULL
-            THEN jsonb_build_object('shopify_tags', orders.raw_json::jsonb->'shopify_tags')
+            WHEN NULLIF(orders.raw_json, '') IS NOT NULL
+            THEN (
+              CASE WHEN orders.raw_json::jsonb->'shopify_tags' IS NOT NULL THEN jsonb_build_object('shopify_tags', orders.raw_json::jsonb->'shopify_tags') ELSE '{}'::jsonb END ||
+              CASE WHEN orders.raw_json::jsonb->'shopify_attributes' IS NOT NULL THEN jsonb_build_object('shopify_attributes', orders.raw_json::jsonb->'shopify_attributes') ELSE '{}'::jsonb END ||
+              CASE WHEN orders.raw_json::jsonb->'cart_upsell' IS NOT NULL THEN jsonb_build_object('cart_upsell', orders.raw_json::jsonb->'cart_upsell') ELSE '{}'::jsonb END
+            )
             ELSE '{}'::jsonb
           END
         )::text,
@@ -711,7 +715,25 @@ export async function syncRecentOrders(runtime: RuntimeEnv) {
       imported += res.count;
     }
 
-    // 3. Reconcile any newly imported or updated high-risk confirmation orders
+    // 3. Enrich recent Shopify orders with Shopify tags & cart attributes (e.g. cart_upsell), then reconcile
+    try {
+      const recentUnenriched = await db.prepare(`
+        SELECT id FROM orders
+        WHERE LOWER(channel_name) LIKE '%shopify%'
+          AND LOWER(payment_method) != 'prepaid'
+          AND (raw_json::jsonb->'shopify_tags' IS NULL OR raw_json::jsonb->'shopify_attributes' IS NULL)
+          AND COALESCE(NULLIF(order_date, ''), created_at)::timestamptz >= NOW() - INTERVAL '7 days'
+        ORDER BY id DESC LIMIT 40
+      `).all<{ id: number }>();
+      if (recentUnenriched.results.length > 0) {
+        const { enrichRecentShopifyOrderTags } = await import("./shopify");
+        await enrichRecentShopifyOrderTags(runtime, recentUnenriched.results.map((r) => Number(r.id))).catch(() => null);
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    // 4. Reconcile any newly imported or updated high-risk confirmation orders
     const { reconcileHighRiskConfirmationOrders } = await import("./confirmation");
     await reconcileHighRiskConfirmationOrders(db).catch(() => null);
 

@@ -18,6 +18,29 @@ export const HIGH_RISK_TAGS = [
   "rto_risk_high",
   "buyer risk high",
   "buyer_risk_high",
+  "cart_upsell",
+  "cart upsell",
+  "cart-upsell",
+  "upsell_cart",
+  "upsell cart",
+  "upsell-cart",
+  "upsell_order",
+  "upsell order",
+  "custom_cart_upsell",
+  "custom cart upsell",
+];
+
+export const CART_UPSELL_TAGS = [
+  "cart_upsell",
+  "cart upsell",
+  "cart-upsell",
+  "upsell_cart",
+  "upsell cart",
+  "upsell-cart",
+  "upsell_order",
+  "upsell order",
+  "custom_cart_upsell",
+  "custom cart upsell",
 ];
 
 export const HIGH_RISK_TAG_SQL = `(
@@ -26,20 +49,31 @@ export const HIGH_RISK_TAG_SQL = `(
   OR raw_json::jsonb->'shopify_tags' @> '"very-high"'::jsonb
   OR raw_json::jsonb->'shopify_tags' @> '"high_rto"'::jsonb
   OR raw_json::jsonb->'shopify_tags' @> '"high_risk"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"cart_upsell"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"cart-upsell"'::jsonb
+  OR raw_json::jsonb->'shopify_tags' @> '"upsell_cart"'::jsonb
   OR raw_json::jsonb->'order_tag' @> '"high"'::jsonb
   OR raw_json::jsonb->'order_tag' @> '"rto_prediction_high"'::jsonb
   OR raw_json::jsonb->'order_tag' @> '"very-high"'::jsonb
   OR raw_json::jsonb->'order_tag' @> '"high_rto"'::jsonb
   OR raw_json::jsonb->'order_tag' @> '"high_risk"'::jsonb
+  OR raw_json::jsonb->'order_tag' @> '"cart_upsell"'::jsonb
+  OR raw_json::jsonb->'order_tag' @> '"cart-upsell"'::jsonb
+  OR raw_json::jsonb->'order_tag' @> '"upsell_cart"'::jsonb
   OR raw_json::jsonb->'tags' @> '"high"'::jsonb
   OR raw_json::jsonb->'tags' @> '"rto_prediction_high"'::jsonb
   OR raw_json::jsonb->'tags' @> '"very-high"'::jsonb
   OR raw_json::jsonb->'tags' @> '"high_rto"'::jsonb
   OR raw_json::jsonb->'tags' @> '"high_risk"'::jsonb
-  OR (raw_json::jsonb->>'order_tag' IS NOT NULL AND LOWER(raw_json::jsonb->>'order_tag') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high)')
-  OR (raw_json::jsonb->>'sr_tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'sr_tags') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high)')
-  OR (raw_json::jsonb->>'tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'tags') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high)')
-  OR (raw_json::jsonb->>'shopify_tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'shopify_tags') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high)')
+  OR raw_json::jsonb->'tags' @> '"cart_upsell"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"cart-upsell"'::jsonb
+  OR raw_json::jsonb->'tags' @> '"upsell_cart"'::jsonb
+  OR (raw_json::jsonb->>'order_tag' IS NOT NULL AND LOWER(raw_json::jsonb->>'order_tag') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high|cart[-_ ]upsell|upsell[-_ ]cart|upsell[-_ ]order|custom[-_ ]cart[-_ ]upsell)')
+  OR (raw_json::jsonb->>'sr_tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'sr_tags') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high|cart[-_ ]upsell|upsell[-_ ]cart|upsell[-_ ]order|custom[-_ ]cart[-_ ]upsell)')
+  OR (raw_json::jsonb->>'tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'tags') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high|cart[-_ ]upsell|upsell[-_ ]cart|upsell[-_ ]order|custom[-_ ]cart[-_ ]upsell)')
+  OR (raw_json::jsonb->>'shopify_tags' IS NOT NULL AND LOWER(raw_json::jsonb->>'shopify_tags') ~* '(high|very[-_ ]high|rto[-_ ]prediction[-_ ]high|high[-_ ]rto|high[-_ ]risk|rto[-_ ]high|cart[-_ ]upsell|upsell[-_ ]cart|upsell[-_ ]order|custom[-_ ]cart[-_ ]upsell)')
+  OR LOWER(COALESCE(raw_json::jsonb->>'cart_upsell', '')) IN ('true', '1', 'yes')
+  OR (raw_json::jsonb->>'shopify_attributes' IS NOT NULL AND LOWER(raw_json::jsonb->>'shopify_attributes') ~* '("_?cart_upsell"|"_?upsell_item"|"_?has_upsell"|"cart_upsell")')
 )`;
 
 export const HIGH_RISK_SQL = `(
@@ -73,6 +107,38 @@ type RoutingOrder = {
 
 const normalized = (value: unknown) => String(value ?? "").trim().toLowerCase().replaceAll("_", " ").replaceAll("-", " ");
 
+export function isCartUpsellOrder(raw: Record<string, unknown> | null | undefined, customTag?: string): boolean {
+  if (!raw) return false;
+  if (["true", "1", "yes"].includes(String(raw.cart_upsell ?? "").trim().toLowerCase())) {
+    return true;
+  }
+  const tags = extractOrderTags(raw).map(normalized);
+  const customNormalized = customTag ? normalized(customTag) : "";
+  for (const tag of tags) {
+    if (CART_UPSELL_TAGS.includes(tag)) return true;
+    if (customNormalized && tag === customNormalized) return true;
+    if (tag.includes("upsell")) return true;
+  }
+  const attrs = Array.isArray(raw.shopify_attributes)
+    ? raw.shopify_attributes
+    : Array.isArray(raw.note_attributes)
+      ? raw.note_attributes
+      : [];
+  for (const attr of attrs) {
+    if (attr && typeof attr === "object") {
+      const k = normalized((attr as Record<string, unknown>).key ?? (attr as Record<string, unknown>).name);
+      const v = normalized((attr as Record<string, unknown>).value);
+      if (
+        (k.includes("upsell") || (customNormalized && k === customNormalized)) &&
+        !["false", "0", "no", ""].includes(v)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function extractOrderTags(raw: Record<string, unknown>) {
   const others = raw.others && typeof raw.others === "object" ? (raw.others as Record<string, unknown>) : {};
   const values = [
@@ -87,11 +153,15 @@ export function extractOrderTags(raw: Record<string, unknown>) {
     others.sr_tags,
   ].flatMap((value) => Array.isArray(value) ? value : String(value ?? "").split(","));
   const tags = values.map((value) => String(value ?? "").trim()).filter(Boolean);
+  if (["true", "1", "yes"].includes(String(raw.cart_upsell ?? "").trim().toLowerCase()) && !tags.some((t) => normalized(t).includes("upsell"))) {
+    tags.push("cart_upsell");
+  }
   return [...new Map(tags.map((tag) => [normalized(tag), tag])).values()];
 }
 
-export function isOrderHighRisk(raw: Record<string, unknown> | null | undefined): boolean {
+export function isOrderHighRisk(raw: Record<string, unknown> | null | undefined, customUpsellTag?: string): boolean {
   if (!raw) return false;
+  if (isCartUpsellOrder(raw, customUpsellTag)) return true;
   const others = raw.others && typeof raw.others === "object" ? (raw.others as Record<string, unknown>) : {};
   const riskFields = [
     raw.rto_risk,
@@ -149,11 +219,13 @@ function actionable(status: string) {
 export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: number[]) {
   const ids = [...new Set(orderIds.filter(Boolean))];
   if (!ids.length) return;
-  const [campaignResult, orderResult] = await Promise.all([
+  const [campaignResult, orderResult, upsellTagRow] = await Promise.all([
     db.prepare("SELECT id, criteria_json AS criteriaJson, position FROM campaigns WHERE is_active=TRUE AND auto_assign=TRUE ORDER BY position, created_at").all<{ id: string; criteriaJson: string; position: number }>(),
     db.prepare(`SELECT id, payment_method AS paymentMethod, products_json AS productsJson, raw_json AS rawJson, order_date AS orderDate, status,
       confirmation_status AS confirmationStatus FROM orders WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<RoutingOrder>(),
+    db.prepare("SELECT value FROM sync_state WHERE key = 'cart_upsell_tag'").first<{ value: string }>().catch(() => null),
   ]);
+  const customUpsellTag = String(upsellTagRow?.value || "cart_upsell").trim();
   const now = new Date().toISOString();
   const assignments: Array<{ campaignId: string; orderId: number; position: number; createdAt: string }> = [];
   const pendingOrderIds: number[] = [];
@@ -162,7 +234,7 @@ export async function routeConfirmationOrders(db: PostgresDatabase, orderIds: nu
 
   for (const order of orderResult.results) {
     const raw = JSON.parse(order.rawJson || "{}") as Record<string, unknown>;
-    const highRisk = isOrderHighRisk(raw);
+    const highRisk = isOrderHighRisk(raw, customUpsellTag);
     if (highRisk) {
       highRiskOrderIds.push(order.id);
     }

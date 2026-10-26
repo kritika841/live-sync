@@ -18,6 +18,8 @@ import {
   Table,
   CheckCircle2,
   Lock,
+  Clock,
+  ShoppingCart,
 } from "lucide-react";
 
 interface SettingsPanelProps {
@@ -38,6 +40,16 @@ const PRESET_OPTIONS = [
   { days: 90, label: "90 Days", desc: "Quarterly archive" },
 ];
 
+const CALLBACK_PRESETS = [
+  { hours: 1, label: "1 Hour", desc: "60 min retry" },
+  { hours: 2, label: "2 Hours", desc: "Short follow-up" },
+  { hours: 4, label: "4 Hours", desc: "Same-day shift" },
+  { hours: 6, label: "6 Hours", desc: "Half-day retry" },
+  { hours: 12, label: "12 Hours", desc: "Next shift" },
+  { hours: 24, label: "24 Hours", desc: "Next day (Default)" },
+  { hours: 48, label: "48 Hours", desc: "2 days retry" },
+];
+
 const TRIGGER_EVENTS = [
   { name: "Order Shipped", desc: "Carrier dispatch confirmation" },
   { name: "Out For Delivery", desc: "First and latest daily OFD runs" },
@@ -46,6 +58,18 @@ const TRIGGER_EVENTS = [
   { name: "Order Cancelled", desc: "Carrier or merchant cancellation" },
   { name: "AWB Assigned", desc: "Tracking barcode and courier binding" },
 ];
+
+function formatDurationLabel(hours: number): string {
+  if (hours < 1) {
+    return `${Math.round(hours * 60)} Mins`;
+  }
+  if (Number.isInteger(hours)) {
+    return `${hours} ${hours === 1 ? "Hour" : "Hours"}`;
+  }
+  const wholeHours = Math.floor(hours);
+  const mins = Math.round((hours - wholeHours) * 60);
+  return `${wholeHours}h ${mins}m`;
+}
 
 export default function SettingsPanel({
   active,
@@ -57,12 +81,19 @@ export default function SettingsPanel({
   onSaved,
 }: SettingsPanelProps) {
   const [days, setDays] = useState<number>(initialDays);
+  const [persistentConfirmationQueue, setPersistentConfirmationQueue] = useState<boolean>(false);
+  const [callbackDelayHours, setCallbackDelayHours] = useState<number>(24);
+  const [durationUnit, setDurationUnit] = useState<"hours" | "minutes">("hours");
+  const [cartUpsellTag, setCartUpsellTag] = useState<string>("cart_upsell");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedShopifyWebhook, setCopiedShopifyWebhook] = useState(false);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("");
+  const [shopifyWebhookUrl, setShopifyWebhookUrl] = useState("");
   const [layoutPref, setLayoutPref] = useState<"sheets" | "cards">(() => {
     if (typeof window !== "undefined") {
       return (localStorage.getItem("satmi_confirmation_view_layout") as "sheets" | "cards") || "sheets";
@@ -73,6 +104,7 @@ export default function SettingsPanel({
   useEffect(() => {
     if (typeof window !== "undefined") {
       setWebhookUrl(`${window.location.origin}/api/webhooks/orders`);
+      setShopifyWebhookUrl(`${window.location.origin}/api/webhooks/shopify`);
     }
   }, []);
 
@@ -86,6 +118,21 @@ export default function SettingsPanel({
           if (data.unshippedOrdersWindowDays) {
             setDays(Number(data.unshippedOrdersWindowDays));
           }
+          if (typeof data.persistentConfirmationQueue === "boolean") {
+            setPersistentConfirmationQueue(data.persistentConfirmationQueue);
+          }
+          if (data.callbackDelayHours) {
+            const hrs = Number(data.callbackDelayHours);
+            setCallbackDelayHours(hrs);
+            if (hrs < 1 || !Number.isInteger(hrs)) {
+              setDurationUnit("minutes");
+            } else {
+              setDurationUnit("hours");
+            }
+          }
+          if (data.cartUpsellTag) {
+            setCartUpsellTag(String(data.cartUpsellTag));
+          }
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -93,10 +140,21 @@ export default function SettingsPanel({
     return () => clearTimeout(timer);
   }, [active]);
 
-  async function handleSave() {
+  async function handleSave(overrides?: {
+    unshippedOrdersWindowDays?: number;
+    persistentConfirmationQueue?: boolean;
+    callbackDelayHours?: number;
+    cartUpsellTag?: string;
+  }) {
     setSaving(true);
     setSuccessMessage("");
     setErrorMessage("");
+    const payload = {
+      unshippedOrdersWindowDays: overrides?.unshippedOrdersWindowDays ?? days,
+      persistentConfirmationQueue: overrides?.persistentConfirmationQueue ?? persistentConfirmationQueue,
+      callbackDelayHours: overrides?.callbackDelayHours ?? callbackDelayHours,
+      cartUpsellTag: overrides?.cartUpsellTag ?? cartUpsellTag,
+    };
     try {
       const res = await fetch("/api/settings", {
         method: "POST",
@@ -104,14 +162,14 @@ export default function SettingsPanel({
           "content-type": "application/json",
           "x-requested-with": "satmi-orders-dashboard",
         },
-        body: JSON.stringify({ unshippedOrdersWindowDays: days }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || "Failed to update settings");
       }
-      setSuccessMessage(`Unshipped orders window successfully updated to ${days} days.`);
-      if (onSaved) onSaved(days);
+      setSuccessMessage("Dashboard & Confirmation settings saved successfully.");
+      if (onSaved) onSaved(payload.unshippedOrdersWindowDays);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Could not save settings");
     } finally {
@@ -124,6 +182,47 @@ export default function SettingsPanel({
     navigator.clipboard.writeText(webhookUrl).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function handleCopyShopifyWebhook() {
+    if (!shopifyWebhookUrl) return;
+    navigator.clipboard.writeText(shopifyWebhookUrl).then(() => {
+      setCopiedShopifyWebhook(true);
+      setTimeout(() => setCopiedShopifyWebhook(false), 2000);
+    });
+  }
+
+  const cartIntegrationSnippet = `// 1. In your custom Shopify Cart Drawer / Upsell App (Storefront Cart AJAX API):
+await fetch('/cart/update.js', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    attributes: {
+      '${cartUpsellTag || "cart_upsell"}': 'true',
+      '_cart_upsell': 'true'
+    }
+  })
+});
+
+// 2. Or when adding the upsell item to cart (/cart/add.js):
+await fetch('/cart/add.js', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    items: [{
+      id: UPSELL_VARIANT_ID,
+      quantity: 1,
+      properties: { '_upsell': 'true' }
+    }],
+    attributes: { '${cartUpsellTag || "cart_upsell"}': 'true' }
+  })
+});`;
+
+  function handleCopySnippet() {
+    navigator.clipboard.writeText(cartIntegrationSnippet).then(() => {
+      setCopiedSnippet(true);
+      setTimeout(() => setCopiedSnippet(false), 2000);
     });
   }
 
@@ -374,6 +473,22 @@ export default function SettingsPanel({
                     The order contains checkout risk tags: <code>rto_prediction_high</code>, <code>high</code>, <code>very-high</code>, <code>high_rto</code>, or <code>high_risk</code>.
                   </span>
                 </div>
+                <div className="flex items-center gap-2.5 rounded-xl border border-border bg-muted/20 p-3">
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-500 font-bold text-[10px]">
+                    3
+                  </span>
+                  <span className="text-foreground font-medium">
+                    The COD order originates from the custom Shopify Cart with an upsell product (tagged <code>{cartUpsellTag}</code>), even if RTO risk is Low.
+                  </span>
+                </div>
+              </div>
+              <div className="pt-2 border-t border-border/70 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <span>
+                  Queue Persistence: <strong className="text-foreground">{persistentConfirmationQueue ? "Persistent (Always Visible)" : "Cooldown Hidden"}</strong>
+                </span>
+                <span>
+                  Recall Cooldown: <strong className="text-foreground">{formatDurationLabel(callbackDelayHours)}</strong>
+                </span>
               </div>
             </div>
           </section>
@@ -394,7 +509,7 @@ export default function SettingsPanel({
             Dashboard &amp; Integration Settings
           </h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Configure order lookback cutoffs, real-time carrier webhooks, and automation rules
+            Configure order lookback cutoffs, confirmation queue persistence, callback timers, and Shopify cart upsell routing
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -422,7 +537,277 @@ export default function SettingsPanel({
 
       {/* Grid of Structured Cards */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* CARD 1: Unshipped Orders Lookback Window */}
+        {/* CARD 1: Confirmation Queue & Callback Controls (NEW) */}
+        <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden transition-all duration-150">
+          <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-500">
+                <PhoneCall size={18} />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold tracking-tight text-foreground">
+                  Confirmation Queue &amp; Callback Controls
+                </h2>
+                <p className="text-xs text-muted-foreground">Manage agent queue persistence and recall cooldown timeframe</p>
+              </div>
+            </div>
+            <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-500">
+              {persistentConfirmationQueue ? "Persistent Queue" : `${formatDurationLabel(callbackDelayHours)} Cooldown`}
+            </span>
+          </header>
+
+          <div className="p-6 space-y-6">
+            {/* Persistent Queue Toggle */}
+            <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-3">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <label htmlFor="persistent-queue-toggle" className="text-xs font-bold text-foreground cursor-pointer block">
+                    Persistent Confirmation Queue (Keep Orders Visible After Call Attempt)
+                  </label>
+                  <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    When enabled, logging a <strong>No Answer</strong> or <strong>Callback</strong> query will <strong>not</strong> hide the order from the customer support agent&apos;s dashboard. Orders stay visible in the queue until confirmed, rejected, or 3 attempts are completed.
+                  </p>
+                </div>
+                <button
+                  id="persistent-queue-toggle"
+                  type="button"
+                  role="switch"
+                  aria-checked={persistentConfirmationQueue}
+                  disabled={saving || loading}
+                  onClick={() => {
+                    const nextVal = !persistentConfirmationQueue;
+                    setPersistentConfirmationQueue(nextVal);
+                    void handleSave({ persistentConfirmationQueue: nextVal });
+                  }}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    persistentConfirmationQueue ? "bg-emerald-500" : "bg-muted-foreground/30"
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                      persistentConfirmationQueue ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+              <div className="flex items-center gap-2 pt-1 text-[11px]">
+                <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 font-bold ${
+                  persistentConfirmationQueue
+                    ? "bg-emerald-500/15 text-emerald-500"
+                    : "bg-amber-500/15 text-amber-500"
+                }`}>
+                  {persistentConfirmationQueue
+                    ? "✓ Persistent Mode ON: Unanswered & callback orders remain on agent screen"
+                    : `⏱ Cooldown Mode ON: Orders hide for ${formatDurationLabel(callbackDelayHours)} before re-appearing`}
+                </span>
+              </div>
+            </div>
+
+            {/* Callback / Recall Timeframe Selector */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="block text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Callback &amp; Unreachable Cooldown Timeframe
+                </span>
+                <span className="text-xs font-bold text-primary flex items-center gap-1">
+                  <Clock size={13} /> {formatDurationLabel(callbackDelayHours)}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {CALLBACK_PRESETS.map((preset) => {
+                  const isSelected = Math.abs(callbackDelayHours - preset.hours) < 0.001;
+                  return (
+                    <button
+                      key={preset.hours}
+                      type="button"
+                      onClick={() => {
+                        setCallbackDelayHours(preset.hours);
+                        setDurationUnit("hours");
+                      }}
+                      className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                        isSelected
+                          ? "border-primary bg-primary/10 text-primary shadow-xs ring-1 ring-primary/30"
+                          : "border-border bg-card text-foreground hover:border-border/80 hover:bg-muted/40"
+                      }`}
+                    >
+                      <span className="text-xs font-bold">{preset.label}</span>
+                      <span className="text-[10px] text-muted-foreground mt-0.5">{preset.desc}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="pt-1 space-y-2">
+                <label htmlFor="custom-callback-duration" className="block text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Or Enter Any Custom Timeframe
+                </label>
+                <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5">
+                  <div className="flex flex-1 items-center gap-2">
+                    <input
+                      id="custom-callback-duration"
+                      type="number"
+                      min="1"
+                      max={durationUnit === "minutes" ? "43200" : "720"}
+                      step="1"
+                      value={
+                        durationUnit === "minutes"
+                          ? Math.max(1, Math.round(callbackDelayHours * 60))
+                          : Math.max(1, Math.round(callbackDelayHours * 100) / 100)
+                      }
+                      onChange={(e) => {
+                        const rawVal = Math.max(1, parseFloat(e.target.value) || 1);
+                        if (durationUnit === "minutes") {
+                          setCallbackDelayHours(Math.min(720, rawVal / 60));
+                        } else {
+                          setCallbackDelayHours(Math.min(720, rawVal));
+                        }
+                      }}
+                      className="h-11 w-full rounded-xl border border-input bg-card px-3.5 text-sm font-semibold text-foreground outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/20"
+                    />
+                    <select
+                      aria-label="Duration unit"
+                      value={durationUnit}
+                      onChange={(e) => setDurationUnit(e.target.value as "hours" | "minutes")}
+                      className="h-11 rounded-xl border border-input bg-card px-3 text-xs font-bold text-foreground outline-none transition focus:border-ring"
+                    >
+                      <option value="hours">Hours</option>
+                      <option value="minutes">Minutes</option>
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleSave()}
+                    disabled={saving || loading}
+                    className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-xs font-bold text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <RefreshCw size={15} className="animate-spin" />
+                        <span>Saving…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save size={15} />
+                        <span>Save Settings</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* CARD 2: Custom Shopify Cart & Upsell Confirmation Routing (NEW) */}
+        <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden transition-all duration-150">
+          <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
+                <ShoppingCart size={18} />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold tracking-tight text-foreground">
+                  Shopify Custom Cart &amp; Upsell Routing
+                </h2>
+                <p className="text-xs text-muted-foreground">Force COD confirmation for custom cart upsell orders (including Low RTO)</p>
+              </div>
+            </div>
+            <span className="rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-bold text-indigo-500">
+              Active Rule
+            </span>
+          </header>
+
+          <div className="p-6 space-y-5 text-xs">
+            <p className="text-muted-foreground leading-relaxed">
+              COD orders placed via your custom Shopify Cart that include an upsell item are <strong>automatically routed to the Confirmation Queue first</strong>—even if Shiprocket predicts them as Low RTO risk.
+            </p>
+
+            {/* Configurable Tag / Attribute Identifier */}
+            <div className="space-y-2">
+              <label htmlFor="cart-upsell-tag-input" className="block text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                Order Tag / Cart Attribute Key
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="cart-upsell-tag-input"
+                  type="text"
+                  value={cartUpsellTag}
+                  onChange={(e) => setCartUpsellTag(e.target.value)}
+                  placeholder="cart_upsell"
+                  className="h-11 flex-1 rounded-xl border border-input bg-card px-3.5 font-mono text-xs font-semibold text-foreground outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/20"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSave()}
+                  disabled={saving || loading}
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-xs font-bold text-primary-foreground shadow-sm transition hover:opacity-90 disabled:opacity-50"
+                >
+                  <Save size={14} />
+                  <span>Save Tag</span>
+                </button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Matches Shopify order tag <code>{cartUpsellTag || "cart_upsell"}</code>, cart note attribute <code>{cartUpsellTag || "cart_upsell"}=true</code>, or line-item property <code>_upsell=true</code>.
+              </p>
+            </div>
+
+            {/* Direct Shopify Webhook Endpoint */}
+            <div>
+              <label htmlFor="shopify-webhook-url-input" className="block text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1.5">
+                Shopify Order Webhook URL (Optional Instant Sync)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="shopify-webhook-url-input"
+                  type="text"
+                  readOnly
+                  value={shopifyWebhookUrl || "https://satmi.in/api/webhooks/shopify"}
+                  className="h-10 flex-1 rounded-xl border border-input bg-muted/40 px-3 font-mono text-[11px] text-foreground outline-none select-all"
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyShopifyWebhook}
+                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-border bg-card px-3.5 text-xs font-semibold text-foreground transition hover:bg-muted"
+                >
+                  {copiedShopifyWebhook ? (
+                    <>
+                      <Check size={14} className="text-emerald-500" />
+                      <span className="text-emerald-500 font-bold">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={14} className="text-muted-foreground" />
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Code snippet for Custom Cart App */}
+            <div className="rounded-xl border border-border bg-muted/30 p-3.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-foreground text-[11px]">
+                  How to connect your Custom Shopify Cart App:
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopySnippet}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[10px] font-semibold text-foreground hover:bg-muted"
+                >
+                  {copiedSnippet ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                  <span>{copiedSnippet ? "Copied Snippet" : "Copy JS"}</span>
+                </button>
+              </div>
+              <pre className="overflow-x-auto rounded-lg bg-background/80 p-2.5 font-mono text-[10.5px] leading-relaxed text-foreground border border-border/60">
+                {cartIntegrationSnippet}
+              </pre>
+            </div>
+          </div>
+        </section>
+
+        {/* CARD 3: Unshipped Orders Lookback Window */}
         <section className="rounded-2xl border border-border/80 bg-card shadow-xs overflow-hidden transition-all duration-150">
           <header className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3 min-w-0">
@@ -491,7 +876,7 @@ export default function SettingsPanel({
                 </div>
                 <button
                   type="button"
-                  onClick={handleSave}
+                  onClick={() => void handleSave()}
                   disabled={saving || loading}
                   className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-xs font-bold text-primary-foreground shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -687,9 +1072,17 @@ export default function SettingsPanel({
                   The order contains checkout risk tags: <code>rto_prediction_high</code>, <code>high</code>, <code>very-high</code>, <code>high_rto</code>, or <code>high_risk</code>.
                 </span>
               </div>
+              <div className="flex items-center gap-2.5 rounded-xl border border-violet-500/20 bg-violet-500/5 p-3">
+                <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-violet-500/20 text-violet-400 font-bold text-[10px]">
+                  3
+                </span>
+                <span className="text-foreground font-medium">
+                  The COD order originates from the custom Shopify Cart containing an upsell item (<code>{cartUpsellTag || "cart_upsell"}</code> tag or <code>_cart_upsell=true</code> cart attribute), even if Low RTO risk.
+                </span>
+              </div>
             </div>
             <p className="text-[11px] text-muted-foreground italic">
-              Administrators have override permissions to bypass 24h compliance delays if necessary.
+              Administrators can configure persistent queue visibility and custom callback cooldown delays above.
             </p>
           </div>
         </section>

@@ -64,7 +64,7 @@ async function loadOrders(request: Request) {
   if (deliveredDate && tab === "delivered") { filters.push("SUBSTR(delivered_at, 1, 10) = ?"); filterValues.push(deliveredDate); }
 
 const DEFAULT_ORDER_TAGS = [
-  "Abandoned Orders", "Agent", "B2G1", "bankOffer", "BOGO", "Cards", "COD",
+  "Abandoned Orders", "Agent", "B2G1", "bankOffer", "BOGO", "Cards", "cart_upsell", "COD",
   "Duplicate", "easysell_cod_form", "fastrr", "GoKwik", "Gokwik_cod_fees",
   "Gokwik_cod_prompt", "Gokwik_ppcod_upi", "high", "Influencer", "Landing KARUNGALI",
   "Landing: ALL-PRODUCTS", "Landing: BUY-2-KARUNGALI", "Landing: INCENSE-STICKS",
